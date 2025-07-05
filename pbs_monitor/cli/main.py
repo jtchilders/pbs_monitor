@@ -57,6 +57,12 @@ Examples:
       default=None
    )
    
+   parser.add_argument(
+      "--use-sample-data",
+      action="store_true",
+      help="Use sample JSON data instead of actual PBS commands (for testing)"
+   )
+   
    # Create subparsers
    subparsers = parser.add_subparsers(
       dest="command",
@@ -236,10 +242,10 @@ def main(argv: Optional[List[str]] = None) -> int:
    
    # Initialize data collector
    try:
-      collector = DataCollector(config)
+      collector = DataCollector(config, use_sample_data=args.use_sample_data)
       
-      # Test PBS connection
-      if not collector.test_connection():
+      # Test PBS connection (skip if using sample data)
+      if not args.use_sample_data and not collector.test_connection():
          print("Error: Unable to connect to PBS system", file=sys.stderr)
          print("Please ensure PBS commands are available in PATH", file=sys.stderr)
          return 1

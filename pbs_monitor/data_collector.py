@@ -19,15 +19,19 @@ from .utils.logging_setup import create_pbs_logger
 class DataCollector:
    """Collects and manages PBS system data"""
    
-   def __init__(self, config: Optional[Config] = None):
+   def __init__(self, config: Optional[Config] = None, use_sample_data: bool = False):
       """
       Initialize data collector
       
       Args:
          config: Configuration object (optional)
+         use_sample_data: Use sample JSON data instead of actual PBS commands
       """
       self.config = config or Config()
-      self.pbs_commands = PBSCommands(timeout=self.config.pbs.command_timeout)
+      self.pbs_commands = PBSCommands(
+         timeout=self.config.pbs.command_timeout,
+         use_sample_data=use_sample_data
+      )
       self.logger = create_pbs_logger(__name__)
       
       # Cached data
