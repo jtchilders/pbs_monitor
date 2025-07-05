@@ -1,0 +1,285 @@
+"""
+Main CLI entry point for PBS Monitor
+"""
+
+import argparse
+import sys
+import os
+import logging
+from typing import List, Optional
+
+from ..config import Config
+from ..utils.logging_setup import setup_logging
+from ..data_collector import DataCollector
+from .commands import StatusCommand, JobsCommand, NodesCommand, QueuesCommand
+
+
+def create_parser() -> argparse.ArgumentParser:
+   """Create argument parser for PBS Monitor CLI"""
+   
+   parser = argparse.ArgumentParser(
+      prog="pbs-monitor",
+      description="PBS scheduler monitoring and management tools",
+      formatter_class=argparse.RawDescriptionHelpFormatter,
+      epilog="""
+Examples:
+  pbs-monitor status              # Show system status
+  pbs-monitor jobs                # Show all jobs
+  pbs-monitor jobs -u myuser      # Show jobs for specific user
+  pbs-monitor nodes               # Show node information
+  pbs-monitor queues              # Show queue information
+  pbs-monitor config --create     # Create sample configuration
+      """
+   )
+   
+   # Global options
+   parser.add_argument(
+      "-c", "--config",
+      help="Configuration file path",
+      default=None
+   )
+   
+   parser.add_argument(
+      "-v", "--verbose",
+      action="store_true",
+      help="Enable verbose logging"
+   )
+   
+   parser.add_argument(
+      "-q", "--quiet",
+      action="store_true",
+      help="Suppress normal output"
+   )
+   
+   parser.add_argument(
+      "--log-file",
+      help="Log file path",
+      default=None
+   )
+   
+   # Create subparsers
+   subparsers = parser.add_subparsers(
+      dest="command",
+      help="Available commands"
+   )
+   
+   # Status command
+   status_parser = subparsers.add_parser(
+      "status",
+      help="Show PBS system status"
+   )
+   status_parser.add_argument(
+      "-r", "--refresh",
+      action="store_true",
+      help="Force refresh of data"
+   )
+   
+   # Jobs command
+   jobs_parser = subparsers.add_parser(
+      "jobs",
+      help="Show job information"
+   )
+   jobs_parser.add_argument(
+      "-u", "--user",
+      help="Filter by username"
+   )
+   jobs_parser.add_argument(
+      "-s", "--state",
+      choices=["R", "Q", "H", "W", "T", "E", "S", "C", "F"],
+      help="Filter by job state"
+   )
+   jobs_parser.add_argument(
+      "-r", "--refresh",
+      action="store_true",
+      help="Force refresh of data"
+   )
+   jobs_parser.add_argument(
+      "--columns",
+      help="Comma-separated list of columns to display"
+   )
+   
+   # Nodes command
+   nodes_parser = subparsers.add_parser(
+      "nodes",
+      help="Show node information"
+   )
+   nodes_parser.add_argument(
+      "-s", "--state",
+      choices=["free", "offline", "down", "busy", "job-exclusive", "job-sharing"],
+      help="Filter by node state"
+   )
+   nodes_parser.add_argument(
+      "-r", "--refresh",
+      action="store_true",
+      help="Force refresh of data"
+   )
+   nodes_parser.add_argument(
+      "--columns",
+      help="Comma-separated list of columns to display"
+   )
+   
+   # Queues command
+   queues_parser = subparsers.add_parser(
+      "queues",
+      help="Show queue information"
+   )
+   queues_parser.add_argument(
+      "-r", "--refresh",
+      action="store_true",
+      help="Force refresh of data"
+   )
+   queues_parser.add_argument(
+      "--columns",
+      help="Comma-separated list of columns to display"
+   )
+   
+   # Config command
+   config_parser = subparsers.add_parser(
+      "config",
+      help="Configuration management"
+   )
+   config_parser.add_argument(
+      "--create",
+      action="store_true",
+      help="Create sample configuration file"
+   )
+   config_parser.add_argument(
+      "--show",
+      action="store_true",
+      help="Show current configuration"
+   )
+   
+   return parser
+
+
+def setup_logging_from_args(args: argparse.Namespace, config: Config) -> None:
+   """Setup logging based on command line arguments and configuration"""
+   
+   # Determine log level
+   if args.verbose:
+      level = logging.DEBUG
+   elif args.quiet:
+      level = logging.ERROR
+   else:
+      level = config.get_log_level()
+   
+   # Determine log file
+   log_file = args.log_file or config.logging.log_file
+   
+   # Setup logging
+   setup_logging(
+      level=level,
+      log_file=log_file,
+      log_format=config.logging.log_format,
+      date_format=config.logging.date_format,
+      console_output=not args.quiet
+   )
+
+
+def handle_config_command(args: argparse.Namespace, config: Config) -> int:
+   """Handle configuration management commands"""
+   
+   if args.create:
+      config.create_sample_config()
+      print(f"Sample configuration created at {config.config_file}")
+      return 0
+   
+   if args.show:
+      print(f"Configuration file: {config.config_file}")
+      print(f"PBS command timeout: {config.pbs.command_timeout}s")
+      print(f"Job refresh interval: {config.pbs.job_refresh_interval}s")
+      print(f"Node refresh interval: {config.pbs.node_refresh_interval}s")
+      print(f"Queue refresh interval: {config.pbs.queue_refresh_interval}s")
+      print(f"Log level: {config.logging.level}")
+      print(f"Use colors: {config.display.use_colors}")
+      print(f"Max table width: {config.display.max_table_width}")
+      return 0
+   
+   print("Use --create to create sample configuration or --show to display current settings")
+   return 1
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+   """
+   Main entry point for PBS Monitor CLI
+   
+   Args:
+      argv: Command line arguments (optional, for testing)
+      
+   Returns:
+      Exit code
+   """
+   
+   # Parse arguments
+   parser = create_parser()
+   args = parser.parse_args(argv)
+   
+   # Load configuration
+   try:
+      config = Config(config_file=args.config)
+   except Exception as e:
+      print(f"Error loading configuration: {str(e)}", file=sys.stderr)
+      return 1
+   
+   # Setup logging
+   setup_logging_from_args(args, config)
+   logger = logging.getLogger(__name__)
+   
+   # Handle no command
+   if not args.command:
+      parser.print_help()
+      return 1
+   
+   # Handle config command
+   if args.command == "config":
+      return handle_config_command(args, config)
+   
+   # Initialize data collector
+   try:
+      collector = DataCollector(config)
+      
+      # Test PBS connection
+      if not collector.test_connection():
+         print("Error: Unable to connect to PBS system", file=sys.stderr)
+         print("Please ensure PBS commands are available in PATH", file=sys.stderr)
+         return 1
+      
+   except Exception as e:
+      logger.error(f"Failed to initialize data collector: {str(e)}")
+      print(f"Error: {str(e)}", file=sys.stderr)
+      return 1
+   
+   # Execute command
+   try:
+      if args.command == "status":
+         cmd = StatusCommand(collector, config)
+         return cmd.execute(args)
+      
+      elif args.command == "jobs":
+         cmd = JobsCommand(collector, config)
+         return cmd.execute(args)
+      
+      elif args.command == "nodes":
+         cmd = NodesCommand(collector, config)
+         return cmd.execute(args)
+      
+      elif args.command == "queues":
+         cmd = QueuesCommand(collector, config)
+         return cmd.execute(args)
+      
+      else:
+         print(f"Unknown command: {args.command}", file=sys.stderr)
+         return 1
+   
+   except KeyboardInterrupt:
+      print("\nInterrupted by user", file=sys.stderr)
+      return 130
+   
+   except Exception as e:
+      logger.error(f"Command execution failed: {str(e)}")
+      print(f"Error: {str(e)}", file=sys.stderr)
+      return 1
+
+
+if __name__ == "__main__":
+   sys.exit(main()) 
