@@ -47,11 +47,14 @@ class PBSJob:
    execution_node: Optional[str] = None
    exit_status: Optional[int] = None
    
+   # Job score (calculated using server formula)
+   score: Optional[float] = None
+   
    # Raw PBS attributes
    raw_attributes: Dict[str, Any] = field(default_factory=dict)
    
    @classmethod
-   def from_qstat_json(cls, job_data: Dict[str, Any]) -> 'PBSJob':
+   def from_qstat_json(cls, job_data: Dict[str, Any], score: Optional[float] = None) -> 'PBSJob':
       """Create PBSJob from qstat JSON output"""
       job_id = job_data.get('Job_Id', '')
       job_name = job_data.get('Job_Name', '')
@@ -68,7 +71,15 @@ class PBSJob:
       
       # Parse resource requirements
       resources = job_data.get('Resource_List', {})
-      nodes = int(resources.get('nodes', '1'))
+      
+      # Handle nodes - can be a number or a node name
+      nodes_str = resources.get('nodes', '1')
+      try:
+         nodes = int(nodes_str)
+      except (ValueError, TypeError):
+         # If it's not a number (e.g., node name), default to 1
+         nodes = 1
+      
       ppn = int(resources.get('ppn', '1'))
       walltime = resources.get('walltime')
       memory = resources.get('mem')
@@ -99,6 +110,7 @@ class PBSJob:
          priority=priority,
          execution_node=execution_node,
          exit_status=exit_status,
+         score=score,
          raw_attributes=job_data
       )
    
@@ -136,6 +148,12 @@ class PBSJob:
       seconds = total_seconds % 60
       
       return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+   
+   def format_score(self) -> str:
+      """Format the job score for display"""
+      if self.score is None:
+         return "N/A"
+      return f"{self.score:.2f}"
    
    def __str__(self) -> str:
       return f"Job {self.job_id}: {self.job_name} ({self.state.value}) - {self.owner}" 

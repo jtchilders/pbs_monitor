@@ -55,8 +55,18 @@ class PBSNode:
          state = NodeState.UNKNOWN
       
       # Parse hardware specifications
-      ncpus = cls._parse_int(node_data.get('ncpus', '0'), default=0)
-      memory = node_data.get('memory')
+      # Try pcpus first (physical CPUs), then resources_available.ncpus, then ncpus
+      ncpus = cls._parse_int(node_data.get('pcpus'), default=0)
+      if ncpus == 0:
+         resources_available = node_data.get('resources_available', {})
+         ncpus = cls._parse_int(resources_available.get('ncpus'), default=0)
+      if ncpus == 0:
+         ncpus = cls._parse_int(node_data.get('ncpus'), default=0)
+      
+      # Parse memory - try resources_available.mem first, then memory
+      memory = None
+      resources_available = node_data.get('resources_available', {})
+      memory = resources_available.get('mem') or node_data.get('memory')
       
       # Parse current jobs
       jobs = []

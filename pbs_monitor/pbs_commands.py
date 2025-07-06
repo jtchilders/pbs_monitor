@@ -215,13 +215,29 @@ class PBSCommands:
          except Exception as e:
             raise PBSCommandError(f"Failed to get job information: {str(e)}")
       
+      # Get server defaults once for score calculation
+      server_defaults = None
+      try:
+         server_data = self.qstat_server()
+         server_info = server_data.get("Server", {})
+         for server_name, server_details in server_info.items():
+            server_defaults = server_details.get("resources_default", {})
+            break
+      except Exception as e:
+         self.logger.warning(f"Failed to get server defaults for score calculation: {str(e)}")
+      
       jobs = []
       jobs_data = data.get("Jobs", {})
       
       for job_id, job_info in jobs_data.items():
          job_info["Job_Id"] = job_id  # Ensure job ID is in the data
          try:
-            job = PBSJob.from_qstat_json(job_info)
+            # Calculate job score
+            score = None
+            if server_defaults:
+               score = self.calculate_job_score(job_info, server_defaults)
+            
+            job = PBSJob.from_qstat_json(job_info, score=score)
             # Apply user filter if specified and using sample data
             if user and self.use_sample_data and job.owner != user:
                continue
@@ -417,6 +433,181 @@ class PBSCommands:
       except Exception as e:
          raise PBSCommandError(f"Failed to release job {job_id}: {str(e)}")
    
+   def qstat_server(self) -> Dict[str, Any]:
+      """
+      Get server information using qstat -B -f -F json
+      
+      Returns:
+         Dictionary containing server information including job_sort_formula
+      """
+      if self.use_sample_data:
+         try:
+            data = self._load_sample_data("qstat_B_f_F_json-output.json")
+         except PBSCommandError:
+            self.logger.warning("Failed to load sample server data, returning empty dict")
+            return {}
+      else:
+         command = ["qstat", "-B", "-f", "-F", "json"]
+         
+         try:
+            output = self._run_command(command)
+            data = self._parse_json_output(output, "qstat server")
+            
+         except PBSCommandError:
+            raise
+         except Exception as e:
+            raise PBSCommandError(f"Failed to get server information: {str(e)}")
+      
+      return data
+   
+   def get_job_sort_formula(self) -> Optional[str]:
+      """
+      Get the job sort formula from the PBS server
+      
+      Returns:
+         Job sort formula string or None if not available
+      """
+      try:
+         server_data = self.qstat_server()
+         
+         # Navigate to the server information in the JSON structure
+         server_info = server_data.get("Server", {})
+         
+         # Get the first server entry (there should be only one)
+         for server_name, server_details in server_info.items():
+            formula = server_details.get("job_sort_formula")
+            if formula:
+               return formula
+         
+         return None
+         
+      except Exception as e:
+         self.logger.error(f"Failed to get job sort formula: {str(e)}")
+         return None
+   
+   def calculate_job_score(self, job_data: Dict[str, Any], server_defaults: Optional[Dict[str, Any]] = None) -> Optional[float]:
+      """
+      Calculate job score using the server's job sort formula
+      
+      Args:
+         job_data: Job data dictionary from qstat JSON
+         server_defaults: Server resource defaults (optional, will fetch if not provided)
+         
+      Returns:
+         Calculated job score or None if calculation fails
+      """
+      try:
+         # Get the job sort formula
+         formula = self.get_job_sort_formula()
+         if not formula:
+            self.logger.warning("No job sort formula available")
+            return None
+         
+         # Get server defaults if not provided
+         if server_defaults is None:
+            server_data = self.qstat_server()
+            server_info = server_data.get("Server", {})
+            for server_name, server_details in server_info.items():
+               server_defaults = server_details.get("resources_default", {})
+               break
+         
+         if not server_defaults:
+            self.logger.warning("No server defaults available")
+            return None
+         
+         # Extract parameters from job data
+         resource_list = job_data.get("Resource_List", {})
+         
+         # Build the variables dictionary for the formula
+         variables = {
+            # From job data
+            "base_score": int(resource_list.get("base_score", server_defaults.get("base_score", 0))),
+            "score_boost": int(resource_list.get("score_boost", server_defaults.get("score_boost", 0))),
+            "enable_wfp": int(resource_list.get("enable_wfp", server_defaults.get("enable_wfp", 0))),
+            "wfp_factor": int(resource_list.get("wfp_factor", server_defaults.get("wfp_factor", 100000))),
+            "enable_backfill": int(resource_list.get("enable_backfill", server_defaults.get("enable_backfill", 0))),
+            "backfill_max": int(resource_list.get("backfill_max", server_defaults.get("backfill_max", 50))),
+            "backfill_factor": int(resource_list.get("backfill_factor", server_defaults.get("backfill_factor", 84600))),
+            "enable_fifo": int(resource_list.get("enable_fifo", server_defaults.get("enable_fifo", 1))),
+            "fifo_factor": int(resource_list.get("fifo_factor", server_defaults.get("fifo_factor", 1800))),
+            "project_priority": int(resource_list.get("project_priority", 1)),
+            "nodect": int(resource_list.get("nodect", 1)),
+            "total_cpus": int(resource_list.get("total_cpus", server_defaults.get("total_cpus", 1))),
+            "walltime": self._parse_walltime_to_seconds(resource_list.get("walltime", "01:00:00")),
+         }
+         
+         # Calculate eligible_time (time since job was queued)
+         eligible_time_str = job_data.get("eligible_time", "00:00:00")
+         variables["eligible_time"] = self._parse_eligible_time_to_seconds(eligible_time_str)
+         
+         # Add math functions for the formula
+         variables["min"] = min
+         variables["max"] = max
+         
+         # Evaluate the formula
+         try:
+            score = eval(formula, {"__builtins__": {}}, variables)
+            return float(score)
+         except Exception as e:
+            self.logger.error(f"Error evaluating job sort formula: {str(e)}")
+            self.logger.error(f"Formula: {formula}")
+            self.logger.error(f"Variables: {variables}")
+            return None
+         
+      except Exception as e:
+         self.logger.error(f"Failed to calculate job score: {str(e)}")
+         return None
+   
+   def _parse_walltime_to_seconds(self, walltime_str: str) -> float:
+      """
+      Parse walltime string to seconds
+      
+      Args:
+         walltime_str: Walltime in format HH:MM:SS or DD:HH:MM:SS
+         
+      Returns:
+         Walltime in seconds
+      """
+      try:
+         parts = walltime_str.split(':')
+         if len(parts) == 3:
+            # HH:MM:SS format
+            hours, minutes, seconds = map(int, parts)
+            return hours * 3600 + minutes * 60 + seconds
+         elif len(parts) == 4:
+            # DD:HH:MM:SS format
+            days, hours, minutes, seconds = map(int, parts)
+            return days * 86400 + hours * 3600 + minutes * 60 + seconds
+         else:
+            return 3600  # Default to 1 hour
+      except (ValueError, TypeError):
+         return 3600  # Default to 1 hour
+   
+   def _parse_eligible_time_to_seconds(self, eligible_time_str: str) -> float:
+      """
+      Parse eligible time string to seconds
+      
+      Args:
+         eligible_time_str: Eligible time in format HH:MM:SS or DDDD:HH:MM
+         
+      Returns:
+         Eligible time in seconds
+      """
+      try:
+         parts = eligible_time_str.split(':')
+         if len(parts) == 3:
+            # HH:MM:SS format
+            hours, minutes, seconds = map(int, parts)
+            return hours * 3600 + minutes * 60 + seconds
+         elif len(parts) == 2:
+            # DDDD:HH:MM format
+            hours, minutes = map(int, parts)
+            return hours * 3600 + minutes * 60
+         else:
+            return 0  # Default to 0
+      except (ValueError, TypeError):
+         return 0  # Default to 0
+
    def test_connection(self) -> bool:
       """
       Test if PBS commands are available

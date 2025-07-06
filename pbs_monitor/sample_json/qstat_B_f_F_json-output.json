@@ -1,0 +1,80 @@
+{
+   "timestamp": 1751737675,
+   "pbs_version": "2022.1.7.20241004133957",
+   "pbs_server": "aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov",
+   "Server": {
+      "aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov": {
+         "server_state": "Scheduling",
+         "server_host": "aurora-pbs-0001.hostmgmt6100.cm.aurora.alcf.anl.gov",
+         "scheduling": "True",
+         "total_jobs": 11247,
+         "state_count": "Transit:0 Queued:150 Held:44 Waiting:0 Running:72 Exiting:0 Begun:0 ",
+         "managers": "aliu@*,allcock@*,ascovel@*,bsallen@*,cblackworth@*,cweb_app@*,eholohan@*,gmcpheet@*,grog@*,jdigilio@*,joconne@*,jreddy@*,meyera@*,mluczkow@*,msuliba@*,pershey@*,rgallimore@*,richp@*,rpowell@*,smc@*,tmusta@*,trace@*,znault@*",
+         "operators": "appmm2pbs@*,bgerofi@*,bustamante@*,dtm@*,eedeets@*,nawood@*,nsdhaman@*,servesh@*",
+         "default_queue": "prod",
+         "log_events": 511,
+         "mailer": "/usr/sbin/sendmail",
+         "mail_from": "adm",
+         "query_other_jobs": "True",
+         "resources_available": {
+            "daos_ops_fs": "False",
+            "daos_perf_fs": "False",
+            "daos_user_fs": "False",
+            "flare_fs": "True",
+            "gecko_fs": "False",
+            "home_fs": "True",
+            "valid_filesystems": "home_fs,flare_fs,daos_user_fs,daos_perf_fs,daos_ops_fs"
+         },
+         "resources_default": {
+            "allow_account_check_failure": "True",
+            "allow_negative_allocation": "True",
+            "backfill_factor": 84600,
+            "backfill_max": 50,
+            "base_score": 0,
+            "enable_backfill": 0,
+            "enable_fifo": 1,
+            "enable_wfp": 0,
+            "fifo_factor": 1800,
+            "ncpus": 1,
+            "ni_resource": "aurora",
+            "place": "scatter",
+            "score_boost": 0,
+            "total_cpus": 10624,
+            "wfp_factor": 100000
+         },
+         "default_chunk": {
+            "ncpus": 208
+         },
+         "resources_assigned": {
+            "mem": "0gb",
+            "mpiprocs": 0,
+            "ncpus": -230256,
+            "nodect": -1107
+         },
+         "scheduler_iteration": 600,
+         "flatuid": "True",
+         "resv_enable": "True",
+         "node_fail_requeue": 310,
+         "max_array_size": 10000,
+         "node_group_enable": "True",
+         "node_group_key": "tier1,tier0,system",
+         "default_qsub_arguments": "-k doe -r n -W umask=0022",
+         "pbs_license_info": "6200@license-aurora-01.lab.alcf.anl.gov:6200@license-aurora-02.lab.alcf.anl.gov:6200@license-aurora-03.lab.alcf.anl.gov",
+         "pbs_license_min": 21248,
+         "pbs_license_max": 21500,
+         "pbs_license_linger_time": 31536000,
+         "license_count": "Avail_Global:252 Avail_Local:522 Used:20726 High_Use:20726",
+         "pbs_version": "2022.1.7.20241004133957",
+         "job_sort_formula": "base_score + score_boost + (enable_wfp * wfp_factor * (eligible_time ** 2 / min(max(walltime,21600.0),43200.0) ** 3  * project_priority * nodect / total_cpus)) + (enable_backfill * min(backfill_max, eligible_time / backfill_factor)) + (enable_fifo * eligible_time / fifo_factor)",
+         "eligible_time_enable": "True",
+         "job_history_enable": "True",
+         "job_history_duration": "120:00:00",
+         "max_concurrent_provision": 5,
+         "backfill_depth": 10,
+         "python_restart_max_hooks": 1000000000,
+         "python_restart_max_objects": 1000000000,
+         "python_restart_min_interval": "00:00:00",
+         "max_job_sequence_id": 999999999999
+      }
+   }
+} 

@@ -103,6 +103,16 @@ Examples:
       "--columns",
       help="Comma-separated list of columns to display"
    )
+   jobs_parser.add_argument(
+      "--sort",
+      default="score",
+      help="Column to sort by: job_id, name, owner, state, queue, nodes, ppn, walltime, priority, cores, score (default: score)"
+   )
+   jobs_parser.add_argument(
+      "--reverse",
+      action="store_true",
+      help="Sort in ascending order (default is descending for score, ascending for others)"
+   )
    
    # Nodes command
    nodes_parser = subparsers.add_parser(
@@ -122,6 +132,11 @@ Examples:
    nodes_parser.add_argument(
       "--columns",
       help="Comma-separated list of columns to display"
+   )
+   nodes_parser.add_argument(
+      "-d", "--detailed",
+      action="store_true",
+      help="Show detailed table format instead of summary"
    )
    
    # Queues command
