@@ -524,10 +524,11 @@ class QueuesCommand(BaseCommand):
          headers = []
          column_formatters = {
             'name': lambda q: q.name,
-            'state': lambda q: format_state(q.state.value),
+            'status': lambda q: q.status_description(),
             'type': lambda q: q.queue_type,
             'running': lambda q: format_number(q.running_jobs),
             'queued': lambda q: format_number(q.queued_jobs),
+            'held': lambda q: format_number(q.held_jobs),
             'total': lambda q: format_number(q.total_jobs),
             'max_running': lambda q: format_number(q.max_running) if q.max_running is not None else "∞",
             'max_queued': lambda q: format_number(q.max_queued) if q.max_queued is not None else "∞",

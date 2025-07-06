@@ -59,7 +59,7 @@ class DisplayConfig:
    ])
    
    default_queue_columns: List[str] = field(default_factory=lambda: [
-      "name", "state", "running", "queued", "max_running", "utilization"
+      "name", "status", "running", "queued", "held", "max_running", "utilization"
    ])
 
 
@@ -205,7 +205,7 @@ class Config:
                'name', 'state', 'ncpus', 'memory', 'jobs', 'load'
             ],
             'default_queue_columns': [
-               'name', 'state', 'running', 'queued', 'max_running', 'utilization'
+               'name', 'status', 'running', 'queued', 'held', 'max_running', 'utilization'
             ]
          },
          'logging': {
