@@ -18,6 +18,10 @@ from ..config import Config
 from ..models.job import PBSJob, JobState
 from ..models.queue import PBSQueue
 from ..models.node import PBSNode, NodeState
+from ..database.migrations import (
+    initialize_database, migrate_database, validate_database,
+    backup_database, restore_database, clean_old_data, get_database_info
+)
 from ..utils.formatters import (
    format_duration, format_timestamp, format_memory,
    format_percentage, format_number, format_job_id, format_state
@@ -559,4 +563,208 @@ class QueuesCommand(BaseCommand):
       except Exception as e:
          self.logger.error(f"Queues command failed: {str(e)}")
          print(f"Error: {str(e)}")
+         return 1
+
+
+class DatabaseCommand(BaseCommand):
+   """Database management commands"""
+   
+   def execute(self, args: argparse.Namespace) -> int:
+      """Execute database command"""
+      
+      try:
+         # Get database subcommand
+         subcommand = args.database_action
+         
+         if subcommand == 'init':
+            return self._init_database(args)
+         elif subcommand == 'migrate':
+            return self._migrate_database(args)
+         elif subcommand == 'status':
+            return self._show_database_status(args)
+         elif subcommand == 'validate':
+            return self._validate_database(args)
+         elif subcommand == 'backup':
+            return self._backup_database(args)
+         elif subcommand == 'restore':
+            return self._restore_database(args)
+         elif subcommand == 'cleanup':
+            return self._cleanup_database(args)
+         else:
+            print(f"Unknown database subcommand: {subcommand}")
+            return 1
+            
+      except Exception as e:
+         self.logger.error(f"Database command failed: {str(e)}")
+         print(f"Error: {str(e)}")
+         return 1
+   
+   def _init_database(self, args: argparse.Namespace) -> int:
+      """Initialize database"""
+      print("Initializing database...")
+      
+      if hasattr(args, 'force') and args.force:
+         # Force initialization (drops existing tables)
+         print("WARNING: This will drop all existing tables and data!")
+         confirm = input("Are you sure? Type 'yes' to continue: ")
+         if confirm.lower() != 'yes':
+            print("Database initialization cancelled")
+            return 0
+      
+      try:
+         initialize_database(self.config)
+         print("Database initialized successfully")
+         return 0
+      except Exception as e:
+         print(f"Database initialization failed: {str(e)}")
+         return 1
+   
+   def _migrate_database(self, args: argparse.Namespace) -> int:
+      """Migrate database to latest schema"""
+      print("Migrating database to latest schema...")
+      
+      try:
+         migrate_database(self.config)
+         print("Database migration completed successfully")
+         return 0
+      except Exception as e:
+         print(f"Database migration failed: {str(e)}")
+         return 1
+   
+   def _show_database_status(self, args: argparse.Namespace) -> int:
+      """Show database status"""
+      try:
+         info = get_database_info(self.config)
+         
+         print("Database Information")
+         print("=" * 50)
+         print(f"Database URL: {info['database_url']}")
+         print(f"Schema Version: {info['schema_version'] or 'Unknown'}")
+         
+         if info['database_size']:
+            size_mb = info['database_size'] / (1024 * 1024)
+            print(f"Database Size: {size_mb:.1f} MB")
+         
+         print(f"\nTables: {len(info['tables'])}")
+         for table in sorted(info['tables']):
+            count = info['table_counts'].get(table, 'N/A')
+            print(f"  {table}: {count} records")
+         
+         # Validation results
+         validation = info['validation']
+         print(f"\nSchema Validation: {'PASS' if validation['valid'] else 'FAIL'}")
+         
+         if validation['errors']:
+            print("Errors:")
+            for error in validation['errors']:
+               print(f"  - {error}")
+         
+         if validation['warnings']:
+            print("Warnings:")
+            for warning in validation['warnings']:
+               print(f"  - {warning}")
+         
+         return 0
+         
+      except Exception as e:
+         print(f"Failed to get database status: {str(e)}")
+         return 1
+   
+   def _validate_database(self, args: argparse.Namespace) -> int:
+      """Validate database schema"""
+      print("Validating database schema...")
+      
+      try:
+         validation = validate_database(self.config)
+         
+         if validation['valid']:
+            print("✓ Database schema validation PASSED")
+         else:
+            print("✗ Database schema validation FAILED")
+            
+            if validation['errors']:
+               print("\nErrors:")
+               for error in validation['errors']:
+                  print(f"  - {error}")
+         
+         if validation['warnings']:
+            print("\nWarnings:")
+            for warning in validation['warnings']:
+               print(f"  - {warning}")
+         
+         # Table status
+         print("\nTable Status:")
+         for table, status in validation['table_status'].items():
+            status_symbol = "✓" if status == "exists" else "✗"
+            print(f"  {status_symbol} {table}: {status}")
+         
+         return 0 if validation['valid'] else 1
+         
+      except Exception as e:
+         print(f"Database validation failed: {str(e)}")
+         return 1
+   
+   def _backup_database(self, args: argparse.Namespace) -> int:
+      """Backup database"""
+      backup_path = getattr(args, 'backup_path', None)
+      
+      try:
+         result_path = backup_database(backup_path, self.config)
+         print(f"Database backed up to: {result_path}")
+         return 0
+      except Exception as e:
+         print(f"Database backup failed: {str(e)}")
+         return 1
+   
+   def _restore_database(self, args: argparse.Namespace) -> int:
+      """Restore database from backup"""
+      if not hasattr(args, 'backup_path') or not args.backup_path:
+         print("Error: backup path is required for restore")
+         return 1
+      
+      print(f"Restoring database from: {args.backup_path}")
+      print("WARNING: This will overwrite the current database!")
+      confirm = input("Are you sure? Type 'yes' to continue: ")
+      if confirm.lower() != 'yes':
+         print("Database restore cancelled")
+         return 0
+      
+      try:
+         restore_database(args.backup_path, self.config)
+         print("Database restored successfully")
+         return 0
+      except Exception as e:
+         print(f"Database restore failed: {str(e)}")
+         return 1
+   
+   def _cleanup_database(self, args: argparse.Namespace) -> int:
+      """Clean up old data from database"""
+      job_history_days = getattr(args, 'job_history_days', 365)
+      snapshot_days = getattr(args, 'snapshot_days', 90)
+      
+      print(f"Cleaning up data older than:")
+      print(f"  Job history: {job_history_days} days")
+      print(f"  Snapshots: {snapshot_days} days")
+      
+      if not getattr(args, 'force', False):
+         confirm = input("Continue? Type 'yes' to proceed: ")
+         if confirm.lower() != 'yes':
+            print("Database cleanup cancelled")
+            return 0
+      
+      try:
+         results = clean_old_data(job_history_days, snapshot_days, self.config)
+         
+         print("Cleanup completed:")
+         print(f"  Job history records deleted: {results['job_history_deleted']}")
+         print(f"  Queue snapshots deleted: {results['queue_snapshots_deleted']}")
+         print(f"  Node snapshots deleted: {results['node_snapshots_deleted']}")
+         print(f"  System snapshots deleted: {results['system_snapshots_deleted']}")
+         
+         total_deleted = sum(results.values())
+         print(f"  Total records deleted: {total_deleted}")
+         
+         return 0
+      except Exception as e:
+         print(f"Database cleanup failed: {str(e)}")
          return 1 

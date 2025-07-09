@@ -1,21 +1,37 @@
 # PBS Monitor
 
-A comprehensive Python toolkit for monitoring and managing PBS (Portable Batch System) scheduler environments. This tool provides command-line interfaces to understand queue status, predict job start times, and optimize resource usage.
+A comprehensive Python toolkit for monitoring and managing PBS (Portable Batch System) scheduler environments. This tool provides command-line interfaces to understand queue status, predict job start times, and optimize resource usage with persistent historical data storage.
 
 ## Features
 
-### Phase 1 (Current)
+### Phase 1 (Completed)
 - **PBS Command Abstractions**: Wrapper around PBS CLI tools with JSON parsing
 - **Data Collection**: Automated gathering of job, queue, and node information
 - **Command Line Interface**: Easy-to-use CLI for monitoring PBS systems
 - **Configuration Management**: Flexible configuration system
 - **Rich Output**: Beautiful table displays with color support
 
-### Planned Features
+### Phase 2 (Current - Database Implementation)
+- **Persistent Storage**: SQLite for development, PostgreSQL for production
+- **Historical Data**: Overcome PBS's 1-week history limitation
+- **Database Management**: Complete CLI for database operations
+- **Concurrent Access**: Multi-user and multi-process support
+- **Data Quality**: Validation, auditing, and error handling
+- **Migration System**: Automated schema updates and data management
+
+### Planned Features (Phase 3+)
 - **Prediction Engine**: Machine learning-based job start time prediction
+- **Background Daemon**: Continuous data collection service
 - **Web Dashboard**: Real-time monitoring interface
 - **Historical Analysis**: Trend analysis and reporting
 - **Optimization Suggestions**: Resource usage recommendations
+
+## Documentation
+
+For comprehensive documentation, see the [docs](docs/) folder:
+- **[Database Documentation](docs/DATABASE.md)** - Database setup, configuration, and usage
+- **[Phase 2 Database Plan](docs/PHASE2_DATABASE_PLAN.md)** - Detailed implementation plan
+- **[Documentation Index](docs/README.md)** - Complete documentation overview
 
 ## Installation
 
@@ -30,6 +46,18 @@ git clone https://github.com/jtchilders/pbs_monitor.git
 cd pbs_monitor
 pip install -r requirements.txt
 pip install -e .
+```
+
+### Database Setup (Phase 2)
+```bash
+# Initialize database (creates SQLite database in ~/.pbs_monitor.db by default)
+pbs-monitor database init
+
+# Verify installation
+pbs-monitor database status
+
+# Show database information
+pbs-monitor database validate
 ```
 
 ## Quick Start
@@ -52,6 +80,21 @@ pbs-monitor nodes
 pbs-monitor queues
 ```
 
+### Database Management
+```bash
+# Initialize database
+pbs-monitor database init
+
+# Check database status
+pbs-monitor database status
+
+# Backup database (SQLite only)
+pbs-monitor database backup
+
+# Clean up old data
+pbs-monitor database cleanup --job-history-days 365
+```
+
 ### Configuration
 ```bash
 # Create sample configuration
@@ -69,7 +112,7 @@ pbs-monitor config --show
 - `-q, --quiet`: Suppress normal output
 - `--log-file`: Specify log file path
 
-### Commands
+### Core Commands
 
 #### `status`
 Show PBS system status summary.
@@ -77,159 +120,120 @@ Show PBS system status summary.
 **Options:**
 - `-r, --refresh`: Force refresh of data
 
-**Example:**
-```bash
-pbs-monitor status
-```
-
 #### `jobs`
-Show job information.
+Show job information with persistent historical data.
 
 **Options:**
 - `-u, --user`: Filter by username
 - `-s, --state`: Filter by job state (R, Q, H, W, T, E, S, C, F)
 - `-r, --refresh`: Force refresh of data
 - `--columns`: Comma-separated list of columns to display
-
-**Available Columns:**
-- `job_id`: Job identifier
-- `name`: Job name
-- `owner`: Job owner
-- `state`: Job state
-- `queue`: Queue name
-- `nodes`: Number of nodes
-- `ppn`: Processors per node
-- `walltime`: Requested walltime
-- `memory`: Requested memory
-- `submit_time`: Submission time
-- `start_time`: Start time
-- `runtime`: Current runtime
-- `priority`: Job priority
-- `cores`: Total cores requested
-
-**Examples:**
-```bash
-# Show all jobs
-pbs-monitor jobs
-
-# Show jobs for user 'alice'
-pbs-monitor jobs -u alice
-
-# Show only running jobs
-pbs-monitor jobs -s R
-
-# Show specific columns
-pbs-monitor jobs --columns job_id,name,owner,state,queue
-```
+- `--sort`: Sort by column (job_id, name, owner, state, queue, score, etc.)
 
 #### `nodes`
-Show node information.
+Show node information with utilization history.
 
 **Options:**
 - `-s, --state`: Filter by node state
 - `-r, --refresh`: Force refresh of data
 - `--columns`: Comma-separated list of columns to display
-
-**Available Columns:**
-- `name`: Node name
-- `state`: Node state
-- `ncpus`: Number of CPUs
-- `memory`: Memory amount
-- `jobs`: Number of jobs
-- `load`: Load percentage
-- `utilization`: CPU utilization
-- `available`: Available CPUs
-- `properties`: Node properties
-
-**Examples:**
-```bash
-# Show all nodes
-pbs-monitor nodes
-
-# Show only free nodes
-pbs-monitor nodes -s free
-
-# Show specific columns
-pbs-monitor nodes --columns name,state,ncpus,jobs,utilization
-```
+- `-d, --detailed`: Show detailed table format
 
 #### `queues`
-Show queue information.
+Show queue information with historical metrics.
 
 **Options:**
 - `-r, --refresh`: Force refresh of data
 - `--columns`: Comma-separated list of columns to display
 
-**Available Columns:**
-- `name`: Queue name
-- `state`: Queue state
-- `type`: Queue type
-- `running`: Running jobs
-- `queued`: Queued jobs
-- `total`: Total jobs
-- `max_running`: Maximum running jobs
-- `max_queued`: Maximum queued jobs
-- `utilization`: Utilization percentage
-- `available`: Available slots
-- `priority`: Queue priority
-- `max_walltime`: Maximum walltime
-- `max_nodes`: Maximum nodes
+### Database Commands
 
-**Examples:**
-```bash
-# Show all queues
-pbs-monitor queues
+#### `database init`
+Initialize database with fresh schema.
 
-# Show specific columns
-pbs-monitor queues --columns name,state,running,queued,utilization
-```
+**Options:**
+- `--force`: Force initialization (drops existing tables)
+
+#### `database status`
+Show database information and table counts.
+
+#### `database validate`
+Validate database schema and data integrity.
+
+#### `database backup [path]`
+Create database backup (SQLite only).
+
+#### `database restore <path>`
+Restore database from backup (SQLite only).
+
+#### `database cleanup`
+Clean up old data from database.
+
+**Options:**
+- `--job-history-days`: Keep job history for N days (default: 365)
+- `--snapshot-days`: Keep snapshots for N days (default: 90)
+- `--force`: Skip confirmation prompt
+
+#### `database migrate`
+Migrate database to latest schema version.
+
+For detailed command documentation, see [Database Documentation](docs/DATABASE.md).
 
 ## Configuration
 
-PBS Monitor uses YAML configuration files. The configuration file is searched in the following locations:
+PBS Monitor uses YAML configuration files searched in order:
 1. `~/.pbs_monitor.yaml`
 2. `~/.config/pbs_monitor/config.yaml`
 3. `/etc/pbs_monitor/config.yaml`
 4. `pbs_monitor.yaml` (current directory)
 
-### Configuration Sections
-
-#### PBS Configuration
+### Basic Configuration
 ```yaml
+# PBS system configuration
 pbs:
-  command_timeout: 30          # Timeout for PBS commands
-  default_queue: default       # Default queue name
-  job_refresh_interval: 30     # Job data refresh interval (seconds)
-  node_refresh_interval: 60    # Node data refresh interval (seconds)
-  queue_refresh_interval: 300  # Queue data refresh interval (seconds)
-```
-
-#### Display Configuration
-```yaml
+  command_timeout: 30
+  job_refresh_interval: 30
+  node_refresh_interval: 60
+  
+# Database configuration
+database:
+  url: "sqlite:///~/.pbs_monitor.db"  # SQLite for development
+  # url: "postgresql://user:password@host:port/database"  # PostgreSQL for production
+  pool_size: 5
+  
+# Display configuration
 display:
-  max_table_width: 120        # Maximum table width
-  truncate_long_names: true   # Truncate long names
-  max_name_length: 20         # Maximum name length
-  use_colors: true           # Enable color output
-  time_format: "%d-%m %H:%M" # Time format
-  default_job_columns:       # Default job columns
-    - job_id
-    - name
-    - owner
-    - state
-    - queue
-    - nodes
-    - ppn
-    - walltime
+  use_colors: true
+  max_table_width: 120
+  truncate_long_names: true
+  
+# Logging configuration
+logging:
+  level: INFO
+  date_format: "%d-%m %H:%M"
 ```
 
-#### Logging Configuration
+### Database Configuration
+
+#### SQLite (Development)
 ```yaml
-logging:
-  level: INFO                 # Log level
-  log_file: null             # Log file path (null for no file)
-  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  date_format: "%d-%m %H:%M" # Date format
+database:
+  url: "sqlite:///~/.pbs_monitor.db"
+  pool_size: 5
+```
+
+#### PostgreSQL (Production)
+```yaml
+database:
+  url: "postgresql://pbs_monitor:password@localhost:5432/pbs_monitor"
+  pool_size: 10
+  max_overflow: 20
+```
+
+#### Environment Variables
+```bash
+# Override database URL
+export PBS_MONITOR_DB_URL="postgresql://user:password@host:port/database"
 ```
 
 ## Development
@@ -241,17 +245,36 @@ pbs_monitor/
 ├── config.py              # Configuration management
 ├── pbs_commands.py        # PBS command wrappers
 ├── data_collector.py      # Data collection orchestration
-├── models/               # Data models
-│   ├── job.py           # Job data structure
-│   ├── queue.py         # Queue data structure
-│   └── node.py          # Node data structure
-├── utils/               # Utility functions
-│   ├── logging_setup.py # Logging configuration
-│   └── formatters.py    # Output formatters
-└── cli/                # Command line interface
-    ├── main.py         # Main CLI entry point
-    └── commands.py     # Command implementations
+├── database/              # Database system (Phase 2)
+│   ├── models.py          # SQLAlchemy models
+│   ├── connection.py      # Database connection management
+│   ├── repositories.py    # Data access layer
+│   ├── migrations.py      # Database migrations
+│   └── model_converters.py # PBS to database model conversion
+├── models/                # PBS data models
+│   ├── job.py             # Job data structure
+│   ├── queue.py           # Queue data structure
+│   └── node.py            # Node data structure
+├── utils/                 # Utility functions
+│   ├── logging_setup.py   # Logging configuration
+│   └── formatters.py      # Output formatters
+└── cli/                   # Command line interface
+    ├── main.py            # Main CLI entry point
+    └── commands.py        # Command implementations
 ```
+
+### Key Components
+
+#### Database System (Phase 2)
+- **Models**: SQLAlchemy models for persistent storage
+- **Repositories**: Data access layer with query optimization
+- **Migrations**: Schema versioning and updates
+- **Converters**: Bridge between PBS and database models
+
+#### Data Collection
+- **Real-time**: On-demand updates when commands are run
+- **Historical**: Persistent storage of job lifecycles
+- **Audit Trail**: Complete logging of collection events
 
 ### Testing
 ```bash
@@ -260,6 +283,9 @@ pytest
 
 # Run with coverage
 pytest --cov=pbs_monitor
+
+# Test database functionality
+pytest tests/test_database.py
 ```
 
 ### Code Quality
@@ -271,39 +297,87 @@ black pbs_monitor/
 flake8 pbs_monitor/
 ```
 
+## Deployment
+
+### Single User (SQLite)
+```bash
+# Install and initialize
+pip install -e .
+pbs-monitor database init
+pbs-monitor config --create
+```
+
+### Multi-User (PostgreSQL)
+```bash
+# Setup PostgreSQL database
+createdb pbs_monitor
+
+# Configure connection
+export PBS_MONITOR_DB_URL="postgresql://user:password@host:port/pbs_monitor"
+
+# Initialize database
+pbs-monitor database init
+
+# Validate installation
+pbs-monitor database status
+```
+
 ## Troubleshooting
 
 ### Common Issues
 
-#### "Unable to connect to PBS system"
-- Ensure PBS commands are available in PATH
-- Check if PBS server is running
-- Verify user has appropriate permissions
+#### Database Connection
+```bash
+# Check database status
+pbs-monitor database status
 
-#### "Command not found: qstat"
-- Install PBS Pro or OpenPBS
-- Add PBS bin directory to PATH
-- Check PBS installation
+# Validate schema
+pbs-monitor database validate
 
-#### "Permission denied"
-- Ensure user has PBS access permissions
-- Check PBS server configuration
-- Verify network connectivity to PBS server
+# Re-initialize if needed
+pbs-monitor database init --force
+```
+
+#### PBS Connection
+```bash
+# Test PBS commands
+qstat -V
+pbsnodes -a | head
+
+# Check PATH
+which qstat
+which pbsnodes
+```
+
+#### Performance
+```bash
+# Clean up old data
+pbs-monitor database cleanup
+
+# Check database size
+pbs-monitor database status
+```
 
 ### Debug Mode
-Enable debug logging for troubleshooting:
 ```bash
+# Enable debug logging
 pbs-monitor -v status
+
+# Enable database query logging
+echo "database: { echo_sql: true }" >> ~/.pbs_monitor.yaml
 ```
+
+For detailed troubleshooting, see [Database Documentation](docs/DATABASE.md#troubleshooting).
 
 ## Contributing
 
-1. Fork the repository at https://github.com/jtchilders/pbs_monitor
+1. Fork the repository
 2. Create a feature branch
 3. Make your changes
 4. Add tests for new functionality
 5. Ensure all tests pass
-6. Submit a pull request
+6. Update documentation
+7. Submit a pull request
 
 ## License
 
@@ -312,23 +386,28 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Support
 
 For issues and questions:
-- Check the troubleshooting section above
+- Check the [documentation](docs/)
+- Review [troubleshooting guide](docs/DATABASE.md#troubleshooting)
 - Create an issue at https://github.com/jtchilders/pbs_monitor/issues
-- Review the configuration documentation
 
 ## Roadmap
 
-### Phase 2 (Planned)
+### Phase 2 (Current) - Database Implementation ✅
+- Persistent storage with SQLite/PostgreSQL
+- Historical data collection beyond PBS limits
+- Database management CLI
+- Concurrent access support
+
+### Phase 3 (Planned) - Analytics & Prediction
 - Machine learning prediction engine
-- Historical data analysis
+- Background daemon for continuous collection
+- Advanced historical analysis
 - Performance optimization recommendations
 
-### Phase 3 (Planned)
-- Web-based dashboard
-- Real-time monitoring
-- Advanced analytics and reporting
-
-### Phase 4 (Planned)
+### Phase 4 (Future) - Web Interface
+- Real-time web dashboard
+- REST API for integrations
+- Advanced visualization
 - Multi-cluster support
-- Integration with other schedulers
-- Advanced optimization features 
+
+For detailed roadmap, see [Phase 2 Database Plan](docs/PHASE2_DATABASE_PLAN.md). 

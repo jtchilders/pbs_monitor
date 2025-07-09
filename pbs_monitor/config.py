@@ -64,6 +64,33 @@ class DisplayConfig:
 
 
 @dataclass
+class DatabaseConfig:
+   """Database configuration"""
+   
+   # Database URL
+   url: str = "sqlite:///~/.pbs_monitor.db"
+   
+   # Connection settings
+   pool_size: int = 5
+   max_overflow: int = 10
+   echo_sql: bool = False
+   
+   # Collection intervals (seconds)
+   job_collection_interval: int = 900      # 15 minutes
+   node_collection_interval: int = 1800    # 30 minutes
+   queue_collection_interval: int = 3600   # 60 minutes
+   snapshot_interval: int = 1800           # 30 minutes
+   
+   # Data retention settings
+   job_history_days: int = 365             # Keep job history for 1 year
+   snapshot_retention_days: int = 90       # Keep snapshots for 90 days
+   
+   # Collection settings
+   daemon_enabled: bool = True
+   batch_size: int = 1000
+
+
+@dataclass
 class LoggingConfig:
    """Logging configuration"""
    
@@ -97,6 +124,7 @@ class Config:
       self.pbs = PBSConfig()
       self.display = DisplayConfig()
       self.logging = LoggingConfig()
+      self.database = DatabaseConfig()
       
       # Load configuration from file
       self._load_config()
@@ -143,6 +171,10 @@ class Config:
          if 'logging' in config_data:
             self._update_config_object(self.logging, config_data['logging'])
          
+         # Update database configuration
+         if 'database' in config_data:
+            self._update_config_object(self.database, config_data['database'])
+         
          self.logger.info(f"Configuration loaded from {self.config_file}")
          
       except Exception as e:
@@ -165,7 +197,8 @@ class Config:
          config_data = {
             'pbs': self._config_to_dict(self.pbs),
             'display': self._config_to_dict(self.display),
-            'logging': self._config_to_dict(self.logging)
+            'logging': self._config_to_dict(self.logging),
+            'database': self._config_to_dict(self.database)
          }
          
          with open(self.config_file, 'w') as f:
@@ -213,6 +246,20 @@ class Config:
             'log_file': None,
             'log_format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             'date_format': '%d-%m %H:%M'
+         },
+         'database': {
+            'url': 'sqlite:///~/.pbs_monitor.db',
+            'pool_size': 5,
+            'max_overflow': 10,
+            'echo_sql': False,
+            'job_collection_interval': 900,
+            'node_collection_interval': 1800,
+            'queue_collection_interval': 3600,
+            'snapshot_interval': 1800,
+            'job_history_days': 365,
+            'snapshot_retention_days': 90,
+            'daemon_enabled': True,
+            'batch_size': 1000
          }
       }
       

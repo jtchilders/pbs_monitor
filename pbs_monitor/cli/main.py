@@ -11,7 +11,7 @@ from typing import List, Optional
 from ..config import Config
 from ..utils.logging_setup import setup_logging
 from ..data_collector import DataCollector
-from .commands import StatusCommand, JobsCommand, NodesCommand, QueuesCommand
+from .commands import StatusCommand, JobsCommand, NodesCommand, QueuesCommand, DatabaseCommand
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -170,6 +170,89 @@ Examples:
       help="Show current configuration"
    )
    
+   # Database command
+   database_parser = subparsers.add_parser(
+      "database",
+      help="Database management"
+   )
+   database_subparsers = database_parser.add_subparsers(
+      dest="database_action",
+      help="Database management actions"
+   )
+   
+   # Database init
+   db_init_parser = database_subparsers.add_parser(
+      "init",
+      help="Initialize database with fresh schema"
+   )
+   db_init_parser.add_argument(
+      "--force",
+      action="store_true",
+      help="Force initialization (drops existing tables)"
+   )
+   
+   # Database migrate
+   database_subparsers.add_parser(
+      "migrate",
+      help="Migrate database to latest schema"
+   )
+   
+   # Database status
+   database_subparsers.add_parser(
+      "status",
+      help="Show database status and information"
+   )
+   
+   # Database validate
+   database_subparsers.add_parser(
+      "validate",
+      help="Validate database schema"
+   )
+   
+   # Database backup
+   db_backup_parser = database_subparsers.add_parser(
+      "backup",
+      help="Create database backup"
+   )
+   db_backup_parser.add_argument(
+      "backup_path",
+      nargs="?",
+      help="Backup file path (optional)"
+   )
+   
+   # Database restore
+   db_restore_parser = database_subparsers.add_parser(
+      "restore",
+      help="Restore database from backup"
+   )
+   db_restore_parser.add_argument(
+      "backup_path",
+      help="Backup file path to restore from"
+   )
+   
+   # Database cleanup
+   db_cleanup_parser = database_subparsers.add_parser(
+      "cleanup",
+      help="Clean up old data from database"
+   )
+   db_cleanup_parser.add_argument(
+      "--job-history-days",
+      type=int,
+      default=365,
+      help="Keep job history for N days (default: 365)"
+   )
+   db_cleanup_parser.add_argument(
+      "--snapshot-days",
+      type=int,
+      default=90,
+      help="Keep snapshots for N days (default: 90)"
+   )
+   db_cleanup_parser.add_argument(
+      "--force",
+      action="store_true",
+      help="Skip confirmation prompt"
+   )
+   
    return parser
 
 
@@ -255,7 +338,12 @@ def main(argv: Optional[List[str]] = None) -> int:
    if args.command == "config":
       return handle_config_command(args, config)
    
-   # Initialize data collector
+   # Handle database command (doesn't need PBS connection)
+   if args.command == "database":
+      cmd = DatabaseCommand(None, config)  # No need for collector
+      return cmd.execute(args)
+   
+   # Initialize data collector for other commands
    try:
       collector = DataCollector(config, use_sample_data=args.use_sample_data)
       

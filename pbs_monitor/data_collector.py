@@ -15,17 +15,29 @@ from .models.node import PBSNode
 from .config import Config
 from .utils.logging_setup import create_pbs_logger
 
+# Database integration (optional)
+try:
+   from .database import (
+      RepositoryFactory, ModelConverters, DataCollectionStatus,
+      DatabaseManager, initialize_database
+   )
+   DATABASE_AVAILABLE = True
+except ImportError:
+   DATABASE_AVAILABLE = False
+
 
 class DataCollector:
    """Collects and manages PBS system data"""
    
-   def __init__(self, config: Optional[Config] = None, use_sample_data: bool = False):
+   def __init__(self, config: Optional[Config] = None, use_sample_data: bool = False, 
+                enable_database: bool = True):
       """
       Initialize data collector
       
       Args:
          config: Configuration object (optional)
          use_sample_data: Use sample JSON data instead of actual PBS commands
+         enable_database: Enable database persistence (default: True)
       """
       self.config = config or Config()
       self.pbs_commands = PBSCommands(
@@ -48,6 +60,22 @@ class DataCollector:
       self._update_lock = threading.Lock()
       self._background_update_thread: Optional[threading.Thread] = None
       self._stop_background_updates = False
+      
+      # Database integration
+      self._database_enabled = enable_database and DATABASE_AVAILABLE
+      if self._database_enabled:
+         try:
+            self._repository_factory = RepositoryFactory(self.config)
+            self._model_converters = ModelConverters()
+            self.logger.info("Database integration enabled")
+         except Exception as e:
+            self.logger.warning(f"Database integration failed: {str(e)}")
+            self._database_enabled = False
+      else:
+         self._repository_factory = None
+         self._model_converters = None
+         if enable_database and not DATABASE_AVAILABLE:
+            self.logger.warning("Database integration requested but not available")
    
    def test_connection(self) -> bool:
       """
@@ -62,15 +90,34 @@ class DataCollector:
          self.logger.error(f"Failed to test PBS connection: {str(e)}")
          return False
    
+   def test_database_connection(self) -> bool:
+      """
+      Test database connection
+      
+      Returns:
+         True if database is accessible
+      """
+      if not self._database_enabled:
+         return False
+      
+      try:
+         db_manager = DatabaseManager(self.config)
+         return db_manager.test_connection()
+      except Exception as e:
+         self.logger.error(f"Failed to test database connection: {str(e)}")
+         return False
+   
    def get_jobs(self, 
                 user: Optional[str] = None,
-                force_refresh: bool = False) -> List[PBSJob]:
+                force_refresh: bool = False,
+                include_historical: bool = False) -> List[PBSJob]:
       """
       Get job information
       
       Args:
          user: Filter by username (optional)
          force_refresh: Force refresh from PBS system
+         include_historical: Include historical jobs from database
          
       Returns:
          List of PBSJob objects
@@ -85,11 +132,29 @@ class DataCollector:
       if should_refresh:
          self._refresh_jobs()
       
+      # Start with current PBS jobs
+      jobs = self._jobs.copy()
+      
+      # Add historical jobs if requested and database is available
+      if include_historical and self._database_enabled:
+         try:
+            job_repo = self._repository_factory.get_job_repository()
+            historical_jobs = job_repo.get_historical_jobs(user=user)
+            historical_pbs_jobs = [
+               self._model_converters.job.from_database(job) for job in historical_jobs
+            ]
+            
+            # Merge with current jobs, avoiding duplicates
+            current_job_ids = {job.job_id for job in jobs}
+            jobs.extend([job for job in historical_pbs_jobs if job.job_id not in current_job_ids])
+         except Exception as e:
+            self.logger.warning(f"Failed to retrieve historical jobs: {str(e)}")
+      
       # Filter by user if specified
       if user:
-         return [job for job in self._jobs if job.owner == user]
+         return [job for job in jobs if job.owner == user]
       
-      return self._jobs.copy()
+      return jobs
    
    def get_queues(self, force_refresh: bool = False) -> List[PBSQueue]:
       """
@@ -145,12 +210,25 @@ class DataCollector:
       Returns:
          PBSJob object or None if not found
       """
+      # First try current PBS data
       try:
          jobs = self.pbs_commands.qstat_jobs(job_id=job_id)
-         return jobs[0] if jobs else None
+         if jobs:
+            return jobs[0]
       except PBSCommandError as e:
-         self.logger.error(f"Failed to get job {job_id}: {str(e)}")
-         return None
+         self.logger.error(f"Failed to get job {job_id} from PBS: {str(e)}")
+      
+      # Fall back to database if available
+      if self._database_enabled:
+         try:
+            job_repo = self._repository_factory.get_job_repository()
+            db_job = job_repo.get_job_by_id(job_id)
+            if db_job:
+               return self._model_converters.job.from_database(db_job)
+         except Exception as e:
+            self.logger.warning(f"Failed to get job {job_id} from database: {str(e)}")
+      
+      return None
    
    def get_system_summary(self) -> Dict[str, Any]:
       """
@@ -227,6 +305,148 @@ class DataCollector:
       """
       queues = self.get_queues()
       return {queue.name: queue.utilization_percentage() for queue in queues}
+   
+   def collect_and_persist(self) -> Dict[str, Any]:
+      """
+      Collect current PBS data and persist to database
+      
+      Returns:
+         Dictionary with collection results
+      """
+      if not self._database_enabled:
+         raise RuntimeError("Database not available for persistence")
+      
+      collection_start = datetime.now()
+      
+      # Start data collection log
+      collection_repo = self._repository_factory.get_data_collection_repository()
+      log_id = collection_repo.log_collection_start("manual")
+      
+      try:
+         # Collect all data
+         self.refresh_all()
+         
+         # Convert to database models
+         db_data = self._model_converters.convert_pbs_data_to_database(
+            self._jobs, self._queues, self._nodes
+         )
+         
+         # Add collection log ID to all entries
+         for entry in db_data['job_history']:
+            entry.data_collection_id = log_id
+         for entry in db_data['queue_snapshots']:
+            entry.data_collection_id = log_id
+         for entry in db_data['node_snapshots']:
+            entry.data_collection_id = log_id
+         db_data['system_snapshot'].data_collection_id = log_id
+         
+         # Persist to database
+         job_repo = self._repository_factory.get_job_repository()
+         queue_repo = self._repository_factory.get_queue_repository()
+         node_repo = self._repository_factory.get_node_repository()
+         system_repo = self._repository_factory.get_system_repository()
+         
+         # Upsert current state
+         job_repo.upsert_jobs(db_data['jobs'])
+         queue_repo.upsert_queues(db_data['queues'])
+         node_repo.upsert_nodes(db_data['nodes'])
+         
+         # Add historical snapshots
+         job_repo.add_job_history_batch(db_data['job_history'])
+         queue_repo.add_queue_snapshots(db_data['queue_snapshots'])
+         node_repo.add_node_snapshots(db_data['node_snapshots'])
+         system_repo.add_system_snapshot(db_data['system_snapshot'])
+         
+         # Log completion
+         duration = (datetime.now() - collection_start).total_seconds()
+         collection_repo.log_collection_complete(
+            log_id, DataCollectionStatus.SUCCESS,
+            jobs_collected=len(db_data['jobs']),
+            queues_collected=len(db_data['queues']),
+            nodes_collected=len(db_data['nodes']),
+            duration=duration
+         )
+         
+         return {
+            'status': 'success',
+            'jobs_collected': len(db_data['jobs']),
+            'queues_collected': len(db_data['queues']),
+            'nodes_collected': len(db_data['nodes']),
+            'duration_seconds': duration,
+            'collection_id': log_id
+         }
+         
+      except Exception as e:
+         # Log failure
+         duration = (datetime.now() - collection_start).total_seconds()
+         collection_repo.log_collection_complete(
+            log_id, DataCollectionStatus.FAILED,
+            duration=duration,
+            error_message=str(e)
+         )
+         
+         raise
+   
+   def get_historical_job_data(self, job_id: str) -> Dict[str, Any]:
+      """
+      Get historical data for a specific job
+      
+      Args:
+         job_id: Job ID to look up
+         
+      Returns:
+         Dictionary with job history and state transitions
+      """
+      if not self._database_enabled:
+         raise RuntimeError("Database not available for historical data")
+      
+      job_repo = self._repository_factory.get_job_repository()
+      
+      # Get job details
+      job = job_repo.get_job_by_id(job_id)
+      if not job:
+         return {'error': f'Job {job_id} not found'}
+      
+      # Get job history
+      history = job_repo.get_job_history(job_id)
+      
+      # Get state transitions
+      transitions = []
+      for i in range(1, len(history)):
+         prev_state = history[i-1].state
+         curr_state = history[i].state
+         if prev_state != curr_state:
+            transitions.append({
+               'from_state': prev_state.value,
+               'to_state': curr_state.value,
+               'timestamp': history[i].timestamp,
+               'duration_minutes': (history[i].timestamp - history[i-1].timestamp).total_seconds() / 60
+            })
+      
+      return {
+         'job': self._model_converters.job.from_database(job),
+         'history_entries': len(history),
+         'state_transitions': transitions,
+         'first_seen': history[0].timestamp if history else None,
+         'last_seen': history[-1].timestamp if history else None
+      }
+   
+   def get_user_job_statistics(self, user: str, days: int = 30) -> Dict[str, Any]:
+      """
+      Get job statistics for a user over specified time period
+      
+      Args:
+         user: Username
+         days: Number of days to look back
+         
+      Returns:
+         Dictionary with user job statistics
+      """
+      if not self._database_enabled:
+         raise RuntimeError("Database not available for statistics")
+      
+      job_repo = self._repository_factory.get_job_repository()
+      return job_repo.get_user_job_statistics(user, days)
    
    def _refresh_jobs(self) -> None:
       """Refresh job data from PBS system"""
@@ -313,12 +533,26 @@ class DataCollector:
                 self.config.pbs.queue_refresh_interval):
                self._refresh_queues()
             
+            # Optionally persist data if database is enabled
+            if (self._database_enabled and 
+                hasattr(self.config, 'database') and 
+                self.config.database.auto_persist):
+               try:
+                  self.collect_and_persist()
+               except Exception as e:
+                  self.logger.error(f"Failed to persist data: {str(e)}")
+            
             # Sleep for a short interval
             time.sleep(10)
             
          except Exception as e:
             self.logger.error(f"Error in background update loop: {str(e)}")
             time.sleep(30)  # Wait longer on error
+   
+   @property
+   def database_enabled(self) -> bool:
+      """Check if database functionality is enabled"""
+      return self._database_enabled
    
    def __del__(self):
       """Cleanup on destruction"""
