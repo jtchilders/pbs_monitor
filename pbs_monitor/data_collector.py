@@ -156,6 +156,59 @@ class DataCollector:
       
       return jobs
    
+   def get_completed_jobs(self, 
+                         user: Optional[str] = None, 
+                         include_pbs_history: bool = True,
+                         days: int = 7) -> List[PBSJob]:
+      """
+      Get completed job information from both PBS history and database
+      
+      Args:
+         user: Filter by username (optional)
+         include_pbs_history: Include recent completed jobs from qstat -x
+         days: Number of days to look back for PBS history
+         
+      Returns:
+         List of completed PBSJob objects
+      """
+      completed_jobs = []
+      job_ids_seen = set()
+      
+      # Get recent completed jobs from PBS if requested
+      if include_pbs_history:
+         try:
+            pbs_completed = self.pbs_commands.qstat_completed_jobs(user=user, days=days)
+            completed_jobs.extend(pbs_completed)
+            job_ids_seen.update(job.job_id for job in pbs_completed)
+            self.logger.debug(f"Retrieved {len(pbs_completed)} completed jobs from PBS")
+         except Exception as e:
+            self.logger.warning(f"Failed to get PBS completed jobs: {str(e)}")
+      
+      # Get completed jobs from database if available
+      if self._database_enabled:
+         try:
+            job_repo = self._repository_factory.get_job_repository()
+            
+            # Get completed jobs from database
+            db_jobs = job_repo.get_historical_jobs(user=user, days=days*2)  # Look back further in DB
+            db_completed_jobs = [job for job in db_jobs if job.is_completed()]
+            
+            # Convert to PBSJob objects and add if not already seen
+            for db_job in db_completed_jobs:
+               if db_job.job_id not in job_ids_seen:
+                  try:
+                     pbs_job = self._model_converters.job.from_database(db_job)
+                     completed_jobs.append(pbs_job)
+                     job_ids_seen.add(pbs_job.job_id)
+                  except Exception as e:
+                     self.logger.warning(f"Failed to convert job {db_job.job_id}: {str(e)}")
+            
+            self.logger.debug(f"Retrieved {len(db_completed_jobs)} additional completed jobs from database")
+         except Exception as e:
+            self.logger.warning(f"Failed to retrieve completed jobs from database: {str(e)}")
+      
+      return completed_jobs
+   
    def get_queues(self, force_refresh: bool = False) -> List[PBSQueue]:
       """
       Get queue information
@@ -326,9 +379,21 @@ class DataCollector:
          # Collect all data
          self.refresh_all()
          
+         # Also collect recently completed jobs to capture them before PBS purges them
+         completed_jobs = []
+         try:
+            pbs_completed = self.pbs_commands.qstat_completed_jobs()
+            completed_jobs.extend(pbs_completed)
+            self.logger.debug(f"Collected {len(pbs_completed)} completed jobs from PBS history")
+         except Exception as e:
+            self.logger.warning(f"Failed to collect completed jobs from PBS: {str(e)}")
+         
+         # Combine current jobs with completed jobs for database storage
+         all_jobs_for_db = self._jobs + completed_jobs
+         
          # Convert to database models
          db_data = self._model_converters.convert_pbs_data_to_database(
-            self._jobs, self._queues, self._nodes
+            all_jobs_for_db, self._queues, self._nodes
          )
          
          # Add collection log ID to all entries
@@ -370,6 +435,7 @@ class DataCollector:
          return {
             'status': 'success',
             'jobs_collected': len(db_data['jobs']),
+            'completed_jobs_collected': len(completed_jobs),
             'queues_collected': len(db_data['queues']),
             'nodes_collected': len(db_data['nodes']),
             'duration_seconds': duration,

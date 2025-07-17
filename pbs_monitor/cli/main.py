@@ -11,7 +11,7 @@ from typing import List, Optional
 from ..config import Config
 from ..utils.logging_setup import setup_logging
 from ..data_collector import DataCollector
-from .commands import StatusCommand, JobsCommand, NodesCommand, QueuesCommand, DatabaseCommand
+from .commands import StatusCommand, JobsCommand, NodesCommand, QueuesCommand, DatabaseCommand, HistoryCommand
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -152,6 +152,53 @@ Examples:
    queues_parser.add_argument(
       "--columns",
       help="Comma-separated list of columns to display"
+   )
+   
+   # History command
+   history_parser = subparsers.add_parser(
+      "history",
+      help="Show historical job information from database"
+   )
+   history_parser.add_argument(
+      "-u", "--user",
+      help="Filter by username"
+   )
+   history_parser.add_argument(
+      "-d", "--days",
+      type=int,
+      default=30,
+      help="Number of days to look back (default: 30)"
+   )
+   history_parser.add_argument(
+      "-s", "--state",
+      choices=["C", "F", "E", "all"],
+      default="all",
+      help="Filter by completion state: C (completed), F (finished), E (exiting), all (default: all)"
+   )
+   history_parser.add_argument(
+      "--columns",
+      help="Comma-separated list of columns to display"
+   )
+   history_parser.add_argument(
+      "--sort",
+      default="submit_time",
+      help="Column to sort by: job_id, name, owner, state, queue, submit_time, start_time, end_time, runtime (default: submit_time)"
+   )
+   history_parser.add_argument(
+      "--reverse",
+      action="store_true",
+      help="Sort in reverse order"
+   )
+   history_parser.add_argument(
+      "--limit",
+      type=int,
+      default=100,
+      help="Maximum number of jobs to show (default: 100)"
+   )
+   history_parser.add_argument(
+      "--include-pbs-history",
+      action="store_true",
+      help="Also include recent completed jobs from qstat -x"
    )
    
    # Config command
@@ -374,6 +421,10 @@ def main(argv: Optional[List[str]] = None) -> int:
       
       elif args.command == "queues":
          cmd = QueuesCommand(collector, config)
+         return cmd.execute(args)
+      
+      elif args.command == "history":
+         cmd = HistoryCommand(collector, config)
          return cmd.execute(args)
       
       else:

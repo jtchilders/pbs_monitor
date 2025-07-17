@@ -247,6 +247,59 @@ class PBSCommands:
       
       return jobs
    
+   def qstat_completed_jobs(self, user: Optional[str] = None, days: int = 7) -> List[PBSJob]:
+      """
+      Get completed job information using qstat -x
+      
+      Args:
+         user: Filter by username
+         days: Number of days back to look for completed jobs
+         
+      Returns:
+         List of PBSJob objects representing completed jobs
+      """
+      if self.use_sample_data:
+         try:
+            data = self._load_sample_data("qstat_x_f_F_json-output.json")
+         except PBSCommandError:
+            self.logger.warning("Failed to load sample completed job data, returning empty list")
+            return []
+      else:
+         command = ["qstat", "-x", "-f", "-F", "json"]
+         
+         if user:
+            command.extend(["-u", user])
+         
+         try:
+            output = self._run_command(command)
+            data = self._parse_json_output(output, "qstat completed jobs")
+            
+         except PBSCommandError:
+            raise
+         except Exception as e:
+            raise PBSCommandError(f"Failed to get completed job information: {str(e)}")
+      
+      jobs = []
+      jobs_data = data.get("Jobs", {})
+      
+      for job_id, job_info in jobs_data.items():
+         job_info["Job_Id"] = job_id  # Ensure job ID is in the data
+         try:
+            # For completed jobs, we don't calculate scores since they're no longer in queue
+            job = PBSJob.from_qstat_json(job_info, score=None)
+            
+            # Apply user filter if specified and using sample data
+            if user and self.use_sample_data and job.owner != user:
+               continue
+               
+            # Only include completed jobs (should be all of them from qstat -x, but double-check)
+            if job.state.value in ['C', 'F', 'E']:  # Completed, Finished, or Exiting
+               jobs.append(job)
+         except Exception as e:
+            self.logger.warning(f"Failed to parse completed job {job_id}: {str(e)}")
+      
+      return jobs
+   
    def qstat_queues(self) -> List[PBSQueue]:
       """
       Get queue information using qstat

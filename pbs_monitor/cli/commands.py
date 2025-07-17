@@ -767,4 +767,178 @@ class DatabaseCommand(BaseCommand):
          return 0
       except Exception as e:
          print(f"Database cleanup failed: {str(e)}")
-         return 1 
+         return 1
+
+
+class HistoryCommand(BaseCommand):
+   """Show historical job information from database"""
+   
+   def execute(self, args: argparse.Namespace) -> int:
+      """Execute history command"""
+      
+      try:
+         # Check if database is available
+         if not hasattr(self.collector, '_database_enabled') or not self.collector._database_enabled:
+            print("Error: Database is not enabled. Historical data is not available.")
+            print("Please run 'pbs-monitor database init' to set up the database.")
+            return 1
+         
+         # Get historical jobs from database
+         historical_jobs = self._get_historical_jobs(args)
+         
+         # Include PBS history if requested
+         if args.include_pbs_history:
+            try:
+               pbs_completed_jobs = self.collector.pbs_commands.qstat_completed_jobs(user=args.user)
+               # Merge with historical jobs, avoiding duplicates
+               historical_job_ids = {job.job_id for job in historical_jobs}
+               for pbs_job in pbs_completed_jobs:
+                  if pbs_job.job_id not in historical_job_ids:
+                     historical_jobs.append(pbs_job)
+               if pbs_completed_jobs:
+                  print(f"Added {len(pbs_completed_jobs)} jobs from recent PBS history")
+            except Exception as e:
+               self.logger.warning(f"Failed to get PBS completed jobs: {str(e)}")
+         
+         if not historical_jobs:
+            print("No historical jobs found for the specified criteria")
+            return 0
+         
+         # Filter by state if specified
+         if args.state != "all":
+            historical_jobs = [job for job in historical_jobs if job.state.value == args.state]
+         
+         # Apply limit
+         if len(historical_jobs) > args.limit:
+            historical_jobs = historical_jobs[:args.limit]
+            print(f"Showing first {args.limit} jobs (use --limit to adjust)")
+         
+         # Sort jobs
+         historical_jobs = self._sort_jobs(historical_jobs, args.sort, args.reverse)
+         
+         # Display jobs
+         self._display_historical_jobs(historical_jobs, args)
+         
+         return 0
+         
+      except Exception as e:
+         self.logger.error(f"History command failed: {str(e)}")
+         print(f"Error: {str(e)}")
+         return 1
+   
+   def _get_historical_jobs(self, args: argparse.Namespace) -> List[PBSJob]:
+      """Get historical jobs from database"""
+      from ..database.repositories import JobRepository
+      from ..database.models import JobState as DBJobState
+      
+      job_repo = self.collector._repository_factory.get_job_repository()
+      
+      # Get jobs from database
+      if args.state == "all":
+         # Get all completed jobs
+         db_jobs = job_repo.get_historical_jobs(user=args.user, days=args.days)
+         # Filter to only completed states
+         db_jobs = [job for job in db_jobs if job.is_completed()]
+      else:
+         # Get jobs by specific state
+         state_map = {"C": DBJobState.COMPLETED, "F": DBJobState.FINISHED, "E": DBJobState.EXITING}
+         db_state = state_map[args.state]
+         db_jobs = job_repo.get_jobs_by_state(db_state)
+         # Apply user filter if specified
+         if args.user:
+            db_jobs = [job for job in db_jobs if job.owner == args.user]
+      
+      # Convert to PBSJob objects
+      historical_jobs = []
+      for db_job in db_jobs:
+         try:
+            pbs_job = self.collector._model_converters.job.from_database(db_job)
+            historical_jobs.append(pbs_job)
+         except Exception as e:
+            self.logger.warning(f"Failed to convert job {db_job.job_id}: {str(e)}")
+      
+      return historical_jobs
+   
+   def _sort_jobs(self, jobs: List[PBSJob], sort_key: str, reverse: bool) -> List[PBSJob]:
+      """Sort jobs by specified key"""
+      from datetime import datetime
+      
+      sort_functions = {
+         'job_id': lambda j: j.job_id,
+         'name': lambda j: j.job_name.lower(),
+         'owner': lambda j: j.owner.lower(),
+         'state': lambda j: j.state.value,
+         'queue': lambda j: j.queue.lower(),
+         'submit_time': lambda j: j.submit_time or datetime.min,
+         'start_time': lambda j: j.start_time or datetime.min,
+         'end_time': lambda j: j.end_time or datetime.min,
+         'runtime': lambda j: self._calculate_runtime_seconds(j)
+      }
+      
+      if sort_key in sort_functions:
+         try:
+            jobs.sort(key=sort_functions[sort_key], reverse=reverse)
+         except Exception as e:
+            self.logger.warning(f"Failed to sort by {sort_key}: {str(e)}")
+      else:
+         self.logger.warning(f"Unknown sort key: {sort_key}, using default (submit_time)")
+         jobs.sort(key=sort_functions['submit_time'], reverse=reverse)
+      
+      return jobs
+   
+   def _calculate_runtime_seconds(self, job: PBSJob) -> int:
+      """Calculate runtime in seconds for sorting"""
+      if job.start_time and job.end_time:
+         return int((job.end_time - job.start_time).total_seconds())
+      return 0
+   
+   def _display_historical_jobs(self, jobs: List[PBSJob], args: argparse.Namespace) -> None:
+      """Display historical jobs in table format"""
+      
+      # Determine columns
+      default_columns = ['job_id', 'name', 'owner', 'state', 'queue', 'submit_time', 'runtime', 'exit_status']
+      columns = args.columns.split(',') if args.columns else default_columns
+      
+      # Create table data
+      headers = []
+      column_formatters = {
+         'job_id': lambda j: format_job_id(j.job_id),
+         'name': lambda j: j.job_name[:30] + "..." if len(j.job_name) > 30 else j.job_name,
+         'owner': lambda j: j.owner,
+         'state': lambda j: format_state(j.state.value),
+         'queue': lambda j: j.queue,
+         'submit_time': lambda j: format_timestamp(j.submit_time),
+         'start_time': lambda j: format_timestamp(j.start_time),
+         'end_time': lambda j: format_timestamp(j.end_time),
+         'runtime': lambda j: self._format_runtime(j),
+         'exit_status': lambda j: str(j.exit_status) if j.exit_status is not None else "N/A",
+         'nodes': lambda j: format_number(j.nodes),
+         'cores': lambda j: format_number(j.estimated_total_cores())
+      }
+      
+      # Build headers and rows
+      for col in columns:
+         if col in column_formatters:
+            headers.append(col.replace('_', ' ').title())
+      
+      rows = []
+      for job in jobs:
+         row = []
+         for col in columns:
+            if col in column_formatters:
+               row.append(column_formatters[col](job))
+         rows.append(row)
+      
+      # Print table
+      self._print_table(f"Historical Jobs ({len(jobs)} total)", headers, rows)
+   
+   def _format_runtime(self, job: PBSJob) -> str:
+      """Format job runtime for display"""
+      if job.start_time and job.end_time:
+         duration = job.end_time - job.start_time
+         total_seconds = int(duration.total_seconds())
+         hours = total_seconds // 3600
+         minutes = (total_seconds % 3600) // 60
+         seconds = total_seconds % 60
+         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+      return "N/A" 
