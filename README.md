@@ -14,6 +14,8 @@ A comprehensive Python toolkit for monitoring and managing PBS (Portable Batch S
 ### Phase 2 (Current - Database Implementation)
 - **Persistent Storage**: SQLite for development, PostgreSQL for production
 - **Historical Data**: Overcome PBS's 1-week history limitation
+- **Completed Job Tracking**: Automatic collection using `qstat -x` before PBS purges data
+- **History Command**: Comprehensive interface for analyzing completed jobs
 - **Database Management**: Complete CLI for database operations
 - **Concurrent Access**: Multi-user and multi-process support
 - **Data Quality**: Validation, auditing, and error handling
@@ -23,7 +25,7 @@ A comprehensive Python toolkit for monitoring and managing PBS (Portable Batch S
 - **Prediction Engine**: Machine learning-based job start time prediction
 - **Background Daemon**: Continuous data collection service
 - **Web Dashboard**: Real-time monitoring interface
-- **Historical Analysis**: Trend analysis and reporting
+- **Advanced Analytics**: Trend analysis and performance reporting
 - **Optimization Suggestions**: Resource usage recommendations
 
 ## Documentation
@@ -78,6 +80,24 @@ pbs-monitor nodes
 
 # Show queue information
 pbs-monitor queues
+```
+
+### Historical Job Analysis
+```bash
+# Show completed jobs from last 30 days
+pbs-monitor history
+
+# Show specific user's completed jobs for last week
+pbs-monitor history -u myuser -d 7
+
+# Show only finished jobs, sorted by runtime
+pbs-monitor history -s F --sort runtime --reverse
+
+# Include recent PBS history with database data
+pbs-monitor history --include-pbs-history
+
+# Show specific columns with increased limit
+pbs-monitor history --columns job_id,name,owner,runtime,exit_status --limit 200
 ```
 
 ### Database Management
@@ -145,6 +165,19 @@ Show queue information with historical metrics.
 **Options:**
 - `-r, --refresh`: Force refresh of data
 - `--columns`: Comma-separated list of columns to display
+
+#### `history`
+Show historical job information from database and PBS history.
+
+**Options:**
+- `-u, --user`: Filter by username
+- `-d, --days`: Number of days to look back (default: 30)
+- `-s, --state`: Filter by completion state: C (completed), F (finished), E (exiting), all (default: all)
+- `--columns`: Comma-separated list of columns to display
+- `--sort`: Column to sort by: job_id, name, owner, state, queue, submit_time, start_time, end_time, runtime (default: submit_time)
+- `--reverse`: Sort in reverse order
+- `--limit`: Maximum number of jobs to show (default: 100)
+- `--include-pbs-history`: Also include recent completed jobs from qstat -x
 
 ### Database Commands
 

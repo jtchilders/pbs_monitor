@@ -29,6 +29,7 @@ This directory contains comprehensive documentation for PBS Monitor, organized b
 ### For Users
 - [Installation Instructions](../README.md#installation)
 - [Basic Usage Examples](../README.md#quick-start)
+- [Historical Job Analysis](../README.md#historical-job-analysis)
 - [Database Setup](DATABASE.md#database-commands)
 
 ### For Developers

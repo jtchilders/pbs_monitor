@@ -26,6 +26,8 @@ Examples:
   pbs-monitor status              # Show system status
   pbs-monitor jobs                # Show all jobs
   pbs-monitor jobs -u myuser      # Show jobs for specific user
+  pbs-monitor history             # Show completed jobs from database
+  pbs-monitor history -u myuser   # Show user's completed jobs
   pbs-monitor nodes               # Show node information
   pbs-monitor queues              # Show queue information
   pbs-monitor config --create     # Create sample configuration

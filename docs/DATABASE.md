@@ -71,6 +71,21 @@ pbs-monitor database cleanup --job-history-days 365 --snapshot-days 90
 pbs-monitor database migrate
 ```
 
+### Historical Job Analysis
+```bash
+# View completed jobs from database
+pbs-monitor history
+
+# Show specific user's job history
+pbs-monitor history -u username --days 30
+
+# Include recent PBS completed jobs
+pbs-monitor history --include-pbs-history
+
+# Filter by completion state and sort by runtime
+pbs-monitor history -s F --sort runtime --reverse --limit 50
+```
+
 ## Configuration
 
 ### SQLite Configuration (Development)
@@ -101,13 +116,22 @@ export PBS_MONITOR_DB_URL="postgresql://user:password@localhost:5432/pbs_monitor
 ## Data Collection
 
 ### Collection Strategy
-The database system uses a dual update strategy:
+The database system uses a comprehensive data collection strategy:
 
 1. **On-Demand Updates** - Triggered when users run CLI commands
-2. **Scheduled Daemon Updates** - Background process (planned for future implementation)
+2. **Completed Job Collection** - Automatic collection using `qstat -x` to capture jobs before PBS purges them
+3. **Scheduled Daemon Updates** - Background process (planned for future implementation)
+
+### Completed Job Tracking
+To overcome PBS's typical 1-week history limitation, the system automatically collects completed jobs:
+- Uses `qstat -x -f -F json` to retrieve recently completed jobs
+- Integrated into `collect_and_persist()` operations
+- Prevents data loss when jobs are purged from PBS history
+- Accessible via the `history` command for comprehensive analysis
 
 ### Collection Frequency (Planned)
 - **Jobs**: Every 15 minutes (to catch state transitions)
+- **Completed Jobs**: During each collection cycle (prevents data loss)
 - **Nodes**: Every 30 minutes (hardware changes less frequently)
 - **Queues**: Every 60 minutes (configuration changes infrequently)
 - **System Snapshots**: Every 30 minutes (for trend analysis)
