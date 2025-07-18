@@ -199,7 +199,7 @@ class PBSCommands:
             self.logger.warning("Failed to load sample job data, returning empty list")
             return []
       else:
-         command = ["qstat", "-f", "-F", "json"]
+         command = ["/opt/pbs/bin/qstat", "-f", "-F", "json"]
          
          if job_id:
             command.append(job_id)
@@ -265,7 +265,7 @@ class PBSCommands:
             self.logger.warning("Failed to load sample completed job data, returning empty list")
             return []
       else:
-         command = ["qstat", "-x", "-f", "-F", "json"]
+         command = ["/opt/pbs/bin/qstat", "-x", "-f", "-F", "json"]
          
          if user:
             command.extend(["-u", user])
@@ -314,7 +314,7 @@ class PBSCommands:
             self.logger.warning("Failed to load sample queue data, returning empty list")
             return []
       else:
-         command = ["qstat", "-Q", "-f", "-F", "json"]
+         command = ["/opt/pbs/bin/qstat", "-Q", "-f", "-F", "json"]
          
          try:
             output = self._run_command(command)
@@ -500,7 +500,7 @@ class PBSCommands:
             self.logger.warning("Failed to load sample server data, returning empty dict")
             return {}
       else:
-         command = ["qstat", "-B", "-f", "-F", "json"]
+         command = ["/opt/pbs/bin/qstat", "-B", "-f", "-F", "json"]
          
          try:
             output = self._run_command(command)
@@ -670,7 +670,7 @@ class PBSCommands:
       """
       try:
          # Try a simple qstat command
-         self._run_command(["qstat", "--version"])
+         self._run_command(["/opt/pbs/bin/qstat", "--version"])
          return True
       except PBSCommandError:
          return False 
