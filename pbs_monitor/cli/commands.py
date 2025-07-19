@@ -67,6 +67,23 @@ class BaseCommand(ABC):
       else:
          print(f"\n{title}")
          print(tabulate(rows, headers=headers, tablefmt="grid"))
+   
+   def _handle_collection_if_requested(self, args: argparse.Namespace) -> None:
+      """Handle database collection if --collect flag is present"""
+      if not hasattr(args, 'collect') or not args.collect:
+         return
+      
+      if not self.collector.database_enabled:
+         print("Warning: Database not enabled, skipping collection")
+         return
+      
+      try:
+         print("Collecting data to database...")
+         result = self.collector.collect_and_persist()
+         print(f"✓ Collection completed: {result['jobs_collected']} jobs, "
+               f"{result['queues_collected']} queues, {result['nodes_collected']} nodes")
+      except Exception as e:
+         print(f"Warning: Database collection failed: {str(e)}")
 
 
 class StatusCommand(BaseCommand):
@@ -114,6 +131,9 @@ class StatusCommand(BaseCommand):
          print(f"  Available Cores: {resources['available_cores']}")
          print(f"  Utilization: {format_percentage(resources['utilization'])}")
          
+         # Handle database collection if requested
+         self._handle_collection_if_requested(args)
+         
          return 0
          
       except Exception as e:
@@ -141,6 +161,8 @@ class JobsCommand(BaseCommand):
          
          if not jobs:
             print("No jobs found")
+            # Handle database collection if requested
+            self._handle_collection_if_requested(args)
             return 0
          
          # Sort jobs
@@ -219,6 +241,9 @@ class JobsCommand(BaseCommand):
          # Print table
          self._print_table(f"Jobs ({len(jobs)} total)", headers, rows)
          
+         # Handle database collection if requested
+         self._handle_collection_if_requested(args)
+         
          return 0
          
       except Exception as e:
@@ -243,13 +268,15 @@ class NodesCommand(BaseCommand):
          
          if not nodes:
             print("No nodes found")
+            # Handle database collection if requested
+            self._handle_collection_if_requested(args)
             return 0
          
          # Check if detailed mode is requested
          if args.detailed:
             return self._show_detailed_nodes(nodes, args)
          else:
-            return self._show_node_summary(nodes)
+            return self._show_node_summary(nodes, args)
          
       except Exception as e:
          self.logger.error(f"Nodes command failed: {str(e)}")
@@ -292,9 +319,12 @@ class NodesCommand(BaseCommand):
       # Print table
       self._print_table(f"Nodes ({len(nodes)} total)", headers, rows)
       
+      # Handle database collection if requested
+      self._handle_collection_if_requested(args)
+      
       return 0
    
-   def _show_node_summary(self, nodes: List[PBSNode]) -> int:
+   def _show_node_summary(self, nodes: List[PBSNode], args: argparse.Namespace) -> int:
       """Show node summary (new default behavior)"""
       
       # Calculate summary statistics
@@ -340,6 +370,9 @@ class NodesCommand(BaseCommand):
          print(f"\nAttention Required:")
          for item in attention_items:
             print(f"  • {item}")
+      
+      # Handle database collection if requested
+      self._handle_collection_if_requested(args)
       
       return 0
    
@@ -519,6 +552,8 @@ class QueuesCommand(BaseCommand):
          
          if not queues:
             print("No queues found")
+            # Handle database collection if requested
+            self._handle_collection_if_requested(args)
             return 0
          
          # Determine columns
@@ -557,6 +592,9 @@ class QueuesCommand(BaseCommand):
          
          # Print table
          self._print_table(f"Queues ({len(queues)} total)", headers, rows)
+         
+         # Handle database collection if requested
+         self._handle_collection_if_requested(args)
          
          return 0
          

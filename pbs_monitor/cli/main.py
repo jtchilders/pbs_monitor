@@ -81,6 +81,11 @@ Examples:
       action="store_true",
       help="Force refresh of data"
    )
+   status_parser.add_argument(
+      "--collect",
+      action="store_true",
+      help="Collect and persist data to database after displaying"
+   )
    
    # Jobs command
    jobs_parser = subparsers.add_parser(
@@ -115,6 +120,11 @@ Examples:
       action="store_true",
       help="Sort in ascending order (default is descending for score, ascending for others)"
    )
+   jobs_parser.add_argument(
+      "--collect",
+      action="store_true",
+      help="Collect and persist data to database after displaying"
+   )
    
    # Nodes command
    nodes_parser = subparsers.add_parser(
@@ -140,6 +150,11 @@ Examples:
       action="store_true",
       help="Show detailed table format instead of summary"
    )
+   nodes_parser.add_argument(
+      "--collect",
+      action="store_true",
+      help="Collect and persist data to database after displaying"
+   )
    
    # Queues command
    queues_parser = subparsers.add_parser(
@@ -154,6 +169,11 @@ Examples:
    queues_parser.add_argument(
       "--columns",
       help="Comma-separated list of columns to display"
+   )
+   queues_parser.add_argument(
+      "--collect",
+      action="store_true",
+      help="Collect and persist data to database after displaying"
    )
    
    # History command
