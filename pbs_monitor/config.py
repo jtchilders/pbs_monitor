@@ -87,6 +87,7 @@ class DatabaseConfig:
    
    # Collection settings
    daemon_enabled: bool = True
+   auto_persist: bool = False
    batch_size: int = 1000
 
 
@@ -259,6 +260,7 @@ class Config:
             'job_history_days': 365,
             'snapshot_retention_days': 90,
             'daemon_enabled': True,
+            'auto_persist': False,
             'batch_size': 1000
          }
       }

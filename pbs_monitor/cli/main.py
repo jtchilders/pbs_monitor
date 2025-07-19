@@ -11,7 +11,7 @@ from typing import List, Optional
 from ..config import Config
 from ..utils.logging_setup import setup_logging
 from ..data_collector import DataCollector
-from .commands import StatusCommand, JobsCommand, NodesCommand, QueuesCommand, DatabaseCommand, HistoryCommand
+from .commands import StatusCommand, JobsCommand, NodesCommand, QueuesCommand, DatabaseCommand, HistoryCommand, DaemonCommand
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -322,6 +322,47 @@ Examples:
       help="Skip confirmation prompt"
    )
    
+   # Daemon command
+   daemon_parser = subparsers.add_parser(
+      "daemon",
+      help="Background data collection daemon management"
+   )
+   daemon_subparsers = daemon_parser.add_subparsers(
+      dest="daemon_action",
+      help="Daemon management actions"
+   )
+   
+   # Daemon start
+   daemon_start_parser = daemon_subparsers.add_parser(
+      "start",
+      help="Start background data collection daemon"
+   )
+   daemon_start_parser.add_argument(
+      "--detach",
+      action="store_true",
+      help="Run daemon in background (detached mode)"
+   )
+   daemon_start_parser.add_argument(
+      "--pid-file",
+      help="PID file path (default: ~/.pbs_monitor_daemon.pid)"
+   )
+   
+   # Daemon stop
+   daemon_stop_parser = daemon_subparsers.add_parser(
+      "stop",
+      help="Stop background data collection daemon"
+   )
+   daemon_stop_parser.add_argument(
+      "--pid-file",
+      help="PID file path (default: ~/.pbs_monitor_daemon.pid)"
+   )
+   
+   # Daemon status
+   daemon_status_parser = daemon_subparsers.add_parser(
+      "status",
+      help="Show daemon status and recent collection activity"
+   )
+   
    return parser
 
 
@@ -410,6 +451,11 @@ def main(argv: Optional[List[str]] = None) -> int:
    # Handle database command (doesn't need PBS connection)
    if args.command == "database":
       cmd = DatabaseCommand(None, config)  # No need for collector
+      return cmd.execute(args)
+   
+   # Handle daemon command (doesn't need PBS connection)
+   if args.command == "daemon":
+      cmd = DaemonCommand(None, config)  # No need for collector
       return cmd.execute(args)
    
    # Initialize data collector for other commands

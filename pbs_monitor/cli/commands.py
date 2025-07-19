@@ -27,6 +27,12 @@ from ..utils.formatters import (
    format_percentage, format_number, format_job_id, format_state
 )
 
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
 
 class BaseCommand(ABC):
    """Base class for CLI commands"""
@@ -79,7 +85,7 @@ class BaseCommand(ABC):
       
       try:
          print("Collecting data to database...")
-         result = self.collector.collect_and_persist()
+         result = self.collector.collect_and_persist(collection_type="cli")
          print(f"✓ Collection completed: {result['jobs_collected']} jobs, "
                f"{result['queues_collected']} queues, {result['nodes_collected']} nodes")
       except Exception as e:
@@ -979,4 +985,276 @@ class HistoryCommand(BaseCommand):
          minutes = (total_seconds % 3600) // 60
          seconds = total_seconds % 60
          return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-      return "N/A" 
+      return "N/A"
+
+
+class DaemonCommand(BaseCommand):
+   """Daemon management commands"""
+   
+   def __init__(self, collector: DataCollector, config: Config):
+      # For daemon commands, collector might be None
+      self.config = config
+      self.logger = logging.getLogger(__name__)
+      
+      # Initialize console for rich output if display config is available
+      if hasattr(config, 'display'):
+         from rich.console import Console
+         self.console = Console(
+            width=config.display.max_table_width,
+            force_terminal=True if config.display.use_colors else False
+         )
+      else:
+         self.console = None
+   
+   def execute(self, args: argparse.Namespace) -> int:
+      """Execute daemon command"""
+      
+      try:
+         # Get daemon subcommand
+         subcommand = args.daemon_action
+         
+         if subcommand == 'start':
+            return self._start_daemon(args)
+         elif subcommand == 'stop':
+            return self._stop_daemon(args)
+         elif subcommand == 'status':
+            return self._show_daemon_status(args)
+         else:
+            print(f"Unknown daemon subcommand: {subcommand}")
+            return 1
+            
+      except Exception as e:
+         self.logger.error(f"Daemon command failed: {str(e)}")
+         print(f"Error: {str(e)}")
+         return 1
+   
+   def _get_pid_file_path(self, args: argparse.Namespace) -> Path:
+      """Get PID file path from args or default"""
+      if hasattr(args, 'pid_file') and args.pid_file:
+         return Path(args.pid_file)
+      return Path.home() / ".pbs_monitor_daemon.pid"
+   
+   def _start_daemon(self, args: argparse.Namespace) -> int:
+      """Start the daemon"""
+      pid_file = self._get_pid_file_path(args)
+      
+      # Check if daemon is already running
+      if pid_file.exists():
+         try:
+            with open(pid_file, 'r') as f:
+               existing_pid = int(f.read().strip())
+            
+            # Check if process is still running
+            try:
+               os.kill(existing_pid, 0)  # Signal 0 just checks if process exists
+               print(f"Daemon already running with PID {existing_pid}")
+               return 1
+            except OSError:
+               # Process doesn't exist, remove stale PID file
+               pid_file.unlink()
+               print("Removed stale PID file")
+         except (ValueError, FileNotFoundError):
+            # Invalid or missing PID file, remove it
+            pid_file.unlink()
+      
+      print("Starting PBS Monitor daemon...")
+      
+      # Check database availability
+      try:
+         from ..data_collector import DataCollector
+         collector = DataCollector(self.config)
+         if not collector.database_enabled:
+            print("Error: Database not enabled. Daemon requires database functionality.")
+            print("Please run 'pbs-monitor database init' first.")
+            return 1
+      except Exception as e:
+         print(f"Error: Failed to initialize data collector: {str(e)}")
+         return 1
+      
+      if hasattr(args, 'detach') and args.detach:
+         # Fork to background
+         if os.fork() > 0:
+            # Parent process exits
+            print(f"Daemon started in background. PID file: {pid_file}")
+            return 0
+         
+         # Child process continues
+         os.setsid()  # Create new session
+         os.chdir('/')  # Change to root directory
+         
+         # Redirect stdout/stderr to prevent issues
+         sys.stdout.flush()
+         sys.stderr.flush()
+         
+         # Close file descriptors
+         with open('/dev/null', 'r') as devnull:
+            os.dup2(devnull.fileno(), sys.stdin.fileno())
+         with open('/dev/null', 'w') as devnull:
+            os.dup2(devnull.fileno(), sys.stdout.fileno())
+            os.dup2(devnull.fileno(), sys.stderr.fileno())
+      
+      # Write PID file
+      try:
+         with open(pid_file, 'w') as f:
+            f.write(str(os.getpid()))
+      except Exception as e:
+         print(f"Error: Failed to write PID file: {str(e)}")
+         return 1
+      
+      # Set up signal handlers for graceful shutdown
+      def signal_handler(signum, frame):
+         print(f"Received signal {signum}, shutting down...")
+         if pid_file.exists():
+            pid_file.unlink()
+         collector.stop_background_updates()
+         sys.exit(0)
+      
+      signal.signal(signal.SIGTERM, signal_handler)
+      signal.signal(signal.SIGINT, signal_handler)
+      
+      try:
+         # Enable auto-persist for daemon mode
+         self.config.database.auto_persist = True
+         
+         # Start background updates
+         collector.start_background_updates()
+         
+         if not (hasattr(args, 'detach') and args.detach):
+            print("Daemon running in foreground. Press Ctrl+C to stop.")
+            print(f"PID file: {pid_file}")
+         
+         # Keep the main thread alive
+         try:
+            while True:
+               time.sleep(1)
+         except KeyboardInterrupt:
+            print("\nStopping daemon...")
+            collector.stop_background_updates()
+            
+      finally:
+         # Clean up PID file
+         if pid_file.exists():
+            pid_file.unlink()
+      
+      return 0
+   
+   def _stop_daemon(self, args: argparse.Namespace) -> int:
+      """Stop the daemon"""
+      pid_file = self._get_pid_file_path(args)
+      
+      if not pid_file.exists():
+         print("Daemon is not running (no PID file found)")
+         return 1
+      
+      try:
+         with open(pid_file, 'r') as f:
+            pid = int(f.read().strip())
+         
+         print(f"Stopping daemon with PID {pid}...")
+         
+         # Send SIGTERM for graceful shutdown
+         try:
+            os.kill(pid, signal.SIGTERM)
+            
+            # Wait for process to exit
+            for i in range(30):  # Wait up to 30 seconds
+               try:
+                  os.kill(pid, 0)  # Check if process still exists
+                  time.sleep(1)
+               except OSError:
+                  # Process has exited
+                  break
+            else:
+               # Process still running, force kill
+               print("Process didn't exit gracefully, forcing shutdown...")
+               os.kill(pid, signal.SIGKILL)
+            
+            print("Daemon stopped successfully")
+            
+            # Remove PID file
+            if pid_file.exists():
+               pid_file.unlink()
+            
+            return 0
+            
+         except OSError as e:
+            if e.errno == 3:  # No such process
+               print("Daemon was not running (stale PID file)")
+               pid_file.unlink()
+               return 0
+            else:
+               print(f"Error stopping daemon: {str(e)}")
+               return 1
+         
+      except (ValueError, FileNotFoundError) as e:
+         print(f"Error reading PID file: {str(e)}")
+         return 1
+   
+   def _show_daemon_status(self, args: argparse.Namespace) -> int:
+      """Show daemon status"""
+      pid_file = self._get_pid_file_path(args)
+      
+      print("PBS Monitor Daemon Status")
+      print("=" * 50)
+      
+      # Check daemon process
+      if pid_file.exists():
+         try:
+            with open(pid_file, 'r') as f:
+               pid = int(f.read().strip())
+            
+            try:
+               os.kill(pid, 0)  # Check if process exists
+               print(f"Status: Running (PID {pid})")
+               print(f"PID file: {pid_file}")
+            except OSError:
+               print("Status: Not running (stale PID file)")
+               print(f"Stale PID file: {pid_file}")
+         except (ValueError, FileNotFoundError):
+            print("Status: Not running (invalid PID file)")
+      else:
+         print("Status: Not running")
+      
+      # Show configuration
+      print(f"\nConfiguration:")
+      print(f"  Database enabled: {hasattr(self.config, 'database')}")
+      if hasattr(self.config, 'database'):
+         print(f"  Database URL: {self.config.database.url}")
+         print(f"  Auto-persist: {self.config.database.auto_persist}")
+         print(f"  Daemon enabled: {self.config.database.daemon_enabled}")
+         print(f"  Job collection interval: {self.config.database.job_collection_interval}s")
+         print(f"  Node collection interval: {self.config.database.node_collection_interval}s")
+         print(f"  Queue collection interval: {self.config.database.queue_collection_interval}s")
+      
+      # Show recent collection activity
+      try:
+         from ..data_collector import DataCollector
+         collector = DataCollector(self.config)
+         if collector.database_enabled:
+            collection_repo = collector._repository_factory.get_data_collection_repository()
+            recent_collections = collection_repo.get_recent_collections(hours=24)
+            
+            print(f"\nRecent Collection Activity (last 24 hours):")
+            if recent_collections:
+               for log_entry in recent_collections[:10]:  # Show last 10
+                  # Now working with dictionaries instead of ORM objects
+                  status = log_entry['status']
+                  timestamp = log_entry['timestamp']
+                  collection_type = log_entry['collection_type'] or "unknown"
+                  duration = log_entry['duration_seconds']
+                  jobs = log_entry['jobs_collected']
+                  queues = log_entry['queues_collected']
+                  nodes = log_entry['nodes_collected']
+                  entities = jobs + queues + nodes
+                  
+                  status_symbol = "✓" if status == "SUCCESS" else "✗"
+                  print(f"  {status_symbol} {format_timestamp(timestamp)} - "
+                        f"{collection_type} - "
+                        f"{entities} entities - "
+                        f"{duration:.1f}s")
+            else:
+               print("  No recent collection activity")
+      except Exception as e:
+         print(f"\nError getting collection status: {str(e)}")
+      
+      return 0

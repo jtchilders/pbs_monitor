@@ -1,0 +1,2 @@
+[console_scripts]
+pbs-monitor = pbs_monitor.cli.main:main

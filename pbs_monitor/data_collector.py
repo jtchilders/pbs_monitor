@@ -359,9 +359,12 @@ class DataCollector:
       queues = self.get_queues()
       return {queue.name: queue.utilization_percentage() for queue in queues}
    
-   def collect_and_persist(self) -> Dict[str, Any]:
+   def collect_and_persist(self, collection_type: str = "manual") -> Dict[str, Any]:
       """
       Collect current PBS data and persist to database
+      
+      Args:
+         collection_type: Type of collection ("manual", "daemon", "cli")
       
       Returns:
          Dictionary with collection results
@@ -373,7 +376,7 @@ class DataCollector:
       
       # Start data collection log
       collection_repo = self._repository_factory.get_data_collection_repository()
-      log_id = collection_repo.log_collection_start("manual")
+      log_id = collection_repo.log_collection_start(collection_type)
       
       try:
          # Collect all data
@@ -604,7 +607,7 @@ class DataCollector:
                 hasattr(self.config, 'database') and 
                 self.config.database.auto_persist):
                try:
-                  self.collect_and_persist()
+                  self.collect_and_persist(collection_type="daemon")
                except Exception as e:
                   self.logger.error(f"Failed to persist data: {str(e)}")
             

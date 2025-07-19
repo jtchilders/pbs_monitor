@@ -463,13 +463,28 @@ class DataCollectionRepository(BaseRepository):
                 log_entry.error_message = error_message
                 session.commit()
     
-    def get_recent_collections(self, hours: int = 24) -> List[DataCollectionLog]:
+    def get_recent_collections(self, hours: int = 24) -> List[Dict[str, Any]]:
         """Get recent data collection logs"""
         cutoff_time = datetime.now() - timedelta(hours=hours)
         with self.get_session() as session:
-            return session.query(DataCollectionLog).filter(
+            logs = session.query(DataCollectionLog).filter(
                 DataCollectionLog.timestamp >= cutoff_time
             ).order_by(desc(DataCollectionLog.timestamp)).all()
+            
+            # Convert to plain dictionaries to avoid session detachment issues
+            result = []
+            for log in logs:
+                result.append({
+                    'timestamp': log.timestamp,
+                    'collection_type': log.collection_type,
+                    'status': log.status.value if log.status else 'UNKNOWN',
+                    'jobs_collected': log.jobs_collected or 0,
+                    'queues_collected': log.queues_collected or 0,
+                    'nodes_collected': log.nodes_collected or 0,
+                    'duration_seconds': log.duration_seconds or 0,
+                    'error_message': log.error_message
+                })
+            return result
     
     def get_collection_statistics(self) -> Dict[str, Any]:
         """Get collection statistics"""
