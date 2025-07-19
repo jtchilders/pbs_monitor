@@ -17,13 +17,14 @@ A comprehensive Python toolkit for monitoring and managing PBS (Portable Batch S
 - **Completed Job Tracking**: Automatic collection using `qstat -x` before PBS purges data
 - **History Command**: Comprehensive interface for analyzing completed jobs
 - **Database Management**: Complete CLI for database operations
+- **Background Daemon**: Continuous data collection service with process management
+- **On-Demand Collection**: --collect flag for immediate database persistence
 - **Concurrent Access**: Multi-user and multi-process support
 - **Data Quality**: Validation, auditing, and error handling
 - **Migration System**: Automated schema updates and data management
 
 ### Planned Features (Phase 3+)
 - **Prediction Engine**: Machine learning-based job start time prediction
-- **Background Daemon**: Continuous data collection service
 - **Web Dashboard**: Real-time monitoring interface
 - **Advanced Analytics**: Trend analysis and performance reporting
 - **Optimization Suggestions**: Resource usage recommendations
@@ -80,6 +81,38 @@ pbs-monitor nodes
 
 # Show queue information
 pbs-monitor queues
+```
+
+### On-Demand Database Collection
+```bash
+# Collect and persist data while viewing status
+pbs-monitor status --collect
+
+# Collect job data to database
+pbs-monitor jobs --collect
+
+# Collect node and queue data
+pbs-monitor nodes --collect
+pbs-monitor queues --collect
+```
+
+### Background Daemon Management
+```bash
+# Start daemon in foreground (for testing)
+pbs-monitor daemon start
+
+# Start daemon in background (for production)
+pbs-monitor daemon start --detach
+
+# Check daemon status and recent collection activity
+pbs-monitor daemon status
+
+# Stop daemon gracefully
+pbs-monitor daemon stop
+
+# Custom PID file location
+pbs-monitor daemon start --detach --pid-file /var/run/pbs-monitor.pid
+pbs-monitor daemon stop --pid-file /var/run/pbs-monitor.pid
 ```
 
 ### Historical Job Analysis
@@ -210,6 +243,34 @@ Clean up old data from database.
 #### `database migrate`
 Migrate database to latest schema version.
 
+### Daemon Commands
+
+#### `daemon start`
+Start background data collection daemon.
+
+**Options:**
+- `--detach`: Run daemon in background (detached mode)
+- `--pid-file`: PID file path (default: ~/.pbs_monitor_daemon.pid)
+
+#### `daemon stop`
+Stop background data collection daemon.
+
+**Options:**
+- `--pid-file`: PID file path (default: ~/.pbs_monitor_daemon.pid)
+
+#### `daemon status`
+Show daemon status and recent collection activity.
+
+Shows:
+- Process status (running/not running)
+- Configuration settings
+- Recent collection activity with timestamps and statistics
+
+### Collection Enhancement
+
+All data display commands (`status`, `jobs`, `nodes`, `queues`) support an additional option:
+- `--collect`: Collect and persist data to database after displaying
+
 For detailed command documentation, see [Database Documentation](docs/DATABASE.md).
 
 ## Configuration
@@ -233,6 +294,13 @@ database:
   url: "sqlite:///~/.pbs_monitor.db"  # SQLite for development
   # url: "postgresql://user:password@host:port/database"  # PostgreSQL for production
   pool_size: 5
+  
+  # Daemon configuration
+  daemon_enabled: true
+  auto_persist: false
+  job_collection_interval: 900      # 15 minutes
+  node_collection_interval: 1800    # 30 minutes  
+  queue_collection_interval: 3600   # 60 minutes
   
 # Display configuration
 display:
@@ -425,17 +493,20 @@ For issues and questions:
 
 ## Roadmap
 
-### Phase 2 (Current) - Database Implementation ✅
+### Phase 2 (Complete) - Database Implementation ✅
 - Persistent storage with SQLite/PostgreSQL
 - Historical data collection beyond PBS limits
 - Database management CLI
+- Background daemon for continuous collection
+- On-demand collection with --collect flag
 - Concurrent access support
+- Process management and daemon monitoring
 
 ### Phase 3 (Planned) - Analytics & Prediction
 - Machine learning prediction engine
-- Background daemon for continuous collection
 - Advanced historical analysis
 - Performance optimization recommendations
+- Predictive job start time estimation
 
 ### Phase 4 (Future) - Web Interface
 - Real-time web dashboard

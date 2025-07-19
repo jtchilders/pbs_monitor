@@ -86,6 +86,38 @@ pbs-monitor history --include-pbs-history
 pbs-monitor history -s F --sort runtime --reverse --limit 50
 ```
 
+### On-Demand Data Collection
+```bash
+# Collect data while viewing system status
+pbs-monitor status --collect
+
+# Collect job data to database
+pbs-monitor jobs --collect
+
+# Collect node and queue data  
+pbs-monitor nodes --collect
+pbs-monitor queues --collect
+```
+
+### Daemon Management
+```bash
+# Start background data collection daemon
+pbs-monitor daemon start
+
+# Start daemon in background (detached mode)
+pbs-monitor daemon start --detach
+
+# Check daemon status and recent activity
+pbs-monitor daemon status
+
+# Stop daemon gracefully
+pbs-monitor daemon stop
+
+# Use custom PID file location
+pbs-monitor daemon start --detach --pid-file /var/run/pbs-monitor.pid
+pbs-monitor daemon stop --pid-file /var/run/pbs-monitor.pid
+```
+
 ## Configuration
 
 ### SQLite Configuration (Development)
@@ -105,6 +137,17 @@ database:
   pool_size: 10
   max_overflow: 20
   echo_sql: false
+  
+  # Daemon configuration for background collection
+  daemon_enabled: true
+  auto_persist: true
+  job_collection_interval: 600      # 10 minutes (production)
+  node_collection_interval: 1200    # 20 minutes
+  queue_collection_interval: 3600   # 60 minutes
+  
+  # Data retention settings
+  job_history_days: 365
+  snapshot_retention_days: 90
 ```
 
 ### Environment Variables
@@ -118,9 +161,9 @@ export PBS_MONITOR_DB_URL="postgresql://user:password@localhost:5432/pbs_monitor
 ### Collection Strategy
 The database system uses a comprehensive data collection strategy:
 
-1. **On-Demand Updates** - Triggered when users run CLI commands
+1. **On-Demand Updates** - Triggered when users run CLI commands with --collect flag
 2. **Completed Job Collection** - Automatic collection using `qstat -x` to capture jobs before PBS purges them
-3. **Scheduled Daemon Updates** - Background process (planned for future implementation)
+3. **Background Daemon** - Continuous data collection service with configurable intervals
 
 ### Completed Job Tracking
 To overcome PBS's typical 1-week history limitation, the system automatically collects completed jobs:
@@ -129,12 +172,24 @@ To overcome PBS's typical 1-week history limitation, the system automatically co
 - Prevents data loss when jobs are purged from PBS history
 - Accessible via the `history` command for comprehensive analysis
 
-### Collection Frequency (Planned)
+### Collection Frequency
 - **Jobs**: Every 15 minutes (to catch state transitions)
 - **Completed Jobs**: During each collection cycle (prevents data loss)
 - **Nodes**: Every 30 minutes (hardware changes less frequently)
 - **Queues**: Every 60 minutes (configuration changes infrequently)
 - **System Snapshots**: Every 30 minutes (for trend analysis)
+
+### Daemon Configuration
+The background daemon can be configured with custom collection intervals:
+
+```yaml
+database:
+  daemon_enabled: true
+  auto_persist: true
+  job_collection_interval: 900      # 15 minutes (default)
+  node_collection_interval: 1800    # 30 minutes (default)
+  queue_collection_interval: 3600   # 60 minutes (default)
+```
 
 ## Schema Details
 
@@ -205,11 +260,11 @@ CREATE TABLE system_snapshots (
 ## Future Enhancements
 
 ### Planned Features
-- **Background Daemon** - Continuous data collection
 - **Data Retention Policies** - Automatic cleanup of old data
 - **Advanced Analytics** - Pre-computed metrics and trends
 - **Data Export** - Export to various formats for analysis
 - **Real-time Updates** - WebSocket support for live data
+- **Multi-cluster Support** - Manage multiple PBS clusters
 
 ### Machine Learning Integration
 - Feature engineering utilities
