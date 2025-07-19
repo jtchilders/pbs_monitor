@@ -265,10 +265,9 @@ class PBSCommands:
             self.logger.warning("Failed to load sample completed job data, returning empty list")
             return []
       else:
+         # Note: We don't use -u option because it causes PBS to return tabular format instead of JSON
+         # User filtering is done in Python after parsing the JSON
          command = ["/opt/pbs/bin/qstat", "-x", "-f", "-F", "json"]
-         
-         if user:
-            command.extend(["-u", user])
          
          try:
             output = self._run_command(command)
@@ -288,8 +287,8 @@ class PBSCommands:
             # For completed jobs, we don't calculate scores since they're no longer in queue
             job = PBSJob.from_qstat_json(job_info, score=None)
             
-            # Apply user filter if specified and using sample data
-            if user and self.use_sample_data and job.owner != user:
+            # Apply user filter if specified (works for both real PBS and sample data)
+            if user and job.owner != user:
                continue
                
             # Only include completed jobs (should be all of them from qstat -x, but double-check)
