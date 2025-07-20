@@ -50,11 +50,13 @@ class DataCollector:
       self._jobs: List[PBSJob] = []
       self._queues: List[PBSQueue] = []
       self._nodes: List[PBSNode] = []
+      self._server_data: Optional[Dict[str, Any]] = None
       
       # Cache timestamps
       self._last_job_update: Optional[datetime] = None
       self._last_queue_update: Optional[datetime] = None
       self._last_node_update: Optional[datetime] = None
+      self._last_server_update: Optional[datetime] = None
       
       # Threading for background updates
       self._update_lock = threading.Lock()
@@ -522,7 +524,9 @@ class DataCollector:
       try:
          with self._update_lock:
             self.logger.debug("Refreshing job data")
-            self._jobs = self.pbs_commands.qstat_jobs()
+            # Get cached server data and defaults to avoid repeated qstat_server calls
+            server_defaults = self.get_cached_server_defaults()
+            self._jobs = self.pbs_commands.qstat_jobs(server_defaults=server_defaults)
             self._last_job_update = datetime.now()
             self.logger.debug(f"Updated {len(self._jobs)} jobs")
       except PBSCommandError as e:
@@ -550,8 +554,62 @@ class DataCollector:
       except PBSCommandError as e:
          self.logger.error(f"Failed to refresh nodes: {str(e)}")
    
+   def _refresh_server(self) -> None:
+      """Refresh server data from PBS system"""
+      try:
+         with self._update_lock:
+            self.logger.debug("Refreshing server data")
+            self._server_data = self.pbs_commands.qstat_server()
+            self._last_server_update = datetime.now()
+            self.logger.debug("Updated server data")
+      except PBSCommandError as e:
+         self.logger.error(f"Failed to refresh server data: {str(e)}")
+   
+   def get_cached_server_defaults(self) -> Optional[Dict[str, Any]]:
+      """
+      Get cached server defaults, refreshing if needed
+      
+      Returns:
+         Server defaults dictionary or None if not available
+      """
+      should_refresh = (
+         self._last_server_update is None or
+         (datetime.now() - self._last_server_update).total_seconds() > 
+         self.config.pbs.server_refresh_interval
+      )
+      
+      if should_refresh:
+         self._refresh_server()
+      
+      if self._server_data:
+         # Extract server defaults from server data
+         server_info = self._server_data.get("Server", {})
+         for server_name, server_details in server_info.items():
+            return server_details.get("resources_default", {})
+      
+      return None
+   
+   def get_cached_server_data(self) -> Optional[Dict[str, Any]]:
+      """
+      Get cached server data, refreshing if needed
+      
+      Returns:
+         Full server data dictionary or None if not available
+      """
+      should_refresh = (
+         self._last_server_update is None or
+         (datetime.now() - self._last_server_update).total_seconds() > 
+         self.config.pbs.server_refresh_interval
+      )
+      
+      if should_refresh:
+         self._refresh_server()
+      
+      return self._server_data
+   
    def refresh_all(self) -> None:
       """Refresh all data from PBS system"""
+      self._refresh_server()
       self._refresh_jobs()
       self._refresh_queues()
       self._refresh_nodes()

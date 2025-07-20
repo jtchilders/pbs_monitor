@@ -32,6 +32,7 @@ class PBSConfig:
    job_refresh_interval: int = 30
    node_refresh_interval: int = 60
    queue_refresh_interval: int = 300
+   server_refresh_interval: int = 3600  # 1 hour - server info changes infrequently
 
 
 @dataclass
@@ -224,7 +225,8 @@ class Config:
             'default_queue': 'default',
             'job_refresh_interval': 30,
             'node_refresh_interval': 60,
-            'queue_refresh_interval': 300
+            'queue_refresh_interval': 300,
+            'server_refresh_interval': 3600
          },
          'display': {
             'max_table_width': 120,

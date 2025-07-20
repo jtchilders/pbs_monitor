@@ -181,13 +181,15 @@ class PBSCommands:
       except Exception as e:
          raise PBSCommandError(f"Failed to load sample data from {filename}: {str(e)}")
    
-   def qstat_jobs(self, user: Optional[str] = None, job_id: Optional[str] = None) -> List[PBSJob]:
+   def qstat_jobs(self, user: Optional[str] = None, job_id: Optional[str] = None, 
+                  server_defaults: Optional[Dict[str, Any]] = None) -> List[PBSJob]:
       """
       Get job information using qstat
       
       Args:
          user: Filter by username
          job_id: Get specific job ID
+         server_defaults: Pre-fetched server defaults (optional, will fetch if not provided)
          
       Returns:
          List of PBSJob objects
@@ -215,16 +217,17 @@ class PBSCommands:
          except Exception as e:
             raise PBSCommandError(f"Failed to get job information: {str(e)}")
       
-      # Get server defaults once for score calculation
-      server_defaults = None
-      try:
-         server_data = self.qstat_server()
-         server_info = server_data.get("Server", {})
-         for server_name, server_details in server_info.items():
-            server_defaults = server_details.get("resources_default", {})
-            break
-      except Exception as e:
-         self.logger.warning(f"Failed to get server defaults for score calculation: {str(e)}")
+      # Get server data and defaults for score calculation (only if not provided)
+      server_data_for_scoring = None
+      if server_defaults is None:
+         try:
+            server_data_for_scoring = self.qstat_server()
+            server_info = server_data_for_scoring.get("Server", {})
+            for server_name, server_details in server_info.items():
+               server_defaults = server_details.get("resources_default", {})
+               break
+         except Exception as e:
+            self.logger.warning(f"Failed to get server defaults for score calculation: {str(e)}")
       
       jobs = []
       jobs_data = data.get("Jobs", {})
@@ -235,7 +238,7 @@ class PBSCommands:
             # Calculate job score
             score = None
             if server_defaults:
-               score = self.calculate_job_score(job_info, server_defaults)
+               score = self.calculate_job_score(job_info, server_defaults, server_data_for_scoring)
             
             job = PBSJob.from_qstat_json(job_info, score=score)
             # Apply user filter if specified and using sample data
@@ -512,15 +515,19 @@ class PBSCommands:
       
       return data
    
-   def get_job_sort_formula(self) -> Optional[str]:
+   def get_job_sort_formula(self, server_data: Optional[Dict[str, Any]] = None) -> Optional[str]:
       """
       Get the job sort formula from the PBS server
+      
+      Args:
+         server_data: Pre-fetched server data (optional, will fetch if not provided)
       
       Returns:
          Job sort formula string or None if not available
       """
       try:
-         server_data = self.qstat_server()
+         if server_data is None:
+            server_data = self.qstat_server()
          
          # Navigate to the server information in the JSON structure
          server_info = server_data.get("Server", {})
@@ -537,27 +544,32 @@ class PBSCommands:
          self.logger.error(f"Failed to get job sort formula: {str(e)}")
          return None
    
-   def calculate_job_score(self, job_data: Dict[str, Any], server_defaults: Optional[Dict[str, Any]] = None) -> Optional[float]:
+   def calculate_job_score(self, job_data: Dict[str, Any], server_defaults: Optional[Dict[str, Any]] = None, 
+                          server_data: Optional[Dict[str, Any]] = None) -> Optional[float]:
       """
       Calculate job score using the server's job sort formula
       
       Args:
          job_data: Job data dictionary from qstat JSON
          server_defaults: Server resource defaults (optional, will fetch if not provided)
+         server_data: Pre-fetched server data (optional, will fetch if not provided)
          
       Returns:
          Calculated job score or None if calculation fails
       """
       try:
+         # Get server data if not provided (for both formula and defaults)
+         if server_data is None:
+            server_data = self.qstat_server()
+         
          # Get the job sort formula
-         formula = self.get_job_sort_formula()
+         formula = self.get_job_sort_formula(server_data=server_data)
          if not formula:
             self.logger.warning("No job sort formula available")
             return None
          
          # Get server defaults if not provided
          if server_defaults is None:
-            server_data = self.qstat_server()
             server_info = server_data.get("Server", {})
             for server_name, server_details in server_info.items():
                server_defaults = server_details.get("resources_default", {})
