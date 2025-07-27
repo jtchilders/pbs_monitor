@@ -45,24 +45,36 @@ class JobRepository(BaseRepository):
     def get_active_jobs(self) -> List[Job]:
         """Get all active jobs (running or queued)"""
         with self.get_session() as session:
-            return session.query(Job).filter(
+            jobs = session.query(Job).filter(
                 Job.state.in_([JobState.RUNNING, JobState.QUEUED, JobState.HELD])
             ).all()
+            # Force loading of all attributes to avoid detached instance issues
+            session.expunge_all()
+            return jobs
     
     def get_jobs_by_user(self, user: str) -> List[Job]:
         """Get jobs for specific user"""
         with self.get_session() as session:
-            return session.query(Job).filter(Job.owner == user).all()
+            jobs = session.query(Job).filter(Job.owner == user).all()
+            # Force loading of all attributes to avoid detached instance issues
+            session.expunge_all()
+            return jobs
     
     def get_jobs_by_queue(self, queue: str) -> List[Job]:
         """Get jobs in specific queue"""
         with self.get_session() as session:
-            return session.query(Job).filter(Job.queue == queue).all()
+            jobs = session.query(Job).filter(Job.queue == queue).all()
+            # Force loading of all attributes to avoid detached instance issues
+            session.expunge_all()
+            return jobs
     
     def get_jobs_by_state(self, state: JobState) -> List[Job]:
         """Get jobs in specific state"""
         with self.get_session() as session:
-            return session.query(Job).filter(Job.state == state).all()
+            jobs = session.query(Job).filter(Job.state == state).all()
+            # Force loading of all attributes to avoid detached instance issues
+            session.expunge_all()
+            return jobs
     
     def get_historical_jobs(self, user: Optional[str] = None, days: int = 30) -> List[Job]:
         """Get historical jobs from database"""
@@ -71,7 +83,10 @@ class JobRepository(BaseRepository):
             query = session.query(Job).filter(Job.last_updated >= cutoff_date)
             if user:
                 query = query.filter(Job.owner == user)
-            return query.all()
+            jobs = query.all()
+            # Force loading of all attributes to avoid detached instance issues
+            session.expunge_all()
+            return jobs
     
     def add_job(self, job: Job) -> Job:
         """Add new job to database"""
@@ -171,7 +186,10 @@ class JobRepository(BaseRepository):
     def get_recent_jobs(self, limit: int = 100) -> List[Job]:
         """Get most recent jobs"""
         with self.get_session() as session:
-            return session.query(Job).order_by(desc(Job.submit_time)).limit(limit).all()
+            jobs = session.query(Job).order_by(desc(Job.submit_time)).limit(limit).all()
+            # Force loading of all attributes to avoid detached instance issues
+            session.expunge_all()
+            return jobs
 
 
 class QueueRepository(BaseRepository):
@@ -180,19 +198,29 @@ class QueueRepository(BaseRepository):
     def get_queue_by_name(self, name: str) -> Optional[Queue]:
         """Get queue by name"""
         with self.get_session() as session:
-            return session.query(Queue).filter(Queue.name == name).first()
+            queue = session.query(Queue).filter(Queue.name == name).first()
+            if queue:
+                # Force loading of all attributes to avoid detached instance issues
+                session.expunge(queue)
+            return queue
     
     def get_all_queues(self) -> List[Queue]:
         """Get all queues"""
         with self.get_session() as session:
-            return session.query(Queue).all()
+            queues = session.query(Queue).all()
+            # Force loading of all attributes to avoid detached instance issues
+            session.expunge_all()
+            return queues
     
     def get_enabled_queues(self) -> List[Queue]:
         """Get enabled queues"""
         with self.get_session() as session:
-            return session.query(Queue).filter(
+            queues = session.query(Queue).filter(
                 Queue.state.in_([QueueState.ENABLED_STARTED, QueueState.ENABLED_STOPPED])
             ).all()
+            # Force loading of all attributes to avoid detached instance issues
+            session.expunge_all()
+            return queues
     
     def add_queue(self, queue: Queue) -> Queue:
         """Add new queue to database"""
@@ -281,24 +309,37 @@ class NodeRepository(BaseRepository):
     def get_node_by_name(self, name: str) -> Optional[Node]:
         """Get node by name"""
         with self.get_session() as session:
-            return session.query(Node).filter(Node.name == name).first()
+            node = session.query(Node).filter(Node.name == name).first()
+            if node:
+                # Force loading of all attributes to avoid detached instance issues
+                session.expunge(node)
+            return node
     
     def get_all_nodes(self) -> List[Node]:
         """Get all nodes"""
         with self.get_session() as session:
-            return session.query(Node).all()
+            nodes = session.query(Node).all()
+            # Force loading of all attributes to avoid detached instance issues
+            session.expunge_all()
+            return nodes
     
     def get_available_nodes(self) -> List[Node]:
         """Get available nodes"""
         with self.get_session() as session:
-            return session.query(Node).filter(
+            nodes = session.query(Node).filter(
                 Node.state.in_([NodeState.FREE, NodeState.JOB_SHARING])
             ).all()
+            # Force loading of all attributes to avoid detached instance issues
+            session.expunge_all()
+            return nodes
     
     def get_nodes_by_state(self, state: NodeState) -> List[Node]:
         """Get nodes in specific state"""
         with self.get_session() as session:
-            return session.query(Node).filter(Node.state == state).all()
+            nodes = session.query(Node).filter(Node.state == state).all()
+            # Force loading of all attributes to avoid detached instance issues
+            session.expunge_all()
+            return nodes
     
     def add_node(self, node: Node) -> Node:
         """Add new node to database"""
