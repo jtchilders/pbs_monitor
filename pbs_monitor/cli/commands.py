@@ -919,13 +919,13 @@ class HistoryCommand(BaseCommand):
          if args.state != "all":
             historical_jobs = [job for job in historical_jobs if job.state.value == args.state]
          
-         # Apply limit
+         # Sort jobs BEFORE applying limit to get the top N jobs by sort criteria
+         historical_jobs = self._sort_jobs(historical_jobs, args.sort, args.reverse)
+         
+         # Apply limit after sorting to get the top N jobs
          if len(historical_jobs) > args.limit:
             historical_jobs = historical_jobs[:args.limit]
-            print(f"Showing first {args.limit} jobs (use --limit to adjust)")
-         
-         # Sort jobs
-         historical_jobs = self._sort_jobs(historical_jobs, args.sort, args.reverse)
+            print(f"Showing top {args.limit} jobs by {args.sort} (use --limit to adjust)")
          
          # Display jobs
          self._display_historical_jobs(historical_jobs, args)
