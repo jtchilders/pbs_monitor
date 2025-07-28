@@ -526,6 +526,7 @@ class DataCollector:
             self.logger.debug("Refreshing job data")
             # Get cached server data and defaults to avoid repeated qstat_server calls
             server_defaults = self.get_cached_server_defaults()
+            self.logger.debug(f"Server defaults: {server_defaults}")
             self._jobs = self.pbs_commands.qstat_jobs(server_defaults=server_defaults)
             self._last_job_update = datetime.now()
             self.logger.debug(f"Updated {len(self._jobs)} jobs")
@@ -579,6 +580,7 @@ class DataCollector:
       )
       
       if should_refresh:
+         self.logger.debug("Refreshing server data")
          self._refresh_server()
       
       if self._server_data:
