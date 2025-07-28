@@ -130,7 +130,12 @@ pbs-monitor history -s F --sort runtime --reverse
 pbs-monitor history --include-pbs-history
 
 # Show specific columns with increased limit
-pbs-monitor history --columns job_id,name,owner,runtime,exit_status --limit 200
+pbs-monitor history --columns job_id,name,owner,nodes,walltime,queued,runtime,exit_status --limit 200
+
+# Table width control examples
+pbs-monitor jobs --auto-width              # Use full terminal width
+pbs-monitor jobs --max-width 200           # Force wider table
+pbs-monitor history --no-expand --wrap     # Compact table with word wrapping
 ```
 
 ### Database Management
@@ -164,6 +169,12 @@ pbs-monitor config --show
 - `-v, --verbose`: Enable verbose logging
 - `-q, --quiet`: Suppress normal output
 - `--log-file`: Specify log file path
+
+### Table Display Options
+- `--max-width N`: Set maximum table width (overrides config)
+- `--auto-width`: Auto-detect terminal width (ignores max-width)
+- `--no-expand`: Don't expand columns to fit content
+- `--wrap`: Enable word wrapping in table cells
 
 ### Core Commands
 

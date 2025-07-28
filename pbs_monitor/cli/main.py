@@ -65,6 +65,31 @@ Examples:
       help="Use sample JSON data instead of actual PBS commands (for testing)"
    )
    
+   # Table width control options
+   parser.add_argument(
+      "--max-width",
+      type=int,
+      help="Maximum table width (overrides config)"
+   )
+   
+   parser.add_argument(
+      "--auto-width",
+      action="store_true",
+      help="Auto-detect terminal width"
+   )
+   
+   parser.add_argument(
+      "--no-expand",
+      action="store_true",
+      help="Don't expand columns to fit content"
+   )
+   
+   parser.add_argument(
+      "--wrap",
+      action="store_true",
+      help="Enable word wrapping in table cells"
+   )
+   
    # Create subparsers
    subparsers = parser.add_subparsers(
       dest="command",
@@ -204,7 +229,7 @@ Examples:
    history_parser.add_argument(
       "--sort",
       default="submit_time",
-      help="Column to sort by: job_id, name, owner, state, queue, submit_time, start_time, end_time, runtime (default: submit_time)"
+      help="Column to sort by: job_id, name, owner, state, queue, nodes, walltime, submit_time, start_time, end_time, queued, runtime (default: submit_time)"
    )
    history_parser.add_argument(
       "--reverse",
@@ -390,6 +415,23 @@ def setup_logging_from_args(args: argparse.Namespace, config: Config) -> None:
    )
 
 
+def apply_cli_overrides(args: argparse.Namespace, config: Config) -> None:
+   """Apply command-line overrides to configuration"""
+   
+   # Apply table width overrides
+   if hasattr(args, 'max_width') and args.max_width:
+      config.display.max_table_width = args.max_width
+   
+   if hasattr(args, 'auto_width') and args.auto_width:
+      config.display.auto_width = True
+   
+   if hasattr(args, 'no_expand') and args.no_expand:
+      config.display.expand_columns = False
+   
+   if hasattr(args, 'wrap') and args.wrap:
+      config.display.word_wrap = True
+
+
 def handle_config_command(args: argparse.Namespace, config: Config) -> int:
    """Handle configuration management commands"""
    
@@ -407,6 +449,8 @@ def handle_config_command(args: argparse.Namespace, config: Config) -> int:
       print(f"Log level: {config.logging.level}")
       print(f"Use colors: {config.display.use_colors}")
       print(f"Max table width: {config.display.max_table_width}")
+      print(f"Auto width: {config.display.auto_width}")
+      print(f"Expand columns: {config.display.expand_columns}")
       return 0
    
    print("Use --create to create sample configuration or --show to display current settings")
@@ -434,6 +478,9 @@ def main(argv: Optional[List[str]] = None) -> int:
    except Exception as e:
       print(f"Error loading configuration: {str(e)}", file=sys.stderr)
       return 1
+   
+   # Apply command-line overrides to config
+   apply_cli_overrides(args, config)
    
    # Setup logging
    setup_logging_from_args(args, config)

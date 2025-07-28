@@ -42,9 +42,16 @@ class BaseCommand(ABC):
       self.config = config
       self.logger = logging.getLogger(__name__)
       
-      # Initialize console for rich output
+      # Initialize console for rich output with better width handling
+      console_width = None
+      if config.display.auto_width:
+         # Let Rich auto-detect terminal width
+         console_width = None
+      else:
+         console_width = config.display.max_table_width
+      
       self.console = Console(
-         width=config.display.max_table_width,
+         width=console_width,
          force_terminal=True if config.display.use_colors else False
       )
    
@@ -54,24 +61,84 @@ class BaseCommand(ABC):
       pass
    
    def _create_table(self, title: str, headers: List[str], rows: List[List[str]]) -> Table:
-      """Create a rich table"""
-      table = Table(title=title, show_header=True, header_style="bold magenta")
+      """Create a rich table with intelligent column sizing"""
+      # Calculate optimal column widths
+      column_widths = self._calculate_column_widths(headers, rows)
       
-      for header in headers:
-         table.add_column(header, style="cyan")
+      # Create table with better sizing options
+      table = Table(
+         title=title, 
+         show_header=True, 
+         header_style="bold magenta",
+         expand=self.config.display.expand_columns,
+         width=None if self.config.display.auto_width else self.config.display.max_table_width
+      )
+      
+      # Add columns with calculated widths
+      for i, header in enumerate(headers):
+         width = column_widths[i] if i < len(column_widths) else None
+         table.add_column(
+            header, 
+            style="cyan",
+            width=width,
+            min_width=self.config.display.min_column_width,
+            max_width=self.config.display.max_column_width,
+            no_wrap=not self.config.display.word_wrap
+         )
       
       for row in rows:
          table.add_row(*row)
       
       return table
    
+   def _calculate_column_widths(self, headers: List[str], rows: List[List[str]]) -> List[int]:
+      """Calculate optimal column widths based on content"""
+      if not rows:
+         return [len(header) + 2 for header in headers]
+      
+      column_widths = []
+      for i, header in enumerate(headers):
+         # Start with header length
+         max_width = len(header)
+         
+         # Check content in this column
+         for row in rows:
+            if i < len(row) and row[i]:
+               content_width = len(str(row[i]))
+               max_width = max(max_width, content_width)
+         
+         # Apply constraints
+         optimal_width = min(
+            max(max_width + 2, self.config.display.min_column_width),
+            self.config.display.max_column_width
+         )
+         
+         column_widths.append(optimal_width)
+      
+      return column_widths
+   
    def _print_table(self, title: str, headers: List[str], rows: List[List[str]]) -> None:
-      """Print a formatted table"""
+      """Print a formatted table with better width handling"""
       if self.config.display.use_colors:
          table = self._create_table(title, headers, rows)
          self.console.print(table)
       else:
          print(f"\n{title}")
+         
+         # For non-colored output, optionally truncate wide columns
+         if not self.config.display.expand_columns:
+            truncated_rows = []
+            for row in rows:
+               truncated_row = []
+               for i, cell in enumerate(row):
+                  if len(str(cell)) > self.config.display.max_column_width:
+                     truncated_cell = str(cell)[:self.config.display.max_column_width-3] + "..."
+                  else:
+                     truncated_cell = str(cell)
+                  truncated_row.append(truncated_cell)
+               truncated_rows.append(truncated_row)
+            rows = truncated_rows
+         
          print(tabulate(rows, headers=headers, tablefmt="grid"))
    
    def _handle_collection_if_requested(self, args: argparse.Namespace) -> None:
@@ -913,9 +980,12 @@ class HistoryCommand(BaseCommand):
          'owner': lambda j: j.owner.lower(),
          'state': lambda j: j.state.value,
          'queue': lambda j: j.queue.lower(),
+         'nodes': lambda j: j.nodes,
+         'walltime': lambda j: self._parse_walltime_for_sort(j.walltime),
          'submit_time': lambda j: j.submit_time or datetime.min,
          'start_time': lambda j: j.start_time or datetime.min,
          'end_time': lambda j: j.end_time or datetime.min,
+         'queued': lambda j: self._calculate_queue_seconds(j),
          'runtime': lambda j: self._calculate_runtime_seconds(j)
       }
       
@@ -936,11 +1006,38 @@ class HistoryCommand(BaseCommand):
          return int((job.end_time - job.start_time).total_seconds())
       return 0
    
+   def _calculate_queue_seconds(self, job: PBSJob) -> int:
+      """Calculate queue time in seconds for sorting"""
+      if job.submit_time and job.start_time:
+         queue_duration = job.start_time - job.submit_time
+         return max(0, int(queue_duration.total_seconds()))  # Ensure non-negative
+      return 0
+   
+   def _parse_walltime_for_sort(self, walltime: Optional[str]) -> int:
+      """Parse walltime string to seconds for sorting"""
+      if not walltime:
+         return 0
+      
+      try:
+         # Handle format like "HH:MM:SS" or "HHHHH:MM:SS"
+         parts = walltime.split(':')
+         if len(parts) == 3:
+            hours, minutes, seconds = map(int, parts)
+            return hours * 3600 + minutes * 60 + seconds
+         elif len(parts) == 2:
+            # Handle format like "MM:SS"
+            minutes, seconds = map(int, parts)
+            return minutes * 60 + seconds
+         else:
+            return 0
+      except (ValueError, AttributeError):
+         return 0
+   
    def _display_historical_jobs(self, jobs: List[PBSJob], args: argparse.Namespace) -> None:
       """Display historical jobs in table format"""
       
       # Determine columns
-      default_columns = ['job_id', 'name', 'owner', 'state', 'queue', 'submit_time', 'runtime', 'exit_status']
+      default_columns = ['job_id', 'name', 'owner', 'state', 'queue', 'nodes', 'walltime', 'submit_time', 'queued', 'runtime', 'exit_status']
       columns = args.columns.split(',') if args.columns else default_columns
       
       # Create table data
@@ -951,12 +1048,14 @@ class HistoryCommand(BaseCommand):
          'owner': lambda j: j.owner,
          'state': lambda j: format_state(j.state.value),
          'queue': lambda j: j.queue,
+         'nodes': lambda j: format_number(j.nodes),
+         'walltime': lambda j: format_duration(j.walltime),
          'submit_time': lambda j: format_timestamp(j.submit_time),
          'start_time': lambda j: format_timestamp(j.start_time),
          'end_time': lambda j: format_timestamp(j.end_time),
+         'queued': lambda j: j.queue_duration() or "N/A",
          'runtime': lambda j: self._format_runtime(j),
          'exit_status': lambda j: str(j.exit_status) if j.exit_status is not None else "N/A",
-         'nodes': lambda j: format_number(j.nodes),
          'cores': lambda j: format_number(j.estimated_total_cores())
       }
       

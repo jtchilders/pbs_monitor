@@ -84,15 +84,23 @@ class PBSJob:
       walltime = resources.get('walltime')
       memory = resources.get('mem')
       
-      # Parse timing
+      # Parse timing - handle different field names for completed vs running jobs
       submit_time = cls._parse_pbs_time(job_data.get('qtime'))
-      start_time = cls._parse_pbs_time(job_data.get('start_time'))
-      end_time = cls._parse_pbs_time(job_data.get('comp_time'))
+      # For start time: try 'stime' first (for completed jobs), then 'start_time'
+      start_time = cls._parse_pbs_time(job_data.get('stime') or job_data.get('start_time'))
+      # For end time: try 'obittime' first (for completed jobs), then 'comp_time'
+      end_time = cls._parse_pbs_time(job_data.get('obittime') or job_data.get('comp_time'))
       
       # Additional attributes
       priority = int(job_data.get('Priority', '0'))
       execution_node = job_data.get('exec_host')
-      exit_status = job_data.get('exit_status')
+      # For exit status: try 'Exit_status' first (capital E), then 'exit_status'
+      exit_status = job_data.get('Exit_status') or job_data.get('exit_status')
+      if exit_status is not None:
+         try:
+            exit_status = int(exit_status)
+         except (ValueError, TypeError):
+            exit_status = None
       
       return cls(
          job_id=job_id,
@@ -136,6 +144,18 @@ class PBSJob:
    
    def runtime_duration(self) -> Optional[str]:
       """Calculate runtime duration if job has started"""
+      # Only show runtime for jobs that actually ran (have start time and finished)
+      if self.state not in [JobState.FINISHED, JobState.COMPLETED] and not self.start_time:
+         return None
+      
+      # For completed jobs, try to use actual walltime from resources_used first
+      if self.state in [JobState.FINISHED, JobState.COMPLETED] and self.raw_attributes:
+         resources_used = self.raw_attributes.get('resources_used', {})
+         actual_walltime = resources_used.get('walltime')
+         if actual_walltime:
+            return actual_walltime
+      
+      # Fall back to calculating from timestamps (for running jobs or if walltime not available)
       if not self.start_time:
          return None
       
@@ -143,6 +163,24 @@ class PBSJob:
       duration = end - self.start_time
       
       total_seconds = int(duration.total_seconds())
+      hours = total_seconds // 3600
+      minutes = (total_seconds % 3600) // 60
+      seconds = total_seconds % 60
+      
+      return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+   def queue_duration(self) -> Optional[str]:
+      """Calculate how long the job was queued before starting"""
+      if not self.submit_time or not self.start_time:
+         return None
+      
+      duration = self.start_time - self.submit_time
+      total_seconds = int(duration.total_seconds())
+      
+      # Handle negative durations (shouldn't happen but just in case)
+      if total_seconds < 0:
+         return None
+      
       hours = total_seconds // 3600
       minutes = (total_seconds % 3600) // 60
       seconds = total_seconds % 60

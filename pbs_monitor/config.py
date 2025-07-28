@@ -41,8 +41,15 @@ class DisplayConfig:
    
    # Table display options
    max_table_width: int = 120
+   auto_width: bool = True  # Auto-detect terminal width
+   min_column_width: int = 8
+   max_column_width: int = 50
    truncate_long_names: bool = True
    max_name_length: int = 20
+   
+   # Column width behavior
+   expand_columns: bool = True  # Allow columns to expand to fit content
+   word_wrap: bool = False  # Enable word wrapping in columns
    
    # Color output
    use_colors: bool = True
@@ -52,7 +59,7 @@ class DisplayConfig:
    
    # Default columns to show
    default_job_columns: List[str] = field(default_factory=lambda: [
-      "job_id", "name", "owner", "state", "queue", "score", "nodes", "walltime"
+      "job_id", "name", "owner", "state", "queue", "nodes", "walltime", "score"
    ])
    
    default_node_columns: List[str] = field(default_factory=lambda: [
@@ -230,12 +237,17 @@ class Config:
          },
          'display': {
             'max_table_width': 120,
+            'auto_width': True,
+            'min_column_width': 8,
+            'max_column_width': 50,
             'truncate_long_names': True,
             'max_name_length': 20,
+            'expand_columns': True,
+            'word_wrap': False,
             'use_colors': True,
             'time_format': '%d-%m %H:%M',
             'default_job_columns': [
-               'job_id', 'name', 'owner', 'state', 'queue', 'score', 'nodes', 'walltime'
+               'job_id', 'name', 'owner', 'state', 'queue', 'nodes', 'walltime', 'score'
             ],
             'default_node_columns': [
                'name', 'state', 'ncpus', 'memory', 'jobs', 'load'
