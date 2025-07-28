@@ -522,12 +522,23 @@ class DataCollector:
    def _refresh_jobs(self) -> None:
       """Refresh job data from PBS system"""
       try:
+         # Get cached server data and defaults BEFORE acquiring lock to avoid deadlock
+         server_data = self.get_cached_server_data()
+         server_defaults = None
+         if server_data:
+            # Extract server defaults from server data
+            server_info = server_data.get("Server", {})
+            for server_name, server_details in server_info.items():
+               server_defaults = server_details.get("resources_default", {})
+               break
+         self.logger.debug(f"Server defaults: {server_defaults}")
+         
          with self._update_lock:
             self.logger.debug("Refreshing job data")
-            # Get cached server data and defaults to avoid repeated qstat_server calls
-            server_defaults = self.get_cached_server_defaults()
-            self.logger.debug(f"Server defaults: {server_defaults}")
-            self._jobs = self.pbs_commands.qstat_jobs(server_defaults=server_defaults)
+            self._jobs = self.pbs_commands.qstat_jobs(
+               server_defaults=server_defaults, 
+               server_data=server_data
+            )
             self._last_job_update = datetime.now()
             self.logger.debug(f"Updated {len(self._jobs)} jobs")
       except PBSCommandError as e:
@@ -559,8 +570,9 @@ class DataCollector:
       """Refresh server data from PBS system"""
       try:
          with self._update_lock:
-            self.logger.debug("Refreshing server data")
+            self.logger.debug("Refreshing server data 2")
             self._server_data = self.pbs_commands.qstat_server()
+            self.logger.debug("Retrieved server data")
             self._last_server_update = datetime.now()
             self.logger.debug("Updated server data")
       except PBSCommandError as e:
@@ -580,7 +592,7 @@ class DataCollector:
       )
       
       if should_refresh:
-         self.logger.debug("Refreshing server data")
+         self.logger.debug("Refreshing server data 1")
          self._refresh_server()
       
       if self._server_data:

@@ -182,7 +182,8 @@ class PBSCommands:
          raise PBSCommandError(f"Failed to load sample data from {filename}: {str(e)}")
    
    def qstat_jobs(self, user: Optional[str] = None, job_id: Optional[str] = None, 
-                  server_defaults: Optional[Dict[str, Any]] = None) -> List[PBSJob]:
+                  server_defaults: Optional[Dict[str, Any]] = None, 
+                  server_data: Optional[Dict[str, Any]] = None) -> List[PBSJob]:
       """
       Get job information using qstat
       
@@ -217,17 +218,24 @@ class PBSCommands:
          except Exception as e:
             raise PBSCommandError(f"Failed to get job information: {str(e)}")
       
-      # Get server data and defaults for score calculation (only if not provided)
-      server_data_for_scoring = None
+      # Get server data for score calculation
+      server_data_for_scoring = server_data
       if server_defaults is None:
          try:
-            server_data_for_scoring = self.qstat_server()
+            if server_data_for_scoring is None:
+               server_data_for_scoring = self.qstat_server()
             server_info = server_data_for_scoring.get("Server", {})
             for server_name, server_details in server_info.items():
                server_defaults = server_details.get("resources_default", {})
                break
          except Exception as e:
             self.logger.warning(f"Failed to get server defaults for score calculation: {str(e)}")
+      elif server_data_for_scoring is None:
+         # If server_defaults is provided but no server_data, get it for formula calculation
+         try:
+            server_data_for_scoring = self.qstat_server()
+         except Exception as e:
+            self.logger.warning(f"Failed to get server data for score calculation: {str(e)}")
       
       jobs = []
       jobs_data = data.get("Jobs", {})
@@ -495,6 +503,7 @@ class PBSCommands:
       Returns:
          Dictionary containing server information including job_sort_formula
       """
+      self.logger.debug("Retrieving server data")
       if self.use_sample_data:
          try:
             data = self._load_sample_data("qstat_B_f_F_json-output.json")
