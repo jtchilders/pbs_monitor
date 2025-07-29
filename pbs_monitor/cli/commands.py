@@ -31,6 +31,9 @@ import os
 import signal
 import sys
 import time
+import socket
+import json
+import getpass
 from pathlib import Path
 
 
@@ -1133,6 +1136,95 @@ class DaemonCommand(BaseCommand):
          return Path(args.pid_file)
       return Path.home() / ".pbs_monitor_daemon.pid"
    
+   def _write_daemon_info(self, pid_file: Path, pid: int) -> None:
+      """Write daemon information to JSON PID file"""
+      daemon_info = {
+         "hostname": socket.gethostname(),
+         "pid": pid,
+         "start_timestamp": datetime.now().isoformat(),
+         "working_directory": str(Path.cwd()),
+         "user": getpass.getuser()
+      }
+      
+      try:
+         with open(pid_file, 'w') as f:
+            json.dump(daemon_info, f, indent=2)
+      except Exception as e:
+         raise Exception(f"Failed to write daemon info to {pid_file}: {str(e)}")
+   
+   def _read_daemon_info(self, pid_file: Path) -> Dict[str, Any]:
+      """Read daemon information from PID file (JSON or legacy format)"""
+      if not pid_file.exists():
+         return None
+      
+      try:
+         with open(pid_file, 'r') as f:
+            content = f.read().strip()
+         
+         # Try to parse as JSON first
+         try:
+            daemon_info = json.loads(content)
+            # Check if it's a dictionary with required fields
+            if isinstance(daemon_info, dict) and 'hostname' in daemon_info and 'pid' in daemon_info:
+               return daemon_info
+         except json.JSONDecodeError:
+            pass
+         
+         # Fall back to legacy PID-only format
+         try:
+            pid = int(content)
+            return {
+               "hostname": "unknown",  # Legacy files don't have hostname
+               "pid": pid,
+               "start_timestamp": None,
+               "working_directory": None,
+               "user": None,
+               "legacy": True
+            }
+         except ValueError:
+            raise Exception("Invalid PID file format")
+            
+      except Exception as e:
+         raise Exception(f"Failed to read daemon info from {pid_file}: {str(e)}")
+   
+   def _check_hostname_match(self, daemon_info: Dict[str, Any]) -> bool:
+      """Check if daemon is running on current hostname"""
+      if daemon_info.get('legacy', False):
+         # For legacy files, we can't determine hostname
+         return True  # Assume local for backward compatibility
+      
+      current_hostname = socket.gethostname()
+      daemon_hostname = daemon_info.get('hostname')
+      
+      return current_hostname == daemon_hostname
+   
+   def _format_daemon_location_message(self, daemon_info: Dict[str, Any]) -> str:
+      """Format message about daemon location for user"""
+      if daemon_info.get('legacy', False):
+         return (f"Daemon is running with PID {daemon_info['pid']} "
+                f"(legacy PID file - hostname unknown)")
+      
+      lines = []
+      lines.append(f"Daemon is running on {daemon_info['hostname']} (PID {daemon_info['pid']})")
+      
+      if daemon_info.get('user'):
+         lines.append(f"Started by: {daemon_info['user']}")
+      
+      if daemon_info.get('start_timestamp'):
+         try:
+            # Use strptime for better compatibility with older Python versions
+            start_time = datetime.strptime(daemon_info['start_timestamp'][:19], '%Y-%m-%dT%H:%M:%S')
+            lines.append(f"Started at: {format_timestamp(start_time)}")
+         except (ValueError, TypeError):
+            pass
+      
+      if daemon_info.get('working_directory'):
+         lines.append(f"Working directory: {daemon_info['working_directory']}")
+      
+      lines.append(f"Please SSH to {daemon_info['hostname']} to manage the daemon")
+      
+      return "\n".join(lines)
+   
    def _start_daemon(self, args: argparse.Namespace) -> int:
       """Start the daemon"""
       pid_file = self._get_pid_file_path(args)
@@ -1140,21 +1232,29 @@ class DaemonCommand(BaseCommand):
       # Check if daemon is already running
       if pid_file.exists():
          try:
-            with open(pid_file, 'r') as f:
-               existing_pid = int(f.read().strip())
-            
-            # Check if process is still running
-            try:
-               os.kill(existing_pid, 0)  # Signal 0 just checks if process exists
-               print(f"Daemon already running with PID {existing_pid}")
-               return 1
-            except OSError:
-               # Process doesn't exist, remove stale PID file
-               pid_file.unlink()
-               print("Removed stale PID file")
-         except (ValueError, FileNotFoundError):
-            # Invalid or missing PID file, remove it
+            daemon_info = self._read_daemon_info(pid_file)
+            if daemon_info:
+               pid = daemon_info['pid']
+               
+               # Check if process is still running
+               try:
+                  os.kill(pid, 0)  # Signal 0 just checks if process exists
+                  
+                  # Check if it's running on this host
+                  if self._check_hostname_match(daemon_info):
+                     print(f"Daemon already running with PID {pid}")
+                  else:
+                     print(self._format_daemon_location_message(daemon_info))
+                  return 1
+               except OSError:
+                  # Process doesn't exist, remove stale PID file
+                  pid_file.unlink()
+                  print("Removed stale PID file")
+         except Exception as e:
+            # Invalid PID file, remove it
+            self.logger.warning(f"Invalid PID file: {str(e)}")
             pid_file.unlink()
+            print("Removed invalid PID file")
       
       print("Starting PBS Monitor daemon...")
       
@@ -1192,12 +1292,11 @@ class DaemonCommand(BaseCommand):
             os.dup2(devnull.fileno(), sys.stdout.fileno())
             os.dup2(devnull.fileno(), sys.stderr.fileno())
       
-      # Write PID file
+      # Write daemon info file
       try:
-         with open(pid_file, 'w') as f:
-            f.write(str(os.getpid()))
+         self._write_daemon_info(pid_file, os.getpid())
       except Exception as e:
-         print(f"Error: Failed to write PID file: {str(e)}")
+         print(f"Error: Failed to write daemon info: {str(e)}")
          return 1
       
       # Set up signal handlers for graceful shutdown
@@ -1246,8 +1345,17 @@ class DaemonCommand(BaseCommand):
          return 1
       
       try:
-         with open(pid_file, 'r') as f:
-            pid = int(f.read().strip())
+         daemon_info = self._read_daemon_info(pid_file)
+         if not daemon_info:
+            print("Daemon is not running (no PID file found)")
+            return 1
+         
+         pid = daemon_info['pid']
+         
+         # Check if daemon is running on this host
+         if not self._check_hostname_match(daemon_info):
+            print(self._format_daemon_location_message(daemon_info))
+            return 1
          
          print(f"Stopping daemon with PID {pid}...")
          
@@ -1285,8 +1393,8 @@ class DaemonCommand(BaseCommand):
                print(f"Error stopping daemon: {str(e)}")
                return 1
          
-      except (ValueError, FileNotFoundError) as e:
-         print(f"Error reading PID file: {str(e)}")
+      except Exception as e:
+         print(f"Error reading daemon info: {str(e)}")
          return 1
    
    def _show_daemon_status(self, args: argparse.Namespace) -> int:
@@ -1299,20 +1407,44 @@ class DaemonCommand(BaseCommand):
       # Check daemon process
       if pid_file.exists():
          try:
-            with open(pid_file, 'r') as f:
-               pid = int(f.read().strip())
-            
-            try:
-               os.kill(pid, 0)  # Check if process exists
-               print(f"Status: Running (PID {pid})")
-               print(f"PID file: {pid_file}")
-            except OSError:
-               print("Status: Not running (stale PID file)")
-               print(f"Stale PID file: {pid_file}")
-         except (ValueError, FileNotFoundError):
-            print("Status: Not running (invalid PID file)")
+            daemon_info = self._read_daemon_info(pid_file)
+            if daemon_info:
+               pid = daemon_info['pid']
+               
+               try:
+                  os.kill(pid, 0)  # Check if process exists
+                  
+                  # Check if daemon is running on this host
+                  if self._check_hostname_match(daemon_info):
+                     print(f"Status: Running (PID {pid})")
+                     print(f"Hostname: {daemon_info.get('hostname', 'unknown')}")
+                     if daemon_info.get('user'):
+                        print(f"Started by: {daemon_info['user']}")
+                     if daemon_info.get('start_timestamp'):
+                        try:
+                           # Use strptime for better compatibility with older Python versions
+                           start_time = datetime.strptime(daemon_info['start_timestamp'][:19], '%Y-%m-%dT%H:%M:%S')
+                           print(f"Started at: {format_timestamp(start_time)}")
+                        except (ValueError, TypeError):
+                           pass
+                     if daemon_info.get('working_directory'):
+                        print(f"Working directory: {daemon_info['working_directory']}")
+                  else:
+                     print("Status: Running on different host")
+                     print(self._format_daemon_location_message(daemon_info))
+                     
+               except OSError:
+                  print("Status: Not running (stale PID file)")
+                  if not daemon_info.get('legacy', False):
+                     print(f"Last known host: {daemon_info.get('hostname', 'unknown')}")
+            else:
+               print("Status: Not running (invalid PID file)")
+         except Exception as e:
+            print(f"Status: Not running (error reading PID file: {str(e)})")
       else:
          print("Status: Not running")
+      
+      print(f"PID file: {pid_file}")
       
       # Show configuration
       print(f"\nConfiguration:")
