@@ -72,12 +72,12 @@ class PBSJob:
       # Parse resource requirements
       resources = job_data.get('Resource_List', {})
       
-      # Handle nodes - can be a number or a node name
-      nodes_str = resources.get('nodes', '1')
+      # Handle nodes - use nodect which contains the actual node count as an integer
+      nodes_str = resources.get('nodect', '1')
       try:
          nodes = int(nodes_str)
       except (ValueError, TypeError):
-         # If it's not a number (e.g., node name), default to 1
+         # If it's not a number, default to 1
          nodes = 1
       
       ppn = int(resources.get('ppn', '1'))

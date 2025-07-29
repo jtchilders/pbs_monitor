@@ -376,6 +376,9 @@ class DataCollector:
       
       collection_start = datetime.now()
       
+      # Log collection start
+      self.logger.info(f"Starting {collection_type} data collection and persistence")
+      
       # Start data collection log
       collection_repo = self._repository_factory.get_data_collection_repository()
       log_id = collection_repo.log_collection_start(collection_type)
@@ -437,6 +440,11 @@ class DataCollector:
             duration=duration
          )
          
+         # Log successful completion with summary
+         self.logger.info(f"Completed {collection_type} data collection successfully: "
+                         f"{len(db_data['jobs'])} jobs, {len(db_data['queues'])} queues, "
+                         f"{len(db_data['nodes'])} nodes in {duration:.1f}s")
+         
          return {
             'status': 'success',
             'jobs_collected': len(db_data['jobs']),
@@ -456,6 +464,7 @@ class DataCollector:
             error_message=str(e)
          )
          
+         self.logger.error(f"Failed {collection_type} data collection after {duration:.1f}s: {str(e)}")
          raise
    
    def get_historical_job_data(self, job_id: str) -> Dict[str, Any]:
@@ -679,7 +688,10 @@ class DataCollector:
                 hasattr(self.config, 'database') and 
                 self.config.database.auto_persist):
                try:
-                  self.collect_and_persist(collection_type="daemon")
+                  self.logger.debug("Triggering periodic database collection from daemon")
+                  result = self.collect_and_persist(collection_type="daemon")
+                  self.logger.debug(f"Periodic collection completed: {result['jobs_collected']} jobs, "
+                                   f"{result['queues_collected']} queues, {result['nodes_collected']} nodes")
                except Exception as e:
                   self.logger.error(f"Failed to persist data: {str(e)}")
             
