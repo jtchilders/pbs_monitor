@@ -96,6 +96,7 @@ class DatabaseConfig:
    # Collection settings
    daemon_enabled: bool = True
    auto_persist: bool = False
+   auto_persist_interval: int = 300        # 5 minutes (300 seconds)
    batch_size: int = 1000
 
 
@@ -275,6 +276,7 @@ class Config:
             'snapshot_retention_days': 90,
             'daemon_enabled': True,
             'auto_persist': False,
+            'auto_persist_interval': 300,
             'batch_size': 1000
          }
       }

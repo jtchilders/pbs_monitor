@@ -26,6 +26,35 @@ except ImportError:
    DATABASE_AVAILABLE = False
 
 
+class JobStateInfo:
+   """Cached job state information for change detection"""
+   
+   def __init__(self, state: JobState, priority: int, execution_node: Optional[str], queue: str):
+      self.state = state
+      self.priority = priority
+      self.execution_node = execution_node
+      self.queue = queue
+   
+   @classmethod
+   def from_pbs_job(cls, job: PBSJob) -> 'JobStateInfo':
+      """Create JobStateInfo from PBSJob"""
+      return cls(
+         state=job.state,
+         priority=job.priority,
+         execution_node=job.execution_node,
+         queue=job.queue
+      )
+   
+   def has_changes(self, job: PBSJob) -> bool:
+      """Check if job has significant changes compared to cached state"""
+      return (
+         self.state != job.state or
+         self.priority != job.priority or
+         self.execution_node != job.execution_node or
+         self.queue != job.queue
+      )
+
+
 class DataCollector:
    """Collects and manages PBS system data"""
    
@@ -57,6 +86,11 @@ class DataCollector:
       self._last_queue_update: Optional[datetime] = None
       self._last_node_update: Optional[datetime] = None
       self._last_server_update: Optional[datetime] = None
+      self._last_auto_persist: Optional[datetime] = None
+      
+      # Job state caching for smart history tracking
+      self._job_state_cache: Dict[str, JobStateInfo] = {}
+      self._cache_populated = False
       
       # Threading for background updates
       self._update_lock = threading.Lock()
@@ -351,6 +385,87 @@ class DataCollector:
       """
       return self.get_jobs(user=user)
    
+   def _populate_job_state_cache_if_needed(self) -> None:
+      """Populate job state cache from database on first use"""
+      if self._cache_populated or not self._database_enabled:
+         return
+      
+      try:
+         job_repo = self._repository_factory.get_job_repository()
+         latest_states = job_repo.get_latest_job_states()
+         
+         with self._update_lock:
+            self._job_state_cache.update(latest_states)
+            self._cache_populated = True
+            
+         self.logger.debug(f"Populated job state cache with {len(latest_states)} entries")
+      except Exception as e:
+         self.logger.warning(f"Failed to populate job state cache: {str(e)}")
+         # Mark as populated to avoid repeated failures
+         self._cache_populated = True
+   
+   def _create_job_history_for_changes(self, current_jobs: List[PBSJob], 
+                                      data_collection_id: Optional[int] = None) -> List['JobHistory']:
+      """Create job history entries only for jobs that have changed"""
+      if not self._database_enabled:
+         return []
+      
+      # Import here to avoid circular import
+      from .database.models import JobHistory
+      
+      # Ensure cache is populated
+      self._populate_job_state_cache_if_needed()
+      
+      history_entries = []
+      cache_updates = {}
+      
+      for job in current_jobs:
+         cached_state = self._job_state_cache.get(job.job_id)
+         
+         # Create history entry if:
+         # 1. Job is new (not in cache)
+         # 2. Job has significant changes
+         should_create_entry = (
+            cached_state is None or 
+            cached_state.has_changes(job)
+         )
+         
+         if should_create_entry:
+            # Create history entry using the existing converter method
+            history_entry = self._model_converters.job.to_job_history(job, data_collection_id)
+            history_entries.append(history_entry)
+            
+            # Prepare cache update
+            cache_updates[job.job_id] = JobStateInfo.from_pbs_job(job)
+            
+            # Log the change for debugging
+            change_reason = "new job" if cached_state is None else "state/attribute change"
+            self.logger.debug(f"Creating history entry for job {job.job_id}: {change_reason}")
+      
+      # Update cache with new states
+      with self._update_lock:
+         self._job_state_cache.update(cache_updates)
+      
+      self.logger.debug(f"Created {len(history_entries)} job history entries from {len(current_jobs)} jobs")
+      return history_entries
+   
+   def _cleanup_job_state_cache(self, current_job_ids: Set[str]) -> None:
+      """Remove cache entries for jobs that no longer exist"""
+      if not self._cache_populated:
+         return
+      
+      with self._update_lock:
+         # Find jobs that are in cache but not in current job list
+         cached_job_ids = set(self._job_state_cache.keys())
+         obsolete_job_ids = cached_job_ids - current_job_ids
+         
+         # Remove obsolete entries
+         for job_id in obsolete_job_ids:
+            del self._job_state_cache[job_id]
+         
+         if obsolete_job_ids:
+            self.logger.debug(f"Cleaned up {len(obsolete_job_ids)} obsolete job entries from state cache")
+   
    def get_queue_utilization(self) -> Dict[str, float]:
       """
       Get utilization percentage for each queue
@@ -399,14 +514,22 @@ class DataCollector:
          # Combine current jobs with completed jobs for database storage
          all_jobs_for_db = self._jobs + completed_jobs
          
-         # Convert to database models
-         db_data = self._model_converters.convert_pbs_data_to_database(
-            all_jobs_for_db, self._queues, self._nodes
-         )
+         # Convert to database models - but use smart job history creation
+         db_data = {
+            'jobs': [self._model_converters.job.to_database(job) for job in all_jobs_for_db],
+            'queues': [self._model_converters.queue.to_database(queue) for queue in self._queues],
+            'nodes': [self._model_converters.node.to_database(node) for node in self._nodes],
+            'job_history': self._create_job_history_for_changes(all_jobs_for_db, log_id),
+            'queue_snapshots': [self._model_converters.queue.to_queue_snapshot(queue) for queue in self._queues],
+            'node_snapshots': [self._model_converters.node.to_node_snapshot(node) for node in self._nodes],
+            'system_snapshot': self._model_converters.system.to_system_snapshot(self._jobs, self._queues, self._nodes)
+         }
          
-         # Add collection log ID to all entries
-         for entry in db_data['job_history']:
-            entry.data_collection_id = log_id
+         # Clean up cache for jobs that no longer exist
+         current_job_ids = {job.job_id for job in all_jobs_for_db}
+         self._cleanup_job_state_cache(current_job_ids)
+         
+         # Add collection log ID to remaining entries (job_history already has it)
          for entry in db_data['queue_snapshots']:
             entry.data_collection_id = log_id
          for entry in db_data['node_snapshots']:
@@ -683,17 +806,27 @@ class DataCollector:
                 self.config.pbs.queue_refresh_interval):
                self._refresh_queues()
             
-            # Optionally persist data if database is enabled
+            # Optionally persist data if database is enabled and interval has elapsed
             if (self._database_enabled and 
                 hasattr(self.config, 'database') and 
                 self.config.database.auto_persist):
-               try:
-                  self.logger.debug("Triggering periodic database collection from daemon")
-                  result = self.collect_and_persist(collection_type="daemon")
-                  self.logger.debug(f"Periodic collection completed: {result['jobs_collected']} jobs, "
-                                   f"{result['queues_collected']} queues, {result['nodes_collected']} nodes")
-               except Exception as e:
-                  self.logger.error(f"Failed to persist data: {str(e)}")
+               
+               # Check if auto_persist interval has elapsed
+               should_persist = (
+                  self._last_auto_persist is None or
+                  (datetime.now() - self._last_auto_persist).total_seconds() > 
+                  self.config.database.auto_persist_interval
+               )
+               
+               if should_persist:
+                  try:
+                     self.logger.debug("Triggering periodic database collection from daemon")
+                     result = self.collect_and_persist(collection_type="daemon")
+                     self._last_auto_persist = datetime.now()
+                     self.logger.debug(f"Periodic collection completed: {result['jobs_collected']} jobs, "
+                                      f"{result['queues_collected']} queues, {result['nodes_collected']} nodes")
+                  except Exception as e:
+                     self.logger.error(f"Failed to persist data: {str(e)}")
             
             # Sleep for a short interval
             time.sleep(10)

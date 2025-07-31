@@ -147,6 +147,45 @@ class JobRepository(BaseRepository):
             session.add_all(job_histories)
             session.commit()
     
+    def get_latest_job_states(self) -> Dict[str, 'JobStateInfo']:
+        """Get the latest state information for all jobs from job_history"""
+        from ..data_collector import JobStateInfo  # Import here to avoid circular import
+        
+        with self.get_session() as session:
+            # Get the latest job_history entry for each job_id
+            # Use a window function to get the most recent entry per job
+            subquery = session.query(
+                JobHistory.job_id,
+                JobHistory.state,
+                JobHistory.priority,
+                JobHistory.execution_node,
+                JobHistory.queue,
+                JobHistory.timestamp,
+                func.row_number().over(
+                    partition_by=JobHistory.job_id,
+                    order_by=JobHistory.timestamp.desc()
+                ).label('rn')
+            ).subquery()
+            
+            # Get only the most recent entries (rn = 1)
+            latest_entries = session.query(subquery).filter(subquery.c.rn == 1).all()
+            
+            # Convert to JobStateInfo objects
+            result = {}
+            for entry in latest_entries:
+                # Convert database JobState enum to PBSJob JobState enum
+                from ..models.job import JobState as PBSJobState
+                pbs_state = PBSJobState(entry.state.value)
+                
+                result[entry.job_id] = JobStateInfo(
+                    state=pbs_state,
+                    priority=entry.priority or 0,
+                    execution_node=entry.execution_node,
+                    queue=entry.queue or ''
+                )
+            
+            return result
+    
     def get_user_job_statistics(self, user: str, days: int = 30) -> Dict[str, Any]:
         """Get job statistics for a user"""
         cutoff_date = datetime.now() - timedelta(days=days)
