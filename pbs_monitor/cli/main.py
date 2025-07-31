@@ -111,6 +111,11 @@ Examples:
       action="store_true",
       help="Collect and persist data to database after displaying"
    )
+   status_parser.add_argument(
+      "--queue-depth",
+      action="store_true",
+      help="Show detailed queue depth breakdown by job size"
+   )
    
    # Jobs command
    jobs_parser = subparsers.add_parser(

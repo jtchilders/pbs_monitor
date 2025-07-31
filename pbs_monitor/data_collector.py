@@ -339,6 +339,13 @@ class DataCollector:
          'other': len([j for j in jobs if j.state not in [JobState.RUNNING, JobState.QUEUED, JobState.HELD]])
       }
       
+      # Queue depth statistics
+      from .analytics.queue_depth import QueueDepthCalculator
+      queue_calculator = QueueDepthCalculator()
+      queue_depth = {
+         'total_node_hours': queue_calculator.calculate_total_node_hours(jobs)
+      }
+      
       # Queue statistics
       queue_stats = {
          'total': len(queues),
@@ -370,7 +377,8 @@ class DataCollector:
          'jobs': job_stats,
          'queues': queue_stats,
          'nodes': node_stats,
-         'resources': resource_stats
+         'resources': resource_stats,
+         'queue_depth': queue_depth
       }
    
    def get_user_jobs(self, user: str) -> List[PBSJob]:

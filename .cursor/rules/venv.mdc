@@ -1,0 +1,4 @@
+---
+alwaysApply: true
+---
+This repo uses a virtual environment for dependencies so always activate it before running any commands.

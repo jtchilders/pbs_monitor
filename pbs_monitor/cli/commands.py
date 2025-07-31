@@ -207,6 +207,15 @@ class StatusCommand(BaseCommand):
          print(f"  Available Cores: {resources['available_cores']}")
          print(f"  Utilization: {format_percentage(resources['utilization'])}")
          
+         # Queue depth statistics
+         queue_depth = summary['queue_depth']
+         print(f"\nQueue Depth:")
+         print(f"  Total Node-Hours Waiting: {queue_depth['total_node_hours']:.1f}")
+         
+         # Show detailed queue depth breakdown if requested
+         if args.queue_depth:
+            self._show_detailed_queue_depth(args)
+         
          # Handle database collection if requested
          self._handle_collection_if_requested(args)
          
@@ -216,6 +225,36 @@ class StatusCommand(BaseCommand):
          self.logger.error(f"Status command failed: {str(e)}")
          print(f"Error: {str(e)}")
          return 1
+   
+   def _show_detailed_queue_depth(self, args: argparse.Namespace) -> None:
+      """Show detailed queue depth breakdown"""
+      try:
+         jobs = self.collector.get_jobs()
+         from ..analytics.queue_depth import QueueDepthCalculator
+         
+         queue_calculator = QueueDepthCalculator()
+         breakdown = queue_calculator.calculate_queue_depth_breakdown(jobs)
+         
+         print(f"\nDetailed Queue Depth Breakdown:")
+         print("=" * 50)
+         
+         print(f"\nOverall Summary:")
+         print(f"  Total Queued Jobs: {breakdown['total_jobs']}")
+         print(f"  Total Node-Hours: {breakdown['total_node_hours']:.1f}")
+         
+         print(f"\nBy Node Count:")
+         for category, data in breakdown['by_node_count'].items():
+            if data['jobs'] > 0:
+               print(f"  {category:>10} nodes: {data['jobs']:>3} jobs, {data['node_hours']:>8.1f} node-hours")
+         
+         print(f"\nBy Walltime:")
+         for category, data in breakdown['by_walltime'].items():
+            if data['jobs'] > 0:
+               print(f"  {category:>6}: {data['jobs']:>3} jobs, {data['node_hours']:>8.1f} node-hours")
+               
+      except Exception as e:
+         self.logger.error(f"Failed to show detailed queue depth: {str(e)}")
+         print(f"Error showing queue depth details: {str(e)}")
 
 
 class JobsCommand(BaseCommand):
