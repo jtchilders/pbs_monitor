@@ -266,107 +266,423 @@ class JobsCommand(BaseCommand):
       """Execute jobs command"""
       
       try:
-         # Get jobs
-         jobs = self.collector.get_jobs(
-            user=args.user,
-            force_refresh=args.refresh
-         )
+         # Check if specific job IDs are provided
+         if hasattr(args, 'job_ids') and args.job_ids:
+            return self._show_job_details(args)
          
-         # Filter by state if specified
-         if args.state:
-            jobs = [job for job in jobs if job.state.value == args.state]
-         
-         if not jobs:
-            print("No jobs found")
-            # Handle database collection if requested
-            self._handle_collection_if_requested(args)
-            return 0
-         
-         # Sort jobs
-         sort_key = args.sort if hasattr(args, 'sort') else 'score'
-         
-         # Determine sort direction
-         if hasattr(args, 'reverse'):
-            reverse_sort = not args.reverse  # Flip the reverse flag since we want opposite of what user specified
-         else:
-            # Default sort direction - descending for score, ascending for others
-            reverse_sort = (sort_key == 'score')
-         
-         # Define sort key functions
-         sort_functions = {
-            'job_id': lambda j: j.job_id,
-            'name': lambda j: j.job_name.lower(),
-            'owner': lambda j: j.owner.lower(),
-            'state': lambda j: j.state.value,
-            'queue': lambda j: j.queue.lower(),
-            'nodes': lambda j: j.nodes,
-            'ppn': lambda j: j.ppn,
-            'walltime': lambda j: j.walltime or '',
-            'memory': lambda j: j.memory or '',
-            'submit_time': lambda j: j.submit_time or datetime.min,
-            'start_time': lambda j: j.start_time or datetime.min,
-            'priority': lambda j: j.priority,
-            'cores': lambda j: j.estimated_total_cores(),
-            'score': lambda j: j.score if j.score is not None else -1  # Put jobs without scores at the end
-         }
-         
-         if sort_key in sort_functions:
-            try:
-               jobs.sort(key=sort_functions[sort_key], reverse=reverse_sort)
-            except Exception as e:
-               self.logger.warning(f"Failed to sort by {sort_key}: {str(e)}")
-         else:
-            self.logger.warning(f"Unknown sort key: {sort_key}, using default (score)")
-            jobs.sort(key=sort_functions['score'], reverse=True)
-         
-         # Determine columns
-         columns = args.columns.split(',') if args.columns else self.config.display.default_job_columns
-         
-         # Create table data
-         headers = []
-         column_formatters = {
-            'job_id': lambda j: format_job_id(j.job_id),
-            'name': lambda j: j.job_name[:self.config.display.max_name_length] if self.config.display.truncate_long_names else j.job_name,
-            'owner': lambda j: j.owner,
-            'state': lambda j: format_state(j.state.value),
-            'queue': lambda j: j.queue,
-            'nodes': lambda j: format_number(j.nodes),
-            'ppn': lambda j: format_number(j.ppn),
-            'walltime': lambda j: format_duration(j.walltime),
-            'memory': lambda j: format_memory(j.memory),
-            'submit_time': lambda j: format_timestamp(j.submit_time),
-            'start_time': lambda j: format_timestamp(j.start_time),
-            'runtime': lambda j: j.runtime_duration() or 'N/A',
-            'priority': lambda j: format_number(j.priority),
-            'cores': lambda j: format_number(j.estimated_total_cores()),
-            'score': lambda j: j.format_score()
-         }
-         
-         # Build headers and rows
-         for col in columns:
-            if col in column_formatters:
-               headers.append(col.replace('_', ' ').title())
-         
-         rows = []
-         for job in jobs:
-            row = []
-            for col in columns:
-               if col in column_formatters:
-                  row.append(column_formatters[col](job))
-            rows.append(row)
-         
-         # Print table
-         self._print_table(f"Jobs ({len(jobs)} total)", headers, rows)
-         
-         # Handle database collection if requested
-         self._handle_collection_if_requested(args)
-         
-         return 0
+         # Original behavior for showing all jobs
+         return self._show_job_summary(args)
          
       except Exception as e:
          self.logger.error(f"Jobs command failed: {str(e)}")
          print(f"Error: {str(e)}")
          return 1
+   
+   def _show_job_summary(self, args: argparse.Namespace) -> int:
+      """Show job summary table (original behavior)"""
+      
+      # Get jobs
+      jobs = self.collector.get_jobs(
+         user=args.user,
+         force_refresh=args.refresh
+      )
+      
+      # Filter by state if specified
+      if args.state:
+         jobs = [job for job in jobs if job.state.value == args.state]
+      
+      if not jobs:
+         print("No jobs found")
+         # Handle database collection if requested
+         self._handle_collection_if_requested(args)
+         return 0
+      
+      # Sort jobs
+      sort_key = args.sort if hasattr(args, 'sort') else 'score'
+      
+      # Determine sort direction
+      if hasattr(args, 'reverse'):
+         reverse_sort = not args.reverse  # Flip the reverse flag since we want opposite of what user specified
+      else:
+         # Default sort direction - descending for score, ascending for others
+         reverse_sort = (sort_key == 'score')
+      
+      # Define sort key functions
+      sort_functions = {
+         'job_id': lambda j: j.job_id,
+         'name': lambda j: j.job_name.lower(),
+         'owner': lambda j: j.owner.lower(),
+         'state': lambda j: j.state.value,
+         'queue': lambda j: j.queue.lower(),
+         'nodes': lambda j: j.nodes,
+         'ppn': lambda j: j.ppn,
+         'walltime': lambda j: j.walltime or '',
+         'memory': lambda j: j.memory or '',
+         'submit_time': lambda j: j.submit_time or datetime.min,
+         'start_time': lambda j: j.start_time or datetime.min,
+         'priority': lambda j: j.priority,
+         'cores': lambda j: j.estimated_total_cores(),
+         'score': lambda j: j.score if j.score is not None else -1  # Put jobs without scores at the end
+      }
+      
+      if sort_key in sort_functions:
+         try:
+            jobs.sort(key=sort_functions[sort_key], reverse=reverse_sort)
+         except Exception as e:
+            self.logger.warning(f"Failed to sort by {sort_key}: {str(e)}")
+      else:
+         self.logger.warning(f"Unknown sort key: {sort_key}, using default (score)")
+         jobs.sort(key=sort_functions['score'], reverse=True)
+      
+      # Determine columns
+      columns = args.columns.split(',') if args.columns else self.config.display.default_job_columns
+      
+      # Create table data
+      headers = []
+      column_formatters = {
+         'job_id': lambda j: format_job_id(j.job_id),
+         'name': lambda j: j.job_name[:self.config.display.max_name_length] if self.config.display.truncate_long_names else j.job_name,
+         'owner': lambda j: j.owner,
+         'state': lambda j: format_state(j.state.value),
+         'queue': lambda j: j.queue,
+         'nodes': lambda j: format_number(j.nodes),
+         'ppn': lambda j: format_number(j.ppn),
+         'walltime': lambda j: format_duration(j.walltime),
+         'memory': lambda j: format_memory(j.memory),
+         'submit_time': lambda j: format_timestamp(j.submit_time),
+         'start_time': lambda j: format_timestamp(j.start_time),
+         'runtime': lambda j: j.runtime_duration() or 'N/A',
+         'priority': lambda j: format_number(j.priority),
+         'cores': lambda j: format_number(j.estimated_total_cores()),
+         'score': lambda j: j.format_score()
+      }
+      
+      # Build headers and rows
+      for col in columns:
+         if col in column_formatters:
+            headers.append(col.replace('_', ' ').title())
+      
+      rows = []
+      for job in jobs:
+         row = []
+         for col in columns:
+            if col in column_formatters:
+               row.append(column_formatters[col](job))
+         rows.append(row)
+      
+      # Print table
+      self._print_table(f"Jobs ({len(jobs)} total)", headers, rows)
+      
+      # Handle database collection if requested
+      self._handle_collection_if_requested(args)
+      
+      return 0
+   
+   def _show_job_details(self, args: argparse.Namespace) -> int:
+      """Show detailed information for specific jobs"""
+      
+      all_jobs = []
+      unresolved_ids = []
+      
+      # Resolve each job ID
+      for job_id in args.job_ids:
+         # Check if it's a full job ID (contains a dot)
+         if '.' in job_id:
+            # Full job ID provided
+            job = self.collector.get_job_by_id(job_id)
+            if job:
+               all_jobs.append(job)
+            else:
+               unresolved_ids.append(job_id)
+         else:
+            # Numerical ID provided - search for matches
+            matching_jobs = self.collector.get_jobs_by_numerical_id(job_id)
+            if len(matching_jobs) == 1:
+               all_jobs.append(matching_jobs[0])
+            elif len(matching_jobs) > 1:
+               print(f"Multiple jobs found for ID {job_id}:")
+               for job in matching_jobs:
+                  print(f"  {job.job_id} ({job.state.value}) - {job.owner}")
+               print(f"Please specify the full job ID (e.g., {matching_jobs[0].job_id})")
+               return 1
+            else:
+               unresolved_ids.append(job_id)
+      
+      # Report unresolved job IDs
+      if unresolved_ids:
+         print(f"Could not find jobs: {', '.join(unresolved_ids)}")
+         if not all_jobs:
+            return 1
+      
+      if not all_jobs:
+         print("No jobs found")
+         return 0
+      
+      # Determine output format
+      output_format = getattr(args, 'format', 'detailed')
+      
+      if output_format == 'json':
+         return self._show_job_details_json(all_jobs, args)
+      elif output_format == 'table':
+         return self._show_job_details_table(all_jobs, args)
+      else:  # detailed
+         return self._show_job_details_detailed(all_jobs, args)
+   
+   def _show_job_details_detailed(self, jobs: List[PBSJob], args: argparse.Namespace) -> int:
+      """Show detailed job information in formatted sections"""
+      
+      for i, job in enumerate(jobs):
+         if i > 0:
+            print("\n" + "="*80 + "\n")
+         
+         self._display_job_details(job, args)
+      
+      # Handle database collection if requested
+      self._handle_collection_if_requested(args)
+      
+      return 0
+   
+   def _show_job_details_table(self, jobs: List[PBSJob], args: argparse.Namespace) -> int:
+      """Show job details in table format"""
+      
+      # Create detailed table with all job information
+      headers = [
+         "Job ID", "Name", "Owner", "State", "Queue", "Nodes", "PPN", "Cores",
+         "Walltime (Requested)", "Walltime (Actual)", "Memory", "Priority", "Score",
+         "Submit Time", "Start Time", "End Time", "Queue Duration", "Runtime",
+         "Exit Status", "Execution Node"
+      ]
+      
+      rows = []
+      for job in jobs:
+         # Calculate actual walltime usage
+         actual_walltime = self._get_actual_walltime(job)
+         walltime_usage = self._format_walltime_usage(job.walltime, actual_walltime)
+         
+         row = [
+            format_job_id(job.job_id),
+            job.job_name[:30] + "..." if len(job.job_name) > 30 else job.job_name,
+            job.owner,
+            format_state(job.state.value),
+            job.queue,
+            format_number(job.nodes),
+            format_number(job.ppn),
+            format_number(job.estimated_total_cores()),
+            format_duration(job.walltime),
+            walltime_usage,
+            format_memory(job.memory),
+            format_number(job.priority),
+            job.format_score(),
+            format_timestamp(job.submit_time),
+            format_timestamp(job.start_time),
+            format_timestamp(job.end_time),
+            job.queue_duration() or "N/A",
+            job.runtime_duration() or "N/A",
+            str(job.exit_status) if job.exit_status is not None else "N/A",
+            job.execution_node or "N/A"
+         ]
+         rows.append(row)
+      
+      self._print_table(f"Job Details ({len(jobs)} jobs)", headers, rows)
+      
+      # Handle database collection if requested
+      self._handle_collection_if_requested(args)
+      
+      return 0
+   
+   def _show_job_details_json(self, jobs: List[PBSJob], args: argparse.Namespace) -> int:
+      """Show job details in JSON format"""
+      
+      import json
+      
+      job_data = []
+      for job in jobs:
+         job_info = {
+            "job_id": job.job_id,
+            "job_name": job.job_name,
+            "owner": job.owner,
+            "state": job.state.value,
+            "queue": job.queue,
+            "resources": {
+               "nodes": job.nodes,
+               "ppn": job.ppn,
+               "total_cores": job.estimated_total_cores(),
+               "walltime": job.walltime,
+               "actual_walltime": self._get_actual_walltime(job),
+               "memory": job.memory
+            },
+            "timing": {
+               "submit_time": job.submit_time.isoformat() if job.submit_time else None,
+               "start_time": job.start_time.isoformat() if job.start_time else None,
+               "end_time": job.end_time.isoformat() if job.end_time else None,
+               "queue_duration": job.queue_duration(),
+               "runtime_duration": job.runtime_duration()
+            },
+            "priority": job.priority,
+            "score": job.score,
+            "exit_status": job.exit_status,
+            "execution_node": job.execution_node
+         }
+         
+         if getattr(args, 'show_raw', False):
+            job_info["raw_attributes"] = job.raw_attributes
+         
+         job_data.append(job_info)
+      
+      print(json.dumps(job_data, indent=2))
+      
+      # Handle database collection if requested
+      self._handle_collection_if_requested(args)
+      
+      return 0
+   
+   def _display_job_details(self, job: PBSJob, args: argparse.Namespace) -> None:
+      """Display detailed information for a single job"""
+      
+      # Job header
+      print(f"Job Details: {format_job_id(job.job_id)}")
+      print("=" * 60)
+      
+      # Basic Information
+      print(f"\n📋 Basic Information:")
+      print(f"  Name: {job.job_name}")
+      print(f"  Owner: {job.owner}")
+      print(f"  State: {format_state(job.state.value)}")
+      print(f"  Queue: {job.queue}")
+      print(f"  Priority: {format_number(job.priority)}")
+      if job.score is not None:
+         print(f"  Score: {job.format_score()}")
+      
+      # Resource Requirements
+      print(f"\n💻 Resource Requirements:")
+      print(f"  Nodes: {format_number(job.nodes)}")
+      print(f"  Cores per Node: {format_number(job.ppn)}")
+      print(f"  Total Cores: {format_number(job.estimated_total_cores())}")
+      print(f"  Walltime: {format_duration(job.walltime)}")
+      if job.memory:
+         print(f"  Memory: {format_memory(job.memory)}")
+      
+      # Timing Information
+      print(f"\n⏰ Timing Information:")
+      print(f"  Submit Time: {format_timestamp(job.submit_time)}")
+      print(f"  Start Time: {format_timestamp(job.start_time)}")
+      print(f"  End Time: {format_timestamp(job.end_time)}")
+      
+      queue_duration = job.queue_duration()
+      if queue_duration:
+         print(f"  Queue Duration: {queue_duration}")
+      
+      runtime_duration = job.runtime_duration()
+      if runtime_duration:
+         print(f"  Runtime: {runtime_duration}")
+      
+      # Resource Usage (for completed jobs)
+      if job.state.value in ['C', 'F', 'E']:
+         print(f"\n📊 Resource Usage:")
+         actual_walltime = self._get_actual_walltime(job)
+         if actual_walltime:
+            walltime_usage = self._format_walltime_usage(job.walltime, actual_walltime)
+            print(f"  Walltime Used: {walltime_usage}")
+      
+      # Execution Details
+      print(f"\n🚀 Execution Details:")
+      if job.execution_node:
+         print(f"  Execution Node: {job.execution_node}")
+      if job.exit_status is not None:
+         print(f"  Exit Status: {job.exit_status}")
+      
+      # Job History (if requested and available)
+      if getattr(args, 'history', False) and self.collector.database_enabled:
+         self._display_job_history(job)
+      
+      # Raw Attributes (if requested)
+      if getattr(args, 'show_raw', False):
+         print(f"\n🔧 Raw PBS Attributes:")
+         for key, value in job.raw_attributes.items():
+            if isinstance(value, dict):
+               print(f"  {key}:")
+               for subkey, subvalue in value.items():
+                  print(f"    {subkey}: {subvalue}")
+            else:
+               print(f"  {key}: {value}")
+   
+   def _get_actual_walltime(self, job: PBSJob) -> Optional[str]:
+      """Get actual walltime used by the job"""
+      if not job.raw_attributes:
+         return None
+      
+      resources_used = job.raw_attributes.get('resources_used', {})
+      return resources_used.get('walltime')
+   
+   def _format_walltime_usage(self, requested: Optional[str], actual: Optional[str]) -> str:
+      """Format walltime usage with percentage"""
+      if not actual:
+         return "N/A"
+      
+      if not requested:
+         return format_duration(actual)
+      
+      # Calculate percentage
+      try:
+         requested_seconds = self._parse_walltime_to_seconds(requested)
+         actual_seconds = self._parse_walltime_to_seconds(actual)
+         
+         if requested_seconds > 0:
+            percentage = (actual_seconds / requested_seconds) * 100
+            return f"{format_duration(actual)} ({percentage:.1f}%)"
+         else:
+            return format_duration(actual)
+      except (ValueError, TypeError):
+         return format_duration(actual)
+   
+   def _parse_walltime_to_seconds(self, walltime_str: str) -> float:
+      """Parse walltime string to seconds"""
+      if not walltime_str:
+         return 0
+      
+      try:
+         parts = walltime_str.split(':')
+         if len(parts) == 3:
+            # HH:MM:SS format
+            hours, minutes, seconds = map(int, parts)
+            return hours * 3600 + minutes * 60 + seconds
+         elif len(parts) == 4:
+            # DD:HH:MM:SS format
+            days, hours, minutes, seconds = map(int, parts)
+            return days * 86400 + hours * 3600 + minutes * 60 + seconds
+         else:
+            return 0
+      except (ValueError, TypeError):
+         return 0
+   
+   def _display_job_history(self, job: PBSJob) -> None:
+      """Display job history from database"""
+      try:
+         historical_data = self.collector.get_historical_job_data(job.job_id)
+         
+         if 'error' in historical_data:
+            print(f"\n📚 Job History: {historical_data['error']}")
+            return
+         
+         print(f"\n📚 Job History:")
+         print(f"  History Entries: {historical_data['history_entries']}")
+         
+         if historical_data['first_seen']:
+            print(f"  First Seen: {format_timestamp(historical_data['first_seen'])}")
+         if historical_data['last_seen']:
+            print(f"  Last Seen: {format_timestamp(historical_data['last_seen'])}")
+         
+         transitions = historical_data.get('state_transitions', [])
+         if transitions:
+            print(f"  State Transitions:")
+            for transition in transitions:
+               duration = transition.get('duration_minutes', 0)
+               print(f"    {transition['from_state']} → {transition['to_state']} "
+                     f"({format_timestamp(transition['timestamp'])}) "
+                     f"[{duration:.1f} min]")
+         
+      except Exception as e:
+         print(f"\n📚 Job History: Error retrieving history - {str(e)}")
 
 
 class NodesCommand(BaseCommand):

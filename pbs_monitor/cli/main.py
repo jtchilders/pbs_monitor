@@ -124,6 +124,11 @@ Examples:
       help="Show job information"
    )
    jobs_parser.add_argument(
+      "job_ids",
+      nargs="*",
+      help="Specific job IDs to show details for (numerical portion only, e.g., 12345)"
+   )
+   jobs_parser.add_argument(
       "-u", "--user",
       help="Filter by username"
    )
@@ -155,6 +160,27 @@ Examples:
       "--collect",
       action="store_true",
       help="Collect and persist data to database after displaying"
+   )
+   jobs_parser.add_argument(
+      "-d", "--detailed",
+      action="store_true",
+      help="Show detailed information for specific jobs"
+   )
+   jobs_parser.add_argument(
+      "--history",
+      action="store_true",
+      help="Include job history from database (for detailed view)"
+   )
+   jobs_parser.add_argument(
+      "--format",
+      choices=["table", "detailed", "json"],
+      default="table",
+      help="Output format for job details (default: table)"
+   )
+   jobs_parser.add_argument(
+      "--show-raw",
+      action="store_true",
+      help="Show raw PBS attributes (for detailed view)"
    )
    
    # Nodes command

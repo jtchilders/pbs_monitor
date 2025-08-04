@@ -319,6 +319,73 @@ class DataCollector:
       
       return None
    
+   def get_jobs_by_numerical_id(self, numerical_id: str) -> List[PBSJob]:
+      """
+      Get jobs by numerical ID (e.g., "12345" matches "12345.pbs01", "12345.pbs02", etc.)
+      
+      Args:
+         numerical_id: Numerical portion of job ID
+         
+      Returns:
+         List of matching PBSJob objects
+      """
+      matching_jobs = []
+      
+      # Search in current PBS jobs
+      try:
+         all_jobs = self.get_jobs(force_refresh=True)
+         for job in all_jobs:
+            if job.job_id.startswith(f"{numerical_id}."):
+               matching_jobs.append(job)
+      except Exception as e:
+         self.logger.error(f"Failed to search current jobs for {numerical_id}: {str(e)}")
+      
+      # Search in completed jobs if no matches found
+      if not matching_jobs:
+         try:
+            completed_jobs = self.pbs_commands.qstat_completed_jobs()
+            for job in completed_jobs:
+               if job.job_id.startswith(f"{numerical_id}."):
+                  matching_jobs.append(job)
+         except Exception as e:
+            self.logger.warning(f"Failed to search completed jobs for {numerical_id}: {str(e)}")
+      
+      # Search in database if available
+      if self._database_enabled and not matching_jobs:
+         try:
+            job_repo = self._repository_factory.get_job_repository()
+            # Get all jobs and filter by numerical ID
+            all_db_jobs = job_repo.get_historical_jobs(days=365)  # Look back 1 year
+            for db_job in all_db_jobs:
+               if db_job.job_id.startswith(f"{numerical_id}."):
+                  pbs_job = self._model_converters.job.from_database(db_job)
+                  matching_jobs.append(pbs_job)
+         except Exception as e:
+            self.logger.warning(f"Failed to search database for {numerical_id}: {str(e)}")
+      
+      return matching_jobs
+   
+   def get_jobs_by_ids(self, job_ids: List[str]) -> List[PBSJob]:
+      """
+      Get multiple jobs by their full IDs
+      
+      Args:
+         job_ids: List of full job IDs
+         
+      Returns:
+         List of PBSJob objects (may be shorter than input if some jobs not found)
+      """
+      jobs = []
+      
+      for job_id in job_ids:
+         job = self.get_job_by_id(job_id)
+         if job:
+            jobs.append(job)
+         else:
+            self.logger.warning(f"Job {job_id} not found")
+      
+      return jobs
+   
    def get_system_summary(self) -> Dict[str, Any]:
       """
       Get system summary statistics
