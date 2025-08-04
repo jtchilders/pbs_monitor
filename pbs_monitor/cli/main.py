@@ -12,6 +12,7 @@ from ..config import Config
 from ..utils.logging_setup import setup_logging
 from ..data_collector import DataCollector
 from .commands import StatusCommand, JobsCommand, NodesCommand, QueuesCommand, DatabaseCommand, HistoryCommand, DaemonCommand
+from .analyze_commands import AnalyzeCommand
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -251,6 +252,34 @@ Examples:
       "--include-pbs-history",
       action="store_true",
       help="Also include recent completed jobs from qstat -x"
+   )
+   
+   # Analyze command
+   analyze_parser = subparsers.add_parser(
+      "analyze",
+      help="Analytics and analysis commands"
+   )
+   analyze_subparsers = analyze_parser.add_subparsers(
+      dest="analyze_action",
+      help="Analysis actions"
+   )
+   
+   # Analyze run-score
+   run_score_parser = analyze_subparsers.add_parser(
+      "run-score",
+      help="Analyze job scores at queue → run transitions"
+   )
+   run_score_parser.add_argument(
+      "-d", "--days",
+      type=int,
+      default=30,
+      help="Number of days to analyze (default: 30)"
+   )
+   run_score_parser.add_argument(
+      "--format",
+      choices=["table", "csv"],
+      default="table",
+      help="Output format (default: table)"
    )
    
    # Config command
@@ -545,6 +574,10 @@ def main(argv: Optional[List[str]] = None) -> int:
       
       elif args.command == "history":
          cmd = HistoryCommand(collector, config)
+         return cmd.execute(args)
+      
+      elif args.command == "analyze":
+         cmd = AnalyzeCommand(collector, config)
          return cmd.execute(args)
       
       else:

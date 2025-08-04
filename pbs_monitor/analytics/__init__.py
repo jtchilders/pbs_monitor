@@ -6,5 +6,6 @@ run-now opportunities, and system trends.
 """
 
 from .queue_depth import QueueDepthCalculator
+from .run_score import RunScoreAnalyzer
 
-__all__ = ['QueueDepthCalculator'] 
+__all__ = ['QueueDepthCalculator', 'RunScoreAnalyzer'] 
