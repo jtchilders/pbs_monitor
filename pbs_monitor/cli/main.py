@@ -308,6 +308,90 @@ Examples:
       help="Output format (default: table)"
    )
    
+   # Analyze walltime-efficiency-by-user
+   walltime_user_parser = analyze_subparsers.add_parser(
+      "walltime-efficiency-by-user",
+      help="Analyze walltime efficiency by user"
+   )
+   walltime_user_parser.add_argument(
+      "-d", "--days",
+      type=int,
+      default=30,
+      help="Number of days to analyze (default: 30)"
+   )
+   walltime_user_parser.add_argument(
+      "-u", "--user",
+      help="Filter to specific user (partial match, case-sensitive)"
+   )
+   walltime_user_parser.add_argument(
+      "--min-jobs",
+      type=int,
+      default=3,
+      help="Minimum number of jobs required for main table inclusion (default: 3)"
+   )
+   walltime_user_parser.add_argument(
+      "-q", "--queue",
+      help="Filter by queue name (partial match, case-sensitive)"
+   )
+   walltime_user_parser.add_argument(
+      "--min-nodes",
+      type=int,
+      help="Minimum number of nodes required for job inclusion"
+   )
+   walltime_user_parser.add_argument(
+      "--max-nodes",
+      type=int,
+      help="Maximum number of nodes allowed for job inclusion"
+   )
+   walltime_user_parser.add_argument(
+      "--format",
+      choices=["table", "csv"],
+      default="table",
+      help="Output format (default: table)"
+   )
+   
+   # Analyze walltime-efficiency-by-project
+   walltime_project_parser = analyze_subparsers.add_parser(
+      "walltime-efficiency-by-project",
+      help="Analyze walltime efficiency by project"
+   )
+   walltime_project_parser.add_argument(
+      "-d", "--days",
+      type=int,
+      default=30,
+      help="Number of days to analyze (default: 30)"
+   )
+   walltime_project_parser.add_argument(
+      "-p", "--project",
+      help="Filter to specific project (partial match, case-sensitive)"
+   )
+   walltime_project_parser.add_argument(
+      "--min-jobs",
+      type=int,
+      default=3,
+      help="Minimum number of jobs required for main table inclusion (default: 3)"
+   )
+   walltime_project_parser.add_argument(
+      "-q", "--queue",
+      help="Filter by queue name (partial match, case-sensitive)"
+   )
+   walltime_project_parser.add_argument(
+      "--min-nodes",
+      type=int,
+      help="Minimum number of nodes required for job inclusion"
+   )
+   walltime_project_parser.add_argument(
+      "--max-nodes",
+      type=int,
+      help="Maximum number of nodes allowed for job inclusion"
+   )
+   walltime_project_parser.add_argument(
+      "--format",
+      choices=["table", "csv"],
+      default="table",
+      help="Output format (default: table)"
+   )
+   
    # Config command
    config_parser = subparsers.add_parser(
       "config",
