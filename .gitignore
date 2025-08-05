@@ -143,3 +143,7 @@ dmypy.json
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Project-specific files
+pbs_monitor-log.txt
+test_final_integration.py
