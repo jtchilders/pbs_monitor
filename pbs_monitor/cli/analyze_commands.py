@@ -62,11 +62,11 @@ class AnalyzeCommand(BaseCommand):
    def _display_run_score_results(self, df: pd.DataFrame, summary: Dict[str, Any], args: argparse.Namespace) -> None:
       """Display run score analysis results"""
       
-      # Show summary
+            # Show summary
       self.console.print(f"\n[bold green]Job Score Analysis Summary[/bold green]")
       self.console.print(f"Analysis Period: {summary['analysis_period_days']} days")
-      self.console.print(f"Total Transitions Analyzed: {summary['total_transitions_analyzed']}")
-      self.console.print(f"Unique Jobs with Scores: {summary['unique_jobs_with_scores']}")
+      self.console.print(f"Total Finished Jobs: {summary['total_finished_jobs']}")
+      self.console.print(f"Successful Score Calculations: {summary['successful_score_calculations']}")
       
       # Format output based on requested format
       output_format = getattr(args, 'format', 'table')

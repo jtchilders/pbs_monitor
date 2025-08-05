@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..database.repositories import RepositoryFactory
 from ..database.models import JobHistory, Job, JobState
+from ..pbs_commands import PBSCommands
 
 
 class RunScoreAnalyzer:
@@ -21,14 +22,24 @@ class RunScoreAnalyzer:
     
     def __init__(self, repository_factory: Optional[RepositoryFactory] = None):
         self.repo_factory = repository_factory or RepositoryFactory()
+        self.pbs_commands = PBSCommands()
         
         # Node count bins (as defined in the plan)
         self.node_bins = [
             (1, 31, "1-31"),
             (32, 127, "32-127"), 
             (128, 255, "128-255"),
-            (256, 1023, "256-1023"),
-            (1024, float('inf'), "1024+")
+            (256, 999, "256-999"),
+            (1000, 1999, "1000-1999"),
+            (2000, 2999, "2000-2999"),
+            (3000, 3999, "3000-3999"),
+            (4000, 4999, "4000-4999"),
+            (5000, 5999, "5000-5999"),
+            (6000, 6999, "6000-6999"),
+            (7000, 7999, "7000-7999"),
+            (8000, 8999, "8000-8999"),
+            (9000, 9999, "9000-9999"),
+            (10000, float('inf'), "10000+")
         ]
         
         # Walltime bins (in hours)
@@ -100,53 +111,63 @@ class RunScoreAnalyzer:
             cutoff_date: Cutoff date for analysis
             
         Returns:
-            List of transition records with job metadata and scores
+            List of transition records with job metadata and recalculated scores
         """
-        # Query for Q→R transitions
-        # We need to find job history entries where:
-        # 1. Previous state was QUEUED
-        # 2. Current state is RUNNING
-        # 3. Score is available
-        # 4. Within time window
-        
-        # This is a complex query that needs to find consecutive history entries
-        # where state changes from Q to R
-        
-        # First, get all RUNNING entries within the time window
-        running_entries = session.query(JobHistory).filter(
+        # Query for FINISHED jobs within the time window that have raw PBS data
+        finished_jobs = session.query(Job).filter(
             and_(
-                JobHistory.state == JobState.RUNNING,
-                JobHistory.timestamp >= cutoff_date,
-                JobHistory.score.isnot(None)
+                Job.state == JobState.FINISHED,
+                Job.end_time >= cutoff_date,
+                Job.raw_pbs_data.isnot(None),
+                Job.nodes.isnot(None),
+                Job.walltime.isnot(None)
             )
-        ).order_by(JobHistory.job_id, JobHistory.timestamp).all()
+        ).all()
         
         transitions = []
         
-        for running_entry in running_entries:
-            # Find the previous QUEUED entry for this job
-            prev_queued = session.query(JobHistory).filter(
-                and_(
-                    JobHistory.job_id == running_entry.job_id,
-                    JobHistory.state == JobState.QUEUED,
-                    JobHistory.timestamp < running_entry.timestamp
-                )
-            ).order_by(desc(JobHistory.timestamp)).first()
-            
-            if prev_queued:
-                # Get the job details for nodes and walltime
-                job = session.query(Job).filter(Job.job_id == running_entry.job_id).first()
+        # Get server data and defaults for score calculation
+        try:
+            server_data = self.pbs_commands.qstat_server()
+            server_info = server_data.get("Server", {})
+            server_defaults = None
+            for server_name, server_details in server_info.items():
+                server_defaults = server_details.get("resources_default", {})
+                break
+        except Exception as e:
+            # If we can't get current server data, skip score calculation
+            return []
+        
+        if not server_defaults:
+            return []
+        
+        for job in finished_jobs:
+            if not job.raw_pbs_data:
+                continue
                 
-                if job and job.nodes and job.walltime:
+            try:
+                # Recalculate the score using the job's raw PBS data
+                # This gives us the score as it was at the Q→R transition
+                score = self.pbs_commands.calculate_job_score(
+                    job.raw_pbs_data, 
+                    server_defaults, 
+                    server_data
+                )
+                
+                if score is not None:
                     walltime_hours = self._parse_walltime_to_hours(job.walltime)
                     
                     transitions.append({
-                        'job_id': running_entry.job_id,
+                        'job_id': job.job_id,
                         'nodes': job.nodes,
                         'walltime_hours': walltime_hours,
-                        'score': running_entry.score,
-                        'transition_time': running_entry.timestamp
+                        'score': score,
+                        'transition_time': job.start_time or job.end_time
                     })
+                    
+            except Exception as e:
+                # Skip jobs where score calculation fails
+                continue
         
         return transitions
     
@@ -221,28 +242,26 @@ class RunScoreAnalyzer:
         cutoff_date = datetime.now() - timedelta(days=days)
         
         with self.repo_factory.get_job_repository().get_session() as session:
-            # Count total transitions
-            total_transitions = session.query(JobHistory).filter(
+            # Count finished jobs that can be analyzed
+            finished_jobs_total = session.query(Job).filter(
                 and_(
-                    JobHistory.state == JobState.RUNNING,
-                    JobHistory.timestamp >= cutoff_date,
-                    JobHistory.score.isnot(None)
+                    Job.state == JobState.FINISHED,
+                    Job.end_time >= cutoff_date,
+                    Job.raw_pbs_data.isnot(None),
+                    Job.nodes.isnot(None),
+                    Job.walltime.isnot(None)
                 )
             ).count()
             
-            # Count jobs with scores
-            jobs_with_scores = session.query(JobHistory).filter(
-                and_(
-                    JobHistory.timestamp >= cutoff_date,
-                    JobHistory.score.isnot(None)
-                )
-            ).distinct(JobHistory.job_id).count()
+            # Get the actual transition data to count successful score calculations
+            transitions = self._get_transition_data(session, cutoff_date)
+            successful_calculations = len(transitions)
             
             return {
                 'analysis_period_days': days,
                 'cutoff_date': cutoff_date,
-                'total_transitions_analyzed': total_transitions,
-                'unique_jobs_with_scores': jobs_with_scores,
+                'total_finished_jobs': finished_jobs_total,
+                'successful_score_calculations': successful_calculations,
                 'node_bins': [bin_info[2] for bin_info in self.node_bins],
                 'walltime_bins': [bin_info[2] for bin_info in self.walltime_bins]
             } 
