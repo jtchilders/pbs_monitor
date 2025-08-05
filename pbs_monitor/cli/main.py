@@ -149,7 +149,7 @@ Examples:
    jobs_parser.add_argument(
       "--sort",
       default="score",
-      help="Column to sort by: job_id, name, owner, state, queue, nodes, ppn, walltime, priority, cores, score (default: score)"
+      help="Column to sort by: job_id, name, owner, project, allocation, state, queue, nodes, ppn, walltime, priority, cores, score (default: score)"
    )
    jobs_parser.add_argument(
       "--reverse",
@@ -261,7 +261,7 @@ Examples:
    history_parser.add_argument(
       "--sort",
       default="submit_time",
-      help="Column to sort by: job_id, name, owner, state, queue, nodes, walltime, submit_time, start_time, end_time, queued, runtime (default: submit_time)"
+      help="Column to sort by: job_id, name, owner, project, allocation, state, queue, nodes, walltime, submit_time, start_time, end_time, queued, runtime (default: submit_time)"
    )
    history_parser.add_argument(
       "--reverse",

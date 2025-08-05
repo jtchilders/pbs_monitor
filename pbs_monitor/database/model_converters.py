@@ -46,6 +46,15 @@ class JobConverter:
             execution_node=pbs_job.execution_node,
             exit_status=pbs_job.exit_status,
             
+            # Project and allocation information
+            project=pbs_job.project,
+            allocation_type=pbs_job.allocation_type,
+            
+            # Calculated fields
+            total_cores=pbs_job.total_cores,
+            actual_runtime_seconds=pbs_job.actual_runtime_seconds,
+            queue_time_seconds=pbs_job.queue_time_seconds,
+            
             # Metadata
             last_updated=datetime.now(),
             raw_pbs_data=pbs_job.raw_attributes
@@ -76,6 +85,16 @@ class JobConverter:
             priority=db_job.priority,
             execution_node=db_job.execution_node,
             exit_status=db_job.exit_status,
+            
+            # Project and allocation information
+            project=db_job.project,
+            allocation_type=db_job.allocation_type,
+            
+            # Calculated fields
+            total_cores=db_job.total_cores,
+            actual_runtime_seconds=db_job.actual_runtime_seconds,
+            queue_time_seconds=db_job.queue_time_seconds,
+            
             score=None,  # Score is only stored in job history
             
             # Raw attributes

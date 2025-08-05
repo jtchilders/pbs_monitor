@@ -47,6 +47,15 @@ class PBSJob:
    execution_node: Optional[str] = None
    exit_status: Optional[int] = None
    
+   # Project and allocation information
+   project: Optional[str] = None
+   allocation_type: Optional[str] = None
+   
+   # Calculated fields
+   total_cores: Optional[int] = None
+   actual_runtime_seconds: Optional[int] = None
+   queue_time_seconds: Optional[int] = None
+   
    # Job score (calculated using server formula)
    score: Optional[float] = None
    
@@ -102,6 +111,27 @@ class PBSJob:
          except (ValueError, TypeError):
             exit_status = None
       
+      # Extract project and allocation type
+      project = job_data.get('Account_Name') or job_data.get('project')
+      allocation_type = None
+      if resources:
+         allocation_type = resources.get('award_category')
+      
+      # Calculate derived fields
+      total_cores = nodes * ppn
+      
+      # Calculate actual runtime (for completed jobs)
+      actual_runtime_seconds = None
+      if start_time and end_time:
+         duration = end_time - start_time
+         actual_runtime_seconds = int(duration.total_seconds())
+      
+      # Calculate queue time
+      queue_time_seconds = None
+      if submit_time and start_time:
+         duration = start_time - submit_time
+         queue_time_seconds = int(duration.total_seconds())
+      
       return cls(
          job_id=job_id,
          job_name=job_name,
@@ -118,6 +148,11 @@ class PBSJob:
          priority=priority,
          execution_node=execution_node,
          exit_status=exit_status,
+         project=project,
+         allocation_type=allocation_type,
+         total_cores=total_cores,
+         actual_runtime_seconds=actual_runtime_seconds,
+         queue_time_seconds=queue_time_seconds,
          score=score,
          raw_attributes=job_data
       )

@@ -59,7 +59,7 @@ class DisplayConfig:
    
    # Default columns to show
    default_job_columns: List[str] = field(default_factory=lambda: [
-      "job_id", "name", "owner", "state", "queue", "nodes", "walltime", "score"
+      "job_id", "name", "owner", "project", "allocation", "state", "queue", "nodes", "walltime", "score"
    ])
    
    default_node_columns: List[str] = field(default_factory=lambda: [

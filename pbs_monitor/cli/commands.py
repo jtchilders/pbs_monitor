@@ -312,6 +312,8 @@ class JobsCommand(BaseCommand):
          'job_id': lambda j: j.job_id,
          'name': lambda j: j.job_name.lower(),
          'owner': lambda j: j.owner.lower(),
+         'project': lambda j: (j.project or '').lower(),
+         'allocation': lambda j: (j.allocation_type or '').lower(),
          'state': lambda j: j.state.value,
          'queue': lambda j: j.queue.lower(),
          'nodes': lambda j: j.nodes,
@@ -343,6 +345,8 @@ class JobsCommand(BaseCommand):
          'job_id': lambda j: format_job_id(j.job_id),
          'name': lambda j: j.job_name[:self.config.display.max_name_length] if self.config.display.truncate_long_names else j.job_name,
          'owner': lambda j: j.owner,
+         'project': lambda j: j.project or "N/A",
+         'allocation': lambda j: j.allocation_type or "N/A",
          'state': lambda j: format_state(j.state.value),
          'queue': lambda j: j.queue,
          'nodes': lambda j: format_number(j.nodes),
@@ -447,10 +451,9 @@ class JobsCommand(BaseCommand):
       
       # Create detailed table with all job information
       headers = [
-         "Job ID", "Name", "Owner", "State", "Queue", "Nodes", "PPN", "Cores",
+         "Job ID", "Name", "Owner", "Project", "Allocation", "State", "Queue", "Nodes", "PPN", "Cores",
          "Walltime (Requested)", "Walltime (Actual)", "Memory", "Priority", "Score",
-         "Submit Time", "Start Time", "End Time", "Queue Duration", "Runtime",
-         "Exit Status", "Execution Node"
+         "Submit Time", "Start Time", "End Time", "Queue Time", "Runtime", "Exit Status", "Execution Node"
       ]
       
       rows = []
@@ -463,11 +466,13 @@ class JobsCommand(BaseCommand):
             format_job_id(job.job_id),
             job.job_name[:30] + "..." if len(job.job_name) > 30 else job.job_name,
             job.owner,
+            job.project or "N/A",
+            job.allocation_type or "N/A",
             format_state(job.state.value),
             job.queue,
             format_number(job.nodes),
             format_number(job.ppn),
-            format_number(job.estimated_total_cores()),
+            format_number(job.total_cores or job.estimated_total_cores()),
             format_duration(job.walltime),
             walltime_usage,
             format_memory(job.memory),
@@ -476,8 +481,8 @@ class JobsCommand(BaseCommand):
             format_timestamp(job.submit_time),
             format_timestamp(job.start_time),
             format_timestamp(job.end_time),
-            job.queue_duration() or "N/A",
-            job.runtime_duration() or "N/A",
+            format_duration(job.queue_time_seconds) if job.queue_time_seconds else "N/A",
+            format_duration(job.actual_runtime_seconds) if job.actual_runtime_seconds else "N/A",
             str(job.exit_status) if job.exit_status is not None else "N/A",
             job.execution_node or "N/A"
          ]
@@ -501,12 +506,14 @@ class JobsCommand(BaseCommand):
             "job_id": job.job_id,
             "job_name": job.job_name,
             "owner": job.owner,
+            "project": job.project,
+            "allocation_type": job.allocation_type,
             "state": job.state.value,
             "queue": job.queue,
             "resources": {
                "nodes": job.nodes,
                "ppn": job.ppn,
-               "total_cores": job.estimated_total_cores(),
+               "total_cores": job.total_cores or job.estimated_total_cores(),
                "walltime": job.walltime,
                "actual_walltime": self._get_actual_walltime(job),
                "memory": job.memory
@@ -515,6 +522,8 @@ class JobsCommand(BaseCommand):
                "submit_time": job.submit_time.isoformat() if job.submit_time else None,
                "start_time": job.start_time.isoformat() if job.start_time else None,
                "end_time": job.end_time.isoformat() if job.end_time else None,
+               "queue_time_seconds": job.queue_time_seconds,
+               "actual_runtime_seconds": job.actual_runtime_seconds,
                "queue_duration": job.queue_duration(),
                "runtime_duration": job.runtime_duration()
             },
@@ -547,6 +556,10 @@ class JobsCommand(BaseCommand):
       print(f"\n📋 Basic Information:")
       print(f"  Name: {job.job_name}")
       print(f"  Owner: {job.owner}")
+      if job.project:
+         print(f"  Project: {job.project}")
+      if job.allocation_type:
+         print(f"  Allocation Type: {job.allocation_type}")
       print(f"  State: {format_state(job.state.value)}")
       print(f"  Queue: {job.queue}")
       print(f"  Priority: {format_number(job.priority)}")
@@ -557,7 +570,7 @@ class JobsCommand(BaseCommand):
       print(f"\n💻 Resource Requirements:")
       print(f"  Nodes: {format_number(job.nodes)}")
       print(f"  Cores per Node: {format_number(job.ppn)}")
-      print(f"  Total Cores: {format_number(job.estimated_total_cores())}")
+      print(f"  Total Cores: {format_number(job.total_cores or job.estimated_total_cores())}")
       print(f"  Walltime: {format_duration(job.walltime)}")
       if job.memory:
          print(f"  Memory: {format_memory(job.memory)}")
@@ -568,13 +581,15 @@ class JobsCommand(BaseCommand):
       print(f"  Start Time: {format_timestamp(job.start_time)}")
       print(f"  End Time: {format_timestamp(job.end_time)}")
       
-      queue_duration = job.queue_duration()
-      if queue_duration:
-         print(f"  Queue Duration: {queue_duration}")
+      if job.queue_time_seconds is not None:
+         print(f"  Queue Time: {format_duration(job.queue_time_seconds)}")
+      elif job.queue_duration():
+         print(f"  Queue Duration: {job.queue_duration()}")
       
-      runtime_duration = job.runtime_duration()
-      if runtime_duration:
-         print(f"  Runtime: {runtime_duration}")
+      if job.actual_runtime_seconds is not None:
+         print(f"  Actual Runtime: {format_duration(job.actual_runtime_seconds)}")
+      elif job.runtime_duration():
+         print(f"  Runtime: {job.runtime_duration()}")
       
       # Resource Usage (for completed jobs)
       if job.state.value in ['C', 'F', 'E']:
@@ -1338,6 +1353,8 @@ class HistoryCommand(BaseCommand):
          'job_id': lambda j: j.job_id,
          'name': lambda j: j.job_name.lower(),
          'owner': lambda j: j.owner.lower(),
+         'project': lambda j: (j.project or '').lower(),
+         'allocation': lambda j: (j.allocation_type or '').lower(),
          'state': lambda j: j.state.value,
          'queue': lambda j: j.queue.lower(),
          'nodes': lambda j: j.nodes,
@@ -1397,7 +1414,7 @@ class HistoryCommand(BaseCommand):
       """Display historical jobs in table format"""
       
       # Determine columns
-      default_columns = ['job_id', 'name', 'owner', 'state', 'queue', 'nodes', 'walltime', 'submit_time', 'queued', 'runtime', 'exit_status']
+      default_columns = ['job_id', 'name', 'owner', 'project', 'allocation', 'state', 'queue', 'nodes', 'walltime', 'submit_time', 'queued', 'runtime', 'exit_status']
       columns = args.columns.split(',') if args.columns else default_columns
       
       # Create table data
@@ -1406,6 +1423,8 @@ class HistoryCommand(BaseCommand):
          'job_id': lambda j: format_job_id(j.job_id),
          'name': lambda j: j.job_name[:30] + "..." if len(j.job_name) > 30 else j.job_name,
          'owner': lambda j: j.owner,
+         'project': lambda j: j.project or "N/A",
+         'allocation': lambda j: j.allocation_type or "N/A",
          'state': lambda j: format_state(j.state.value),
          'queue': lambda j: j.queue,
          'nodes': lambda j: format_number(j.nodes),

@@ -88,6 +88,8 @@ class Job(Base):
     job_id = Column(String(100), primary_key=True)
     job_name = Column(String(200))
     owner = Column(String(50), index=True)
+    project = Column(String(100), index=True, nullable=True)  # From Account_Name
+    allocation_type = Column(String(100), index=True, nullable=True)  # From Resource_List.award_category
     
     # Current state
     state = Column(SQLEnum(JobState), index=True)
@@ -131,6 +133,8 @@ class Job(Base):
         Index('ix_jobs_submit_time', 'submit_time'),
         Index('ix_jobs_queue_state', 'queue', 'state'),
         Index('ix_jobs_final_state', 'final_state_recorded'),
+        Index('ix_jobs_project_state', 'project', 'state'),
+        Index('ix_jobs_allocation_type_state', 'allocation_type', 'state'),
     )
     
     def is_active(self) -> bool:
