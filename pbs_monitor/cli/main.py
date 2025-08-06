@@ -264,7 +264,7 @@ Examples:
    )
    history_parser.add_argument(
       "--columns",
-      help="Comma-separated list of columns to display"
+      help="Comma-separated list of columns to display: job_id, name, owner, project, allocation, state, queue, nodes, walltime, submit_time, start_time, end_time, queued, runtime, exit_status, cores"
    )
    history_parser.add_argument(
       "--sort",
