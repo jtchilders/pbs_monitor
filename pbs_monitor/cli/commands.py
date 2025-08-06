@@ -449,45 +449,50 @@ class JobsCommand(BaseCommand):
    def _show_job_details_table(self, jobs: List[PBSJob], args: argparse.Namespace) -> int:
       """Show job details in table format"""
       
-      # Create detailed table with all job information
-      headers = [
-         "Job ID", "Name", "Owner", "Project", "Allocation", "State", "Queue", "Nodes", "PPN", "Cores",
-         "Walltime (Requested)", "Walltime (Actual)", "Memory", "Priority", "Score",
-         "Submit Time", "Start Time", "End Time", "Queue Time", "Runtime", "Exit Status", "Execution Node"
-      ]
+      # Determine columns - respect --columns argument or use config default
+      columns = args.columns.split(',') if args.columns else self.config.display.default_job_columns
+      
+      # Create table data
+      headers = []
+      column_formatters = {
+         'job_id': lambda j: format_job_id(j.job_id),
+         'name': lambda j: j.job_name[:self.config.display.max_name_length] if self.config.display.truncate_long_names else j.job_name,
+         'owner': lambda j: j.owner,
+         'project': lambda j: j.project or "N/A",
+         'allocation': lambda j: j.allocation_type or "N/A",
+         'state': lambda j: format_state(j.state.value),
+         'queue': lambda j: j.queue,
+         'nodes': lambda j: format_number(j.nodes),
+         'ppn': lambda j: format_number(j.ppn),
+         'walltime': lambda j: format_duration(j.walltime),
+         'walltime_actual': lambda j: self._format_walltime_usage(j.walltime, self._get_actual_walltime(j)),
+         'memory': lambda j: format_memory(j.memory),
+         'submit_time': lambda j: format_timestamp(j.submit_time),
+         'start_time': lambda j: format_timestamp(j.start_time),
+         'end_time': lambda j: format_timestamp(j.end_time),
+         'runtime': lambda j: j.runtime_duration() or 'N/A',
+         'priority': lambda j: format_number(j.priority),
+         'cores': lambda j: format_number(j.total_cores or j.estimated_total_cores()),
+         'score': lambda j: j.format_score(),
+         'queue_time': lambda j: format_duration(j.queue_time_seconds) if j.queue_time_seconds else "N/A",
+         'exit_status': lambda j: str(j.exit_status) if j.exit_status is not None else "N/A",
+         'execution_node': lambda j: j.execution_node or "N/A"
+      }
+      
+      # Build headers and rows
+      for col in columns:
+         if col in column_formatters:
+            headers.append(col.replace('_', ' ').title())
       
       rows = []
       for job in jobs:
-         # Calculate actual walltime usage
-         actual_walltime = self._get_actual_walltime(job)
-         walltime_usage = self._format_walltime_usage(job.walltime, actual_walltime)
-         
-         row = [
-            format_job_id(job.job_id),
-            job.job_name[:30] + "..." if len(job.job_name) > 30 else job.job_name,
-            job.owner,
-            job.project or "N/A",
-            job.allocation_type or "N/A",
-            format_state(job.state.value),
-            job.queue,
-            format_number(job.nodes),
-            format_number(job.ppn),
-            format_number(job.total_cores or job.estimated_total_cores()),
-            format_duration(job.walltime),
-            walltime_usage,
-            format_memory(job.memory),
-            format_number(job.priority),
-            job.format_score(),
-            format_timestamp(job.submit_time),
-            format_timestamp(job.start_time),
-            format_timestamp(job.end_time),
-            format_duration(job.queue_time_seconds) if job.queue_time_seconds else "N/A",
-            format_duration(job.actual_runtime_seconds) if job.actual_runtime_seconds else "N/A",
-            str(job.exit_status) if job.exit_status is not None else "N/A",
-            job.execution_node or "N/A"
-         ]
+         row = []
+         for col in columns:
+            if col in column_formatters:
+               row.append(column_formatters[col](job))
          rows.append(row)
       
+      # Print table
       self._print_table(f"Job Details ({len(jobs)} jobs)", headers, rows)
       
       # Handle database collection if requested

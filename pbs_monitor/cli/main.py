@@ -152,7 +152,7 @@ Examples:
    )
    jobs_parser.add_argument(
       "--columns",
-      help="Comma-separated list of columns to display: job_id, name, owner, project, allocation, state, queue, nodes, ppn, walltime, memory, submit_time, start_time, runtime, priority, cores, score"
+      help="Comma-separated list of columns to display: job_id, name, owner, project, allocation, state, queue, nodes, ppn, walltime, walltime_actual, memory, submit_time, start_time, end_time, runtime, priority, cores, score, queue_time, exit_status, execution_node"
    )
    jobs_parser.add_argument(
       "--sort",
