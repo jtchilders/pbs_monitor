@@ -1437,9 +1437,9 @@ class HistoryCommand(BaseCommand):
          'submit_time': lambda j: format_timestamp(j.submit_time),
          'start_time': lambda j: format_timestamp(j.start_time),
          'end_time': lambda j: format_timestamp(j.end_time),
-         'queued': lambda j: j.queue_duration() or "N/A",
+         'queued': lambda j: self._format_queue_duration(j),
          'runtime': lambda j: self._format_runtime(j),
-         'exit_status': lambda j: str(j.exit_status) if j.exit_status is not None else "N/A",
+         'exit_status': lambda j: self._format_exit_status(j),
          'cores': lambda j: format_number(j.estimated_total_cores())
       }
       
@@ -1458,6 +1458,17 @@ class HistoryCommand(BaseCommand):
       
       # Print table
       self._print_table(f"Historical Jobs ({len(jobs)} total)", headers, rows)
+      
+      # Check if any jobs have incomplete timing data and show explanation
+      has_incomplete_data = any(
+         (job.state.value in ['C', 'F', 'E'] and 
+          (not job.start_time or not job.end_time or job.exit_status is None))
+         for job in jobs
+      )
+      if has_incomplete_data:
+         print("\n* Unknown: Job completed but timing/status data missing from database")
+         print("  (These are likely old jobs collected before completion tracking was implemented)")
+         print("  Note: Recent jobs may be updated by running: pbs-monitor jobs --collect")
    
    def _format_runtime(self, job: PBSJob) -> str:
       """Format job runtime for display"""
@@ -1468,7 +1479,29 @@ class HistoryCommand(BaseCommand):
          minutes = (total_seconds % 3600) // 60
          seconds = total_seconds % 60
          return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-      return "N/A"
+      elif job.state.value in ['C', 'F', 'E']:  # Completed states
+         return "Unknown*"  # Job completed but timing data missing
+      else:
+         return "N/A"  # Job not completed yet
+   
+   def _format_queue_duration(self, job: PBSJob) -> str:
+      """Format queue duration for display with better error handling"""
+      queue_duration = job.queue_duration()
+      if queue_duration:
+         return queue_duration
+      elif job.state.value in ['C', 'F', 'E']:  # Completed states
+         return "Unknown*"  # Job completed but timing data missing
+      else:
+         return "N/A"  # Job not completed yet
+   
+   def _format_exit_status(self, job: PBSJob) -> str:
+      """Format exit status for display with better error handling"""
+      if job.exit_status is not None:
+         return str(job.exit_status)
+      elif job.state.value in ['C', 'F', 'E']:  # Completed states
+         return "Unknown*"  # Job completed but exit status missing
+      else:
+         return "N/A"  # Job not completed yet
 
 
 class DaemonCommand(BaseCommand):

@@ -2,12 +2,22 @@
 """
 Script to retroactively fill missing fields in the Job table using JSON data.
 This script identifies jobs with missing fields and populates them from the raw PBS data.
+
+This script can extract and update:
+- Project and allocation information
+- Memory requirements
+- Exit status
+- Timing information (submit_time, start_time, end_time)
+- Calculated fields (total_cores, actual_runtime_seconds, queue_time_seconds)
+
+Use this script to fix historical job records that show "Unknown*" in the history command.
 """
 
 import argparse
 import logging
 import sys
 import json
+import os
 from datetime import datetime
 from sqlalchemy import create_engine, text, update
 from sqlalchemy.orm import sessionmaker
@@ -111,6 +121,62 @@ def extract_exit_status_from_json(raw_data: Dict[str, Any]) -> Optional[int]:
    
    return None
 
+def extract_submit_time_from_json(raw_data: Dict[str, Any]) -> Optional[datetime]:
+   """Extract submit time from raw PBS data"""
+   if not raw_data:
+      return None
+   
+   # Try qtime first (most common for completed jobs)
+   qtime = raw_data.get('qtime')
+   if qtime:
+      return parse_pbs_time(qtime)
+   
+   # Try ctime as fallback (creation time)
+   ctime = raw_data.get('ctime')
+   if ctime:
+      return parse_pbs_time(ctime)
+   
+   return None
+
+def extract_start_time_from_json(raw_data: Dict[str, Any]) -> Optional[datetime]:
+   """Extract start time from raw PBS data"""
+   if not raw_data:
+      return None
+   
+   # Try stime first (for completed jobs)
+   stime = raw_data.get('stime')
+   if stime:
+      return parse_pbs_time(stime)
+   
+   # Try start_time as fallback (for running jobs)
+   start_time = raw_data.get('start_time')
+   if start_time:
+      return parse_pbs_time(start_time)
+   
+   return None
+
+def extract_end_time_from_json(raw_data: Dict[str, Any]) -> Optional[datetime]:
+   """Extract end time from raw PBS data"""
+   if not raw_data:
+      return None
+   
+   # Try obittime first (for completed jobs)
+   obittime = raw_data.get('obittime')
+   if obittime:
+      return parse_pbs_time(obittime)
+   
+   # Try comp_time as fallback
+   comp_time = raw_data.get('comp_time')
+   if comp_time:
+      return parse_pbs_time(comp_time)
+   
+   # Try mtime (modification time) as another fallback
+   mtime = raw_data.get('mtime')
+   if mtime:
+      return parse_pbs_time(mtime)
+   
+   return None
+
 def calculate_total_cores(nodes: Optional[int], ppn: Optional[int]) -> Optional[int]:
    """Calculate total cores from nodes and ppn"""
    if nodes is None or ppn is None:
@@ -206,7 +272,10 @@ def get_jobs_with_missing_fields(session, limit=None):
          exit_status IS NULL OR 
          total_cores IS NULL OR 
          actual_runtime_seconds IS NULL OR 
-         queue_time_seconds IS NULL
+         queue_time_seconds IS NULL OR
+         submit_time IS NULL OR
+         start_time IS NULL OR
+         end_time IS NULL
       ORDER BY last_updated DESC
    """
    
@@ -273,24 +342,46 @@ def process_job_entry(entry) -> Dict[str, Any]:
       if total_cores is not None:
          updates['total_cores'] = total_cores
    
-   # Calculate actual runtime
-   if entry.actual_runtime_seconds is None:
-      actual_runtime = calculate_actual_runtime_seconds(entry.start_time, entry.end_time)
-      if actual_runtime is not None:
-         updates['actual_runtime_seconds'] = actual_runtime
+   # Extract submit time
+   if entry.submit_time is None:
+      submit_time = extract_submit_time_from_json(raw_data)
+      if submit_time is not None:
+         updates['submit_time'] = submit_time
    
-   # Calculate queue time
+   # Extract start time  
+   if entry.start_time is None:
+      start_time = extract_start_time_from_json(raw_data)
+      if start_time is not None:
+         updates['start_time'] = start_time
+   
+   # Extract end time
+   if entry.end_time is None:
+      end_time = extract_end_time_from_json(raw_data)
+      if end_time is not None:
+         updates['end_time'] = end_time
+   
+   # Calculate queue time (using either existing or newly extracted times)
    if entry.queue_time_seconds is None:
-      queue_time = calculate_queue_time_seconds(entry.submit_time, entry.start_time)
+      submit_time_to_use = updates.get('submit_time', entry.submit_time)
+      start_time_to_use = updates.get('start_time', entry.start_time)
+      queue_time = calculate_queue_time_seconds(submit_time_to_use, start_time_to_use)
       if queue_time is not None:
          updates['queue_time_seconds'] = queue_time
+   
+   # Calculate actual runtime (using either existing or newly extracted times)
+   if entry.actual_runtime_seconds is None:
+      start_time_to_use = updates.get('start_time', entry.start_time)
+      end_time_to_use = updates.get('end_time', entry.end_time)
+      actual_runtime = calculate_actual_runtime_seconds(start_time_to_use, end_time_to_use)
+      if actual_runtime is not None:
+         updates['actual_runtime_seconds'] = actual_runtime
    
    return updates
 
 def main():
    parser = argparse.ArgumentParser(description="Fix missing fields in PBS monitor database")
-   parser.add_argument("-d", "--database", default="../.pbs_monitor.db",
-                      help="Path to SQLite database file (default: ../.pbs_monitor.db)")
+   parser.add_argument("-d", "--database", default="~/.pbs_monitor.db",
+                      help="Path to SQLite database file (default: ~/.pbs_monitor.db)")
    parser.add_argument("-l", "--limit", type=int, default=None,
                       help="Limit number of jobs to process (default: all)")
    parser.add_argument("--dry-run", action="store_true",
@@ -298,8 +389,11 @@ def main():
    
    args = parser.parse_args()
    
-   logger.info(f"Connecting to database: {args.database}")
-   session = connect_to_database(args.database)
+   # Expand tilde in database path
+   db_path = os.path.expanduser(args.database)
+   
+   logger.info(f"Connecting to database: {db_path}")
+   session = connect_to_database(db_path)
    
    logger.info("Finding jobs with missing fields...")
    jobs = get_jobs_with_missing_fields(session, args.limit)
