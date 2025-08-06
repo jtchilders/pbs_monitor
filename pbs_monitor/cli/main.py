@@ -20,7 +20,15 @@ def create_parser() -> argparse.ArgumentParser:
    
    parser = argparse.ArgumentParser(
       prog="pbs-monitor",
-      description="PBS scheduler monitoring and management tools",
+      description="""PBS scheduler monitoring and management tools
+
+Configuration file locations (searched in order):
+  ~/.pbs_monitor.yaml
+  ~/.config/pbs_monitor/config.yaml
+  /etc/pbs_monitor/config.yaml
+  pbs_monitor.yaml (current directory)
+
+Many command options (columns, display settings, etc.) can be configured in the config file.""",
       formatter_class=argparse.RawDescriptionHelpFormatter,
       epilog="""
 Examples:
@@ -144,7 +152,7 @@ Examples:
    )
    jobs_parser.add_argument(
       "--columns",
-      help="Comma-separated list of columns to display"
+      help="Comma-separated list of columns to display: job_id, name, owner, project, allocation, state, queue, nodes, ppn, walltime, memory, submit_time, start_time, runtime, priority, cores, score"
    )
    jobs_parser.add_argument(
       "--sort",
