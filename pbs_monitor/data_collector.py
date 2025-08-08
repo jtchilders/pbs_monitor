@@ -63,6 +63,7 @@ class DataCollector:
       self._last_node_update: Optional[datetime] = None
       self._last_reservation_update: Optional[datetime] = None
       self._last_server_update: Optional[datetime] = None
+      self._last_auto_persist: Optional[datetime] = None
       
       # Job state tracking for history
       self._job_state_cache: Dict[str, JobStateInfo] = {}
