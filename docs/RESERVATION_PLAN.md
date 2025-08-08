@@ -929,3 +929,30 @@ The PBS Monitor toolkit now provides comprehensive reservation monitoring capabi
 - **Extensibility**: Well-structured foundation for future enhancements
 
 The implementation significantly enhances the toolkit's visibility into resource allocation and usage patterns, providing valuable insights for system administrators and researchers using reserved resources. Users can now monitor reservation utilization efficiency, track trends over time, and identify optimization opportunities through comprehensive analytics.
+
+## Recent Improvements: Robust Encoding Handling
+
+### UTF-8 Decoding Issues
+The PBS Monitor now handles encoding issues gracefully when PBS command output contains non-UTF-8 characters. This commonly occurs with:
+
+- **Job names** containing special characters or binary data
+- **Comments** in job attributes with non-ASCII characters  
+- **User names** with international characters
+- **Binary data** mixed into text fields
+
+### Automatic Recovery
+When encoding issues are detected:
+
+1. **First attempt**: Uses strict UTF-8 decoding
+2. **Fallback**: Automatically retries with permissive latin-1 encoding
+3. **Character replacement**: Invalid control characters are replaced with spaces
+4. **JSON preprocessing**: Enhanced cleaning removes problematic characters
+5. **User notification**: Clear messages explain what happened
+
+### Example Output
+```
+Note: PBS history contains some non-UTF-8 characters (likely in job names or comments).
+This is normal and doesn't affect functionality - the data will be processed with character replacement.
+```
+
+This improvement ensures reliable operation even when PBS output contains corrupted or non-standard character data, which is common in large HPC environments with diverse user bases and long-running systems.

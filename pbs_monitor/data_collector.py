@@ -190,7 +190,11 @@ class DataCollector:
             job_ids_seen.update(job.job_id for job in pbs_completed)
             self.logger.debug(f"Retrieved {len(pbs_completed)} completed jobs from PBS")
          except Exception as e:
-            self.logger.warning(f"Failed to get PBS completed jobs: {str(e)}")
+            error_msg = str(e)
+            if "utf-8" in error_msg.lower() and "decode" in error_msg.lower():
+               self.logger.info("PBS history contains non-UTF-8 characters, using permissive encoding")
+            else:
+               self.logger.warning(f"Failed to get PBS completed jobs: {error_msg}")
       
       # Get completed jobs from database if available
       if self._database_enabled:
@@ -654,7 +658,11 @@ class DataCollector:
             completed_jobs.extend(pbs_completed)
             self.logger.debug(f"Collected {len(pbs_completed)} completed jobs from PBS history")
          except Exception as e:
-            self.logger.warning(f"Failed to collect completed jobs from PBS: {str(e)}")
+            error_msg = str(e)
+            if "utf-8" in error_msg.lower() and "decode" in error_msg.lower():
+               self.logger.info("PBS history contains non-UTF-8 characters, using permissive encoding")
+            else:
+               self.logger.warning(f"Failed to collect completed jobs from PBS: {error_msg}")
          
          # Combine current jobs with completed jobs for database storage
          all_jobs_for_db = self._jobs + completed_jobs

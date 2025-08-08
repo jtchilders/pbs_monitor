@@ -56,13 +56,33 @@ class PBSCommands:
       try:
          self.logger.debug(f"Executing command: {' '.join(command)}")
          
-         result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=cmd_timeout,
-            check=False
-         )
+         # First try with UTF-8 encoding
+         try:
+            result = subprocess.run(
+               command,
+               capture_output=True,
+               text=True,
+               encoding='utf-8',
+               errors='strict',
+               timeout=cmd_timeout,
+               check=False
+            )
+         except UnicodeDecodeError as e:
+            # If UTF-8 fails, try with more permissive encoding
+            self.logger.warning(f"UTF-8 decoding failed for command {' '.join(command)}: {str(e)}")
+            self.logger.info("Retrying with permissive encoding (latin-1)...")
+            
+            result = subprocess.run(
+               command,
+               capture_output=True,
+               text=True,
+               encoding='latin-1',  # More permissive encoding
+               errors='replace',    # Replace invalid characters with replacement character
+               timeout=cmd_timeout,
+               check=False
+            )
+            
+            self.logger.info("Command completed with permissive encoding (some characters may be replaced)")
          
          # Log both stdout and stderr for debugging
          if result.stdout:
@@ -100,6 +120,22 @@ class PBSCommands:
       Returns:
          Cleaned JSON output
       """
+      # Remove or replace invalid control characters that break JSON parsing
+      # This includes characters like \x00-\x1f except for \t, \n, \r which are valid in JSON
+      import string
+      
+      # Define valid control characters for JSON
+      valid_controls = {'\t', '\n', '\r'}
+      
+      # Replace invalid control characters with spaces
+      cleaned_output = ""
+      for char in output:
+         if char in string.whitespace or ord(char) >= 32 or char in valid_controls:
+            cleaned_output += char
+         else:
+            # Replace invalid control characters with space
+            cleaned_output += " "
+      
       # Fix unquoted large numeric values that start with 0
       # Pattern: "field_name":0000000000000000000000000000000000000000,
       pattern = r'"([^"]+)":([0-9]{30,}),'
@@ -110,12 +146,11 @@ class PBSCommands:
          # Quote the numeric value to make it a string
          return f'"{field_name}":"{numeric_value}",'
       
-      cleaned_output = re.sub(pattern, fix_numeric_value, output)
+      cleaned_output = re.sub(pattern, fix_numeric_value, cleaned_output)
       
       # Log if any fixes were applied
       if cleaned_output != output:
-         fixes_count = len(re.findall(pattern, output))
-         self.logger.debug(f"Applied {fixes_count} JSON preprocessing fixes for malformed numeric values")
+         self.logger.debug(f"Applied JSON preprocessing fixes for control characters and malformed numeric values")
       
       return cleaned_output
    

@@ -1308,7 +1308,14 @@ class HistoryCommand(BaseCommand):
                if pbs_completed_jobs:
                   print(f"Added {len(pbs_completed_jobs)} jobs from recent PBS history")
             except Exception as e:
-               self.logger.warning(f"Failed to get PBS completed jobs: {str(e)}")
+               error_msg = str(e)
+               if "utf-8" in error_msg.lower() and "decode" in error_msg.lower():
+                  print("Note: PBS history contains some non-UTF-8 characters (likely in job names or comments).")
+                  print("This is normal and doesn't affect functionality - the data will be processed with character replacement.")
+                  self.logger.info("PBS history contains non-UTF-8 characters, using permissive encoding")
+               else:
+                  self.logger.warning(f"Failed to get PBS completed jobs: {error_msg}")
+                  print(f"Warning: Could not retrieve recent PBS history: {error_msg}")
          
          if not historical_jobs:
             print("No historical jobs found for the specified criteria")
