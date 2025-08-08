@@ -11,9 +11,10 @@ from datetime import datetime
 from ..models.job import PBSJob, JobState as PBSJobState
 from ..models.queue import PBSQueue, QueueState as PBSQueueState
 from ..models.node import PBSNode, NodeState as PBSNodeState
+from ..models.reservation import PBSReservation, ReservationState as PBSReservationState
 from .models import (
-    Job, Queue, Node, JobHistory, QueueSnapshot, NodeSnapshot, SystemSnapshot,
-    JobState, QueueState, NodeState
+    Job, Queue, Node, Reservation, JobHistory, QueueSnapshot, NodeSnapshot, SystemSnapshot,
+    JobState, QueueState, NodeState, ReservationState, ReservationHistory
 )
 
 
@@ -311,6 +312,96 @@ class SystemConverter:
         )
 
 
+class ReservationConverter:
+    """Converter between PBSReservation and database Reservation models"""
+    
+    @staticmethod
+    def to_database(pbs_reservation: PBSReservation) -> Reservation:
+        """Convert PBSReservation to database Reservation model"""
+        return Reservation(
+            reservation_id=pbs_reservation.reservation_id,
+            reservation_name=pbs_reservation.reservation_name,
+            owner=pbs_reservation.owner,
+            state=ReservationState.from_pbs_state(pbs_reservation.state),
+            queue=pbs_reservation.queue,
+            
+            # Resources
+            nodes=pbs_reservation.nodes,
+            ncpus=pbs_reservation.ncpus,
+            ngpus=pbs_reservation.ngpus,
+            walltime=pbs_reservation.walltime,
+            
+            # Timing
+            start_time=pbs_reservation.start_time,
+            end_time=pbs_reservation.end_time,
+            duration_seconds=pbs_reservation.duration_seconds,
+            creation_time=pbs_reservation.creation_time,
+            modification_time=pbs_reservation.modification_time,
+            
+            # Access control
+            authorized_users=pbs_reservation.authorized_users,
+            authorized_groups=pbs_reservation.authorized_groups,
+            
+            # Metadata
+            server=pbs_reservation.server,
+            partition=pbs_reservation.partition,
+            reserved_nodes=pbs_reservation.reserved_nodes,
+            
+            # Raw data
+            raw_pbs_data=pbs_reservation.raw_attributes,
+            last_updated=datetime.now()
+        )
+    
+    @staticmethod
+    def from_database(db_reservation: Reservation) -> PBSReservation:
+        """Convert database Reservation to PBSReservation model"""
+        # Convert state back to PBS state
+        pbs_state = PBSReservationState(db_reservation.state.value)
+        
+        return PBSReservation(
+            reservation_id=db_reservation.reservation_id,
+            reservation_name=db_reservation.reservation_name,
+            owner=db_reservation.owner,
+            state=pbs_state,
+            queue=db_reservation.queue,
+            
+            # Resources
+            nodes=db_reservation.nodes,
+            ncpus=db_reservation.ncpus,
+            ngpus=db_reservation.ngpus,
+            walltime=db_reservation.walltime,
+            
+            # Timing
+            start_time=db_reservation.start_time,
+            end_time=db_reservation.end_time,
+            duration_seconds=db_reservation.duration_seconds,
+            creation_time=db_reservation.creation_time,
+            modification_time=db_reservation.modification_time,
+            
+            # Access control
+            authorized_users=db_reservation.authorized_users or [],
+            authorized_groups=db_reservation.authorized_groups or [],
+            
+            # Metadata
+            server=db_reservation.server,
+            partition=db_reservation.partition,
+            reserved_nodes=db_reservation.reserved_nodes,
+            
+            # Raw data
+            raw_attributes=db_reservation.raw_pbs_data or {}
+        )
+    
+    @staticmethod
+    def to_reservation_history(pbs_reservation: PBSReservation, data_collection_id: Optional[int] = None) -> ReservationHistory:
+        """Convert PBSReservation to ReservationHistory for tracking state changes"""
+        return ReservationHistory(
+            reservation_id=pbs_reservation.reservation_id,
+            state=ReservationState.from_pbs_state(pbs_reservation.state),
+            data_collection_id=data_collection_id,
+            timestamp=datetime.now()
+        )
+
+
 class ModelConverters:
     """Main converter class with all converters"""
     
@@ -318,6 +409,7 @@ class ModelConverters:
         self.job = JobConverter()
         self.queue = QueueConverter()
         self.node = NodeConverter()
+        self.reservation = ReservationConverter()
         self.system = SystemConverter()
     
     def convert_pbs_data_to_database(self, jobs: List[PBSJob], queues: List[PBSQueue], 

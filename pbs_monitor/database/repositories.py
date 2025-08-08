@@ -13,9 +13,11 @@ from .connection import DatabaseManager
 from .models import (
     Job, Queue, Node, JobHistory, QueueSnapshot, NodeSnapshot, 
     SystemSnapshot, DataCollectionLog, JobState, QueueState, 
-    NodeState, DataCollectionStatus
+    NodeState, DataCollectionStatus, Reservation, ReservationHistory, 
+    ReservationUtilization, ReservationState
 )
 from ..config import Config
+from ..models.job import PBSJob
 
 
 class BaseRepository:
@@ -223,12 +225,50 @@ class JobRepository(BaseRepository):
             }
     
     def get_recent_jobs(self, limit: int = 100) -> List[Job]:
-        """Get most recent jobs"""
+        """Get recent jobs"""
         with self.get_session() as session:
-            jobs = session.query(Job).order_by(desc(Job.submit_time)).limit(limit).all()
-            # Force loading of all attributes to avoid detached instance issues
+            jobs = session.query(Job).order_by(desc(Job.last_updated)).limit(limit).all()
             session.expunge_all()
             return jobs
+
+
+class JobStateInfo:
+    """Information about a job's current state"""
+    
+    def __init__(self, state: JobState, priority: int, execution_node: Optional[str], queue: str):
+        self.state = state
+        self.priority = priority
+        self.execution_node = execution_node
+        self.queue = queue
+    
+    @classmethod
+    def from_job(cls, job: Job) -> 'JobStateInfo':
+        """Create from job object"""
+        return cls(
+            state=job.state,
+            priority=job.priority,
+            execution_node=job.execution_node,
+            queue=job.queue
+        )
+    
+    @classmethod
+    def from_pbs_job(cls, job: 'PBSJob') -> 'JobStateInfo':
+        """Create from PBSJob object"""
+        return cls(
+            state=job.state,
+            priority=job.priority,
+            execution_node=job.execution_node,
+            queue=job.queue
+        )
+    
+    def has_changes(self, job: Job) -> bool:
+        """Check if job has state changes"""
+        return (
+            self.state != job.state or
+            self.priority != job.priority or
+            self.execution_node != job.execution_node or
+            self.queue != job.queue
+        )
 
 
 class QueueRepository(BaseRepository):
@@ -462,50 +502,272 @@ class NodeRepository(BaseRepository):
 
 
 class SystemRepository(BaseRepository):
-    """Repository for system-level statistics"""
+    """Repository for system snapshot operations"""
     
     def get_latest_system_snapshot(self) -> Optional[SystemSnapshot]:
-        """Get most recent system snapshot"""
+        """Get the most recent system snapshot"""
         with self.get_session() as session:
-            return session.query(SystemSnapshot).order_by(
-                desc(SystemSnapshot.timestamp)
-            ).first()
+            snapshot = session.query(SystemSnapshot).order_by(desc(SystemSnapshot.timestamp)).first()
+            if snapshot:
+                session.expunge(snapshot)
+            return snapshot
     
     def get_system_snapshots(self, hours: int = 24) -> List[SystemSnapshot]:
-        """Get recent system snapshots"""
+        """Get system snapshots from the last N hours"""
         cutoff_time = datetime.now() - timedelta(hours=hours)
         with self.get_session() as session:
-            return session.query(SystemSnapshot).filter(
+            snapshots = session.query(SystemSnapshot).filter(
                 SystemSnapshot.timestamp >= cutoff_time
-            ).order_by(SystemSnapshot.timestamp).all()
+            ).order_by(desc(SystemSnapshot.timestamp)).all()
+            session.expunge_all()
+            return snapshots
     
     def add_system_snapshot(self, snapshot: SystemSnapshot) -> SystemSnapshot:
-        """Add system snapshot"""
+        """Add system snapshot to database"""
         with self.get_session() as session:
             session.add(snapshot)
             session.commit()
             return snapshot
     
     def get_system_utilization_history(self, days: int = 7) -> List[Dict[str, Any]]:
-        """Get system utilization history"""
-        cutoff_time = datetime.now() - timedelta(days=days)
+        """Get system utilization history for analysis"""
+        cutoff_date = datetime.now() - timedelta(days=days)
         with self.get_session() as session:
             snapshots = session.query(SystemSnapshot).filter(
-                SystemSnapshot.timestamp >= cutoff_time
+                SystemSnapshot.timestamp >= cutoff_date
             ).order_by(SystemSnapshot.timestamp).all()
             
-            return [
-                {
+            history = []
+            for snapshot in snapshots:
+                history.append({
                     'timestamp': snapshot.timestamp,
-                    'system_utilization_percent': snapshot.system_utilization_percent,
                     'total_jobs': snapshot.total_jobs,
                     'running_jobs': snapshot.running_jobs,
                     'queued_jobs': snapshot.queued_jobs,
-                    'total_cores': snapshot.total_cores,
-                    'used_cores': snapshot.used_cores
-                }
-                for snapshot in snapshots
-            ]
+                    'total_nodes': snapshot.total_nodes,
+                    'available_nodes': snapshot.available_nodes,
+                    'system_utilization_percent': snapshot.system_utilization_percent,
+                    'avg_queue_time_minutes': snapshot.avg_queue_time_minutes,
+                    'avg_runtime_minutes': snapshot.avg_runtime_minutes
+                })
+            
+            session.expunge_all()
+            return history
+
+
+class ReservationRepository(BaseRepository):
+    """Repository for reservation-related database operations"""
+    
+    def get_reservation_by_id(self, reservation_id: str) -> Optional[Reservation]:
+        """Get reservation by ID"""
+        with self.get_session() as session:
+            reservation = session.query(Reservation).filter(Reservation.reservation_id == reservation_id).first()
+            if reservation:
+                session.expunge(reservation)
+            return reservation
+    
+    def get_active_reservations(self) -> List[Reservation]:
+        """Get all active reservations (confirmed or running)"""
+        with self.get_session() as session:
+            reservations = session.query(Reservation).filter(
+                Reservation.state.in_([ReservationState.CONFIRMED, ReservationState.RUNNING, 
+                                     ReservationState.CONFIRMED_SHORT, ReservationState.RUNNING_SHORT])
+            ).all()
+            session.expunge_all()
+            return reservations
+    
+    def get_reservations_by_user(self, user: str) -> List[Reservation]:
+        """Get reservations for specific user"""
+        with self.get_session() as session:
+            reservations = session.query(Reservation).filter(Reservation.owner == user).all()
+            session.expunge_all()
+            return reservations
+    
+    def get_reservations_by_queue(self, queue: str) -> List[Reservation]:
+        """Get reservations in specific queue"""
+        with self.get_session() as session:
+            reservations = session.query(Reservation).filter(Reservation.queue == queue).all()
+            session.expunge_all()
+            return reservations
+    
+    def get_reservations_by_state(self, state: ReservationState) -> List[Reservation]:
+        """Get reservations in specific state"""
+        with self.get_session() as session:
+            reservations = session.query(Reservation).filter(Reservation.state == state).all()
+            session.expunge_all()
+            return reservations
+    
+    def get_historical_reservations(self, user: Optional[str] = None, days: int = 30) -> List[Reservation]:
+        """Get historical reservations from database"""
+        cutoff_date = datetime.now() - timedelta(days=days)
+        with self.get_session() as session:
+            query = session.query(Reservation).filter(Reservation.last_updated >= cutoff_date)
+            if user:
+                query = query.filter(Reservation.owner == user)
+            reservations = query.all()
+            session.expunge_all()
+            return reservations
+    
+    def add_reservation(self, reservation: Reservation) -> Reservation:
+        """Add new reservation to database"""
+        with self.get_session() as session:
+            session.add(reservation)
+            session.commit()
+            return reservation
+    
+    def upsert_reservations(self, reservations: List[Reservation]) -> None:
+        """Insert or update reservations in database"""
+        with self.get_session() as session:
+            for reservation in reservations:
+                # Check if reservation exists
+                existing = session.query(Reservation).filter(
+                    Reservation.reservation_id == reservation.reservation_id
+                ).first()
+                
+                if existing:
+                    # Update existing reservation
+                    for key, value in reservation.__dict__.items():
+                        if not key.startswith('_'):
+                            setattr(existing, key, value)
+                    existing.last_updated = datetime.now()
+                else:
+                    # Add new reservation
+                    session.add(reservation)
+            
+            session.commit()
+    
+    def update_reservation(self, reservation: Reservation) -> Reservation:
+        """Update existing reservation"""
+        with self.get_session() as session:
+            session.merge(reservation)
+            session.commit()
+            return reservation
+    
+    def delete_reservation(self, reservation_id: str) -> bool:
+        """Delete reservation by ID"""
+        with self.get_session() as session:
+            reservation = session.query(Reservation).filter(Reservation.reservation_id == reservation_id).first()
+            if reservation:
+                session.delete(reservation)
+                session.commit()
+                return True
+            return False
+    
+    def get_reservation_history(self, reservation_id: str) -> List[ReservationHistory]:
+        """Get history for a specific reservation"""
+        with self.get_session() as session:
+            history = session.query(ReservationHistory).filter(
+                ReservationHistory.reservation_id == reservation_id
+            ).order_by(ReservationHistory.timestamp).all()
+            session.expunge_all()
+            return history
+    
+    def add_reservation_history(self, history: ReservationHistory) -> ReservationHistory:
+        """Add reservation history entry"""
+        with self.get_session() as session:
+            session.add(history)
+            session.commit()
+            return history
+    
+    def add_reservation_history_batch(self, histories: List[ReservationHistory]) -> None:
+        """Add multiple reservation history entries"""
+        with self.get_session() as session:
+            session.add_all(histories)
+            session.commit()
+    
+    def get_latest_reservation_states(self) -> Dict[str, 'ReservationStateInfo']:
+        """Get latest state for each reservation"""
+        with self.get_session() as session:
+            # Get the most recent history entry for each reservation
+            latest_states = {}
+            
+            # Get all reservations with their current state
+            reservations = session.query(Reservation).all()
+            for reservation in reservations:
+                latest_states[reservation.reservation_id] = ReservationStateInfo(
+                    state=reservation.state,
+                    owner=reservation.owner,
+                    queue=reservation.queue,
+                    last_updated=reservation.last_updated
+                )
+            
+            session.expunge_all()
+            return latest_states
+    
+    def get_user_reservation_statistics(self, user: str, days: int = 30) -> Dict[str, Any]:
+        """Get reservation statistics for a user"""
+        cutoff_date = datetime.now() - timedelta(days=days)
+        with self.get_session() as session:
+            # Get user's reservations
+            reservations = session.query(Reservation).filter(
+                Reservation.owner == user,
+                Reservation.last_updated >= cutoff_date
+            ).all()
+            
+            # Calculate statistics
+            total_reservations = len(reservations)
+            active_reservations = len([r for r in reservations if r.state in [
+                ReservationState.CONFIRMED, ReservationState.RUNNING,
+                ReservationState.CONFIRMED_SHORT, ReservationState.RUNNING_SHORT
+            ]])
+            
+            total_node_hours = sum(
+                (r.nodes or 0) * (r.duration_seconds or 0) / 3600 
+                for r in reservations if r.nodes and r.duration_seconds
+            )
+            
+            # Group by state
+            state_counts = {}
+            for reservation in reservations:
+                state = reservation.state.value
+                state_counts[state] = state_counts.get(state, 0) + 1
+            
+            session.expunge_all()
+            
+            return {
+                'total_reservations': total_reservations,
+                'active_reservations': active_reservations,
+                'total_node_hours': total_node_hours,
+                'state_distribution': state_counts,
+                'period_days': days
+            }
+    
+    def get_recent_reservations(self, limit: int = 100) -> List[Reservation]:
+        """Get recent reservations"""
+        with self.get_session() as session:
+            reservations = session.query(Reservation).order_by(
+                desc(Reservation.last_updated)
+            ).limit(limit).all()
+            session.expunge_all()
+            return reservations
+
+
+class ReservationStateInfo:
+    """Information about a reservation's current state"""
+    
+    def __init__(self, state: ReservationState, owner: str, queue: str, last_updated: datetime):
+        self.state = state
+        self.owner = owner
+        self.queue = queue
+        self.last_updated = last_updated
+    
+    @classmethod
+    def from_reservation(cls, reservation: Reservation) -> 'ReservationStateInfo':
+        """Create from reservation object"""
+        return cls(
+            state=reservation.state,
+            owner=reservation.owner,
+            queue=reservation.queue,
+            last_updated=reservation.last_updated
+        )
+    
+    def has_changes(self, reservation: Reservation) -> bool:
+        """Check if reservation has state changes"""
+        return (
+            self.state != reservation.state or
+            self.owner != reservation.owner or
+            self.queue != reservation.queue
+        )
 
 
 class DataCollectionRepository(BaseRepository):
@@ -526,21 +788,19 @@ class DataCollectionRepository(BaseRepository):
     
     def log_collection_complete(self, log_id: int, status: DataCollectionStatus,
                               jobs_collected: int = 0, queues_collected: int = 0,
-                              nodes_collected: int = 0, duration: float = 0,
-                              error_message: str = None) -> None:
+                              nodes_collected: int = 0, reservations_collected: int = 0,
+                              duration: float = 0, error_message: str = None) -> None:
         """Log completion of data collection"""
         with self.get_session() as session:
-            log_entry = session.query(DataCollectionLog).filter(
-                DataCollectionLog.id == log_id
-            ).first()
-            
-            if log_entry:
-                log_entry.status = status
-                log_entry.jobs_collected = jobs_collected
-                log_entry.queues_collected = queues_collected
-                log_entry.nodes_collected = nodes_collected
-                log_entry.duration_seconds = duration
-                log_entry.error_message = error_message
+            collection_log = session.query(DataCollectionLog).filter(DataCollectionLog.id == log_id).first()
+            if collection_log:
+                collection_log.status = status
+                collection_log.jobs_collected = jobs_collected
+                collection_log.queues_collected = queues_collected
+                collection_log.nodes_collected = nodes_collected
+                collection_log.reservations_collected = reservations_collected
+                collection_log.duration_seconds = duration
+                collection_log.error_message = error_message
                 session.commit()
     
     def get_recent_collections(self, hours: int = 24) -> List[Dict[str, Any]]:
@@ -604,21 +864,19 @@ class RepositoryFactory:
         self.config = config or Config()
     
     def get_job_repository(self) -> JobRepository:
-        """Get job repository instance"""
         return JobRepository(self.config)
     
     def get_queue_repository(self) -> QueueRepository:
-        """Get queue repository instance"""
         return QueueRepository(self.config)
     
     def get_node_repository(self) -> NodeRepository:
-        """Get node repository instance"""
         return NodeRepository(self.config)
     
     def get_system_repository(self) -> SystemRepository:
-        """Get system repository instance"""
         return SystemRepository(self.config)
     
+    def get_reservation_repository(self) -> ReservationRepository:
+        return ReservationRepository(self.config)
+    
     def get_data_collection_repository(self) -> DataCollectionRepository:
-        """Get data collection repository instance"""
         return DataCollectionRepository(self.config) 

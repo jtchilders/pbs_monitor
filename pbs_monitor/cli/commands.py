@@ -18,6 +18,7 @@ from ..config import Config
 from ..models.job import PBSJob, JobState
 from ..models.queue import PBSQueue
 from ..models.node import PBSNode, NodeState
+from ..models.reservation import PBSReservation, ReservationState
 from ..database.migrations import (
     initialize_database, migrate_database, validate_database,
     backup_database, restore_database, clean_old_data, get_database_info
@@ -1067,7 +1068,24 @@ class DatabaseCommand(BaseCommand):
          # Get database subcommand
          subcommand = args.database_action
          
-         if subcommand == 'init':
+         if subcommand is None:
+            print("Error: No database action specified")
+            print("\nAvailable database actions:")
+            print("  init      Initialize database schema")
+            print("  migrate   Migrate database to latest schema")
+            print("  status    Show database status and information")
+            print("  validate  Validate database schema and data")
+            print("  backup    Create database backup")
+            print("  restore   Restore database from backup")
+            print("  cleanup   Clean up old data from database")
+            print("\nExamples:")
+            print("  pbs-monitor database init                    # Initialize database")
+            print("  pbs-monitor database status                  # Show database status")
+            print("  pbs-monitor database backup                  # Create backup")
+            print("  pbs-monitor database cleanup --days 30       # Clean up old data")
+            print("\nUse 'pbs-monitor database <action> --help' for more information about each action")
+            return 1
+         elif subcommand == 'init':
             return self._init_database(args)
          elif subcommand == 'migrate':
             return self._migrate_database(args)
@@ -1083,6 +1101,7 @@ class DatabaseCommand(BaseCommand):
             return self._cleanup_database(args)
          else:
             print(f"Unknown database subcommand: {subcommand}")
+            print("\nAvailable actions: init, migrate, status, validate, backup, restore, cleanup")
             return 1
             
       except Exception as e:
@@ -1529,7 +1548,19 @@ class DaemonCommand(BaseCommand):
          # Get daemon subcommand
          subcommand = args.daemon_action
          
-         if subcommand == 'start':
+         if subcommand is None:
+            print("Error: No daemon action specified")
+            print("\nAvailable daemon actions:")
+            print("  start     Start the PBS monitor daemon")
+            print("  stop      Stop the PBS monitor daemon")
+            print("  status    Show daemon status")
+            print("\nExamples:")
+            print("  pbs-monitor daemon start                    # Start the daemon")
+            print("  pbs-monitor daemon stop                     # Stop the daemon")
+            print("  pbs-monitor daemon status                   # Check daemon status")
+            print("\nUse 'pbs-monitor daemon <action> --help' for more information about each action")
+            return 1
+         elif subcommand == 'start':
             return self._start_daemon(args)
          elif subcommand == 'stop':
             return self._stop_daemon(args)
@@ -1537,6 +1568,7 @@ class DaemonCommand(BaseCommand):
             return self._show_daemon_status(args)
          else:
             print(f"Unknown daemon subcommand: {subcommand}")
+            print("\nAvailable actions: start, stop, status")
             return 1
             
       except Exception as e:
@@ -1999,3 +2031,386 @@ class AnalyzeCommand(BaseCommand):
       
       # Output CSV
       self.console.print(csv_df.to_csv(index=False))
+
+
+class ReservationsCommand(BaseCommand):
+   """Handle reservation listing and details"""
+   
+   def execute(self, args: argparse.Namespace) -> int:
+      if args.reservation_action is None:
+         print("Error: No reservation action specified")
+         print("\nAvailable reservation actions:")
+         print("  list, ls     List reservations with summary information")
+         print("  show         Show detailed reservation information")
+         print("\nExamples:")
+         print("  pbs-monitor resv list                    # List all reservations")
+         print("  pbs-monitor resv list -u myuser          # List user's reservations")
+         print("  pbs-monitor resv show S123456            # Show specific reservation")
+         print("  pbs-monitor resv show                    # Show all reservations with details")
+         print("\nUse 'pbs-monitor resv <action> --help' for more information about each action")
+         return 1
+      elif args.reservation_action == "list":
+         return self._list_reservations(args)
+      elif args.reservation_action == "show":
+         return self._show_reservation_details(args)
+      else:
+         print(f"Unknown reservation action: {args.reservation_action}")
+         print("\nAvailable actions: list, show")
+         return 1
+   
+   def _list_reservations(self, args: argparse.Namespace) -> int:
+      """List reservations with summary information"""
+      try:
+         # Force refresh if requested
+         if args.refresh:
+            self.collector.refresh_all()
+         
+         # Get reservations
+         reservations = self.collector.get_reservations(force_refresh=args.refresh)
+         
+         if args.collect:
+            # Collect and persist data to database
+            try:
+               result = self.collector.collect_and_persist("cli")
+               self.logger.info(f"Collected {result.get('reservations_collected', 0)} reservations to database")
+            except Exception as e:
+               self.logger.error(f"Failed to collect reservation data: {str(e)}")
+               print(f"Warning: Data collection failed: {str(e)}")
+         
+         # Apply filters
+         filtered_reservations = self._filter_reservations(reservations, args)
+         
+         if not filtered_reservations:
+            print("No reservations found matching criteria")
+            return 0
+         
+         # Display table
+         self._display_reservations_table(filtered_reservations, args)
+         return 0
+         
+      except Exception as e:
+         self.logger.error(f"Failed to list reservations: {str(e)}")
+         print(f"Error: {str(e)}")
+         return 1
+   
+   def _show_reservation_details(self, args: argparse.Namespace) -> int:
+      """Show detailed information for specific reservation(s)"""
+      try:
+         if args.reservation_ids:
+            # Show specific reservations
+            all_reservations = self.collector.get_reservations()
+            reservations = []
+            for res_id in args.reservation_ids:
+               # Find reservations that match (partial matches allowed)
+               matches = [r for r in all_reservations if res_id in r.reservation_id or r.reservation_id.startswith(res_id)]
+               if matches:
+                  reservations.extend(matches)
+               else:
+                  print(f"Warning: Could not find reservation {res_id}")
+         else:
+            # Show all reservations with details
+            reservations = self.collector.get_reservations()
+         
+         if not reservations:
+            print("No reservations found")
+            return 0
+         
+         # Display detailed information
+         self._display_reservation_details(reservations, args)
+         return 0
+         
+      except Exception as e:
+         self.logger.error(f"Failed to show reservation details: {str(e)}")
+         print(f"Error: {str(e)}")
+         return 1
+   
+   def _filter_reservations(self, reservations: List[PBSReservation], args: argparse.Namespace) -> List[PBSReservation]:
+      """Apply filters to reservations list"""
+      filtered = reservations
+      
+      # Filter by user
+      if hasattr(args, 'user') and args.user:
+         filtered = [r for r in filtered if r.owner == args.user]
+      
+      # Filter by state
+      if hasattr(args, 'state') and args.state:
+         filtered = [r for r in filtered if args.state.upper() in [r.state.value, r.state.name]]
+      
+      return filtered
+   
+   def _display_reservations_table(self, reservations: List[PBSReservation], args: argparse.Namespace):
+      """Display reservations in table format"""
+      if args.format == "json":
+         self._display_reservations_json(reservations)
+         return
+      
+      # Default columns for reservation list
+      default_columns = ["reservation_id", "name", "owner", "state", "type", "start_time", "duration", "nodes"]
+      
+      # Get columns from args or use defaults
+      if hasattr(args, 'columns') and args.columns:
+         columns = [col.strip() for col in args.columns.split(',')]
+      else:
+         columns = default_columns
+      
+      # Prepare table data
+      headers = []
+      for col in columns:
+         if col == "reservation_id":
+            headers.append("Reservation ID")
+         elif col == "name":
+            headers.append("Name")
+         elif col == "owner":
+            headers.append("Owner")
+         elif col == "state":
+            headers.append("State")
+         elif col == "start_time":
+            headers.append("Start Time")
+         elif col == "duration":
+            headers.append("Duration")
+         elif col == "nodes":
+            headers.append("Nodes")
+         elif col == "queue":
+            headers.append("Queue")
+         elif col == "end_time":
+            headers.append("End Time")
+         elif col == "type":
+            headers.append("Type")
+         else:
+            headers.append(col.title())
+      
+      rows = []
+      for reservation in reservations:
+         row = []
+         for col in columns:
+            if col == "reservation_id":
+               # Truncate long reservation IDs for display
+               res_id = reservation.reservation_id
+               if len(res_id) > 25:
+                  row.append(res_id[:22] + "...")
+               else:
+                  row.append(res_id)
+            elif col == "name":
+               row.append(reservation.reservation_name or "")
+            elif col == "owner":
+               row.append(reservation.owner or "")
+            elif col == "state":
+               # Use short form if available, otherwise full form
+               if reservation.state in [ReservationState.RUNNING_SHORT, ReservationState.CONFIRMED_SHORT]:
+                  row.append(reservation.state.value)
+               else:
+                  row.append(reservation.state.value.replace("RESV_", ""))
+            elif col == "start_time":
+               if reservation.start_time:
+                  row.append(format_timestamp(reservation.start_time))
+               else:
+                  row.append("")
+            elif col == "duration":
+               if reservation.duration_seconds:
+                  row.append(format_duration(reservation.duration_seconds))
+               else:
+                  row.append("")
+            elif col == "nodes":
+               row.append(str(reservation.nodes) if reservation.nodes else "")
+            elif col == "queue":
+               row.append(reservation.queue or "")
+            elif col == "end_time":
+               if reservation.end_time:
+                  row.append(format_timestamp(reservation.end_time))
+               else:
+                  row.append("")
+            elif col == "type":
+               row.append(reservation.reservation_type)
+            else:
+               # Generic attribute access
+               value = getattr(reservation, col, "")
+               row.append(str(value) if value is not None else "")
+         
+         rows.append(row)
+      
+      # Create and display table
+      table = self._create_table(
+         title=f"PBS Reservations ({len(reservations)} found)",
+         headers=headers,
+         rows=rows
+      )
+      
+      self.console.print(table)
+   
+   def _display_reservations_json(self, reservations: List[PBSReservation]):
+      """Display reservations in JSON format"""
+      import json
+      reservation_data = []
+      
+      for reservation in reservations:
+         data = {
+            'reservation_id': reservation.reservation_id,
+            'reservation_name': reservation.reservation_name,
+            'owner': reservation.owner,
+            'state': reservation.state.value,
+            'queue': reservation.queue,
+            'nodes': reservation.nodes,
+            'ncpus': reservation.ncpus,
+            'ngpus': reservation.ngpus,
+            'start_time': reservation.start_time.isoformat() if reservation.start_time else None,
+            'end_time': reservation.end_time.isoformat() if reservation.end_time else None,
+            'duration_seconds': reservation.duration_seconds,
+            'walltime': reservation.walltime,
+            'authorized_users': reservation.authorized_users,
+            'authorized_groups': reservation.authorized_groups,
+            'server': reservation.server,
+            'partition': reservation.partition
+         }
+         reservation_data.append(data)
+      
+      print(json.dumps(reservation_data, indent=2))
+   
+   def _display_reservation_details(self, reservations: List[PBSReservation], args: argparse.Namespace):
+      """Display detailed reservation information"""
+      if args.format == "json":
+         self._display_reservations_json(reservations)
+         return
+      elif args.format == "yaml":
+         self._display_reservations_yaml(reservations)
+         return
+      
+      # Table format (default)
+      for i, reservation in enumerate(reservations):
+         if i > 0:
+            print()  # Blank line between reservations
+         
+         self._display_single_reservation_details(reservation)
+   
+   def _display_single_reservation_details(self, reservation: PBSReservation):
+      """Display detailed information for a single reservation"""
+      
+      # Main information table
+      info_rows = [
+         ["Reservation ID", reservation.reservation_id],
+         ["Name", reservation.reservation_name or ""],
+         ["Owner", reservation.owner or ""],
+         ["State", reservation.state.value],
+         ["Type", reservation.reservation_type],
+         ["Queue", reservation.queue or ""],
+      ]
+      
+      # Timing information
+      if reservation.start_time:
+         info_rows.append(["Start Time", format_timestamp(reservation.start_time)])
+      if reservation.end_time:
+         info_rows.append(["End Time", format_timestamp(reservation.end_time)])
+      if reservation.duration_seconds:
+         info_rows.append(["Duration", format_duration(reservation.duration_seconds)])
+      
+      # Resource information
+      if reservation.nodes:
+         info_rows.append(["Nodes", str(reservation.nodes)])
+      if reservation.ncpus:
+         info_rows.append(["CPUs", f"{reservation.ncpus:,}"])
+      if reservation.ngpus:
+         info_rows.append(["GPUs", f"{reservation.ngpus:,}"])
+      if reservation.walltime:
+         info_rows.append(["Walltime", reservation.walltime])
+      
+      # Additional metadata
+      if reservation.authorized_users:
+         info_rows.append(["Authorized Users", ", ".join(reservation.authorized_users)])
+      if reservation.authorized_groups:
+         info_rows.append(["Authorized Groups", ", ".join(reservation.authorized_groups)])
+      if reservation.server:
+         info_rows.append(["Server", reservation.server])
+      if reservation.partition:
+         info_rows.append(["Partition", reservation.partition])
+      
+      # Creation/modification times
+      if reservation.creation_time:
+         info_rows.append(["Created", format_timestamp(reservation.creation_time)])
+      if reservation.modification_time:
+         info_rows.append(["Modified", format_timestamp(reservation.modification_time)])
+      
+      # Create table
+      table = self._create_table(
+         title=f"Reservation Details: {reservation.reservation_name or reservation.reservation_id[:30] + '...'}",
+         headers=["Property", "Value"],
+         rows=info_rows
+      )
+      
+      self.console.print(table)
+      
+      # Show recurring windows for recurring reservations
+      if reservation.is_recurring:
+         windows = reservation.get_recurring_windows()
+         if windows:
+            self.console.print(f"\n[bold]Recurring Reservation Windows:[/bold]")
+            
+            window_rows = []
+            for window in windows:
+               start_str = format_timestamp(window['start_time']) if window['start_time'] else ""
+               end_str = format_timestamp(window['end_time']) if window['end_time'] else ""
+               duration_str = format_duration(window['duration_seconds']) if window['duration_seconds'] else ""
+               
+               # Mark current window
+               index_str = str(window['index'])
+               if window.get('is_current'):
+                  index_str += " (current)"
+               
+               window_rows.append([
+                  index_str,
+                  start_str,
+                  end_str,
+                  duration_str
+               ])
+            
+            windows_table = self._create_table(
+               title=f"All {len(windows)} Reservation Windows",
+               headers=["Window", "Start Time", "End Time", "Duration"],
+               rows=window_rows
+            )
+            self.console.print(windows_table)
+      
+      # Show reserved nodes if available (truncated for display)
+      if reservation.reserved_nodes:
+         nodes_display = reservation.reserved_nodes
+         if len(nodes_display) > 200:
+            nodes_display = nodes_display[:200] + "... (truncated)"
+         
+         self.console.print(f"\n[bold]Reserved Nodes:[/bold]")
+         self.console.print(f"[dim]{nodes_display}[/dim]")
+   
+   def _display_reservations_yaml(self, reservations: List[PBSReservation]):
+      """Display reservations in YAML format"""
+      import yaml
+      
+      reservation_data = []
+      for reservation in reservations:
+         data = {
+            'reservation_id': reservation.reservation_id,
+            'reservation_name': reservation.reservation_name,
+            'owner': reservation.owner,
+            'state': reservation.state.value,
+            'queue': reservation.queue,
+            'resources': {
+               'nodes': reservation.nodes,
+               'ncpus': reservation.ncpus,
+               'ngpus': reservation.ngpus,
+               'walltime': reservation.walltime
+            },
+            'timing': {
+               'start_time': reservation.start_time.isoformat() if reservation.start_time else None,
+               'end_time': reservation.end_time.isoformat() if reservation.end_time else None,
+               'duration_seconds': reservation.duration_seconds
+            },
+            'access_control': {
+               'authorized_users': reservation.authorized_users,
+               'authorized_groups': reservation.authorized_groups
+            },
+            'metadata': {
+               'server': reservation.server,
+               'partition': reservation.partition,
+               'creation_time': reservation.creation_time.isoformat() if reservation.creation_time else None,
+               'modification_time': reservation.modification_time.isoformat() if reservation.modification_time else None
+            }
+         }
+         reservation_data.append(data)
+      
+      print(yaml.dump(reservation_data, default_flow_style=False))

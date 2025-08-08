@@ -1,0 +1,9 @@
+Resv ID         Queue         User     State             Start / Duration / End              
+-------------------------------------------------------------------------------
+S6703362.aurora S6703362      richp@au RN          Today 10:00 / 14400 / Today 14:00      
+R6710677.aurora R6710677      richp@au RN          Today 08:00 / 39600 / Today 19:00      
+R6710682.aurora R6710682      richp@au CO            Thu 09:00 / 43200 / Thu 21:00        
+R6711193.aurora R6711193      richp@au CO          Today 21:00 / 32400 / Thu 06:00        
+R6711197.aurora R6711197      richp@au CO            Thu 21:00 / 32400 / Fri 06:00        
+R6711198.aurora R6711198      richp@au CO            Fri 21:00 / 21600 / Sat 03:00        
+R6711454.aurora R6711454      richp@au RN     Mon Jul 28 16:00 / 1411200 / Thu Aug 14 00:00 

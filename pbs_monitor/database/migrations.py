@@ -14,7 +14,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 
-from .models import Base, Job, JobHistory, Queue, QueueSnapshot, Node, NodeSnapshot, SystemSnapshot, DataCollectionLog
+from .models import Base, Job, JobHistory, Queue, QueueSnapshot, Node, NodeSnapshot, SystemSnapshot, Reservation, ReservationHistory, ReservationUtilization, DataCollectionLog
 from .connection import get_database_manager, DatabaseManager
 from ..config import Config
 from ..utils.logging_setup import create_pbs_logger
@@ -58,6 +58,9 @@ class DatabaseMigration:
             'nodes',
             'node_snapshots',
             'system_snapshots',
+            'reservations',
+            'reservation_history',
+            'reservation_utilization',
             'data_collection_log'
         ]
     
@@ -65,10 +68,17 @@ class DatabaseMigration:
         """Check current schema version"""
         try:
             with self.db_manager.get_session() as session:
-                # Try to query a table that would exist in our schema
-                result = session.execute(text("SELECT COUNT(*) FROM data_collection_log"))
-                result.fetchone()
-                return "1.0.0"  # Current schema version
+                # Check for reservation tables to determine version
+                try:
+                    session.execute(text("SELECT COUNT(*) FROM reservations"))
+                    return "1.1.0"  # Has reservation tables
+                except Exception:
+                    # Try to query a table that would exist in v1.0.0
+                    try:
+                        session.execute(text("SELECT COUNT(*) FROM data_collection_log"))
+                        return "1.0.0"  # Has basic tables but no reservations
+                    except Exception:
+                        return None  # No recognizable schema
         except Exception:
             return None
     
@@ -127,14 +137,73 @@ class DatabaseMigration:
         
         logger.info(f"Current schema version: {current_version}")
         
-        # Add migration logic here for future schema updates
-        # For now, we only have version 1.0.0
+        # Migration path from 1.0.0 to 1.1.0 (add reservation tables)
         if current_version == "1.0.0":
+            logger.info("Migrating from v1.0.0 to v1.1.0 (adding reservation tables)")
+            self.migrate_to_v1_1_reservations()
+            return
+        
+        # Already at latest version
+        if current_version == "1.1.0":
             logger.info("Database schema is up to date")
             return
         
-        # Future migrations would go here
+        # Unknown version
         logger.warning(f"Unknown schema version: {current_version}")
+    
+    def migrate_to_v1_1_reservations(self) -> None:
+        """Add reservation tables for version 1.1"""
+        logger.info("Migrating to v1.1 - Adding reservation tables")
+        
+        try:
+            # Check if tables already exist
+            inspector = inspect(self.db_manager.engine)
+            existing_tables = inspector.get_table_names()
+            
+            new_tables = ['reservations', 'reservation_history', 'reservation_utilization']
+            tables_to_create = [table for table in new_tables if table not in existing_tables]
+            
+            if tables_to_create:
+                logger.info(f"Creating reservation tables: {', '.join(tables_to_create)}")
+                
+                # Create only the new tables
+                Reservation.__table__.create(self.db_manager.engine, checkfirst=True)
+                ReservationHistory.__table__.create(self.db_manager.engine, checkfirst=True)
+                ReservationUtilization.__table__.create(self.db_manager.engine, checkfirst=True)
+                
+                logger.info("Reservation tables created successfully")
+            else:
+                logger.info("Reservation tables already exist")
+            
+            # Add reservations_collected column to data_collection_log if it doesn't exist
+            self._add_reservations_collected_column()
+            
+            logger.info("Migration to v1.1.0 completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to migrate to v1.1.0: {str(e)}")
+            raise
+    
+    def _add_reservations_collected_column(self) -> None:
+        """Add reservations_collected column to data_collection_log table"""
+        try:
+            inspector = inspect(self.db_manager.engine)
+            columns = [col['name'] for col in inspector.get_columns('data_collection_log')]
+            
+            if 'reservations_collected' not in columns:
+                logger.info("Adding reservations_collected column to data_collection_log")
+                with self.db_manager.get_session() as session:
+                    session.execute(text(
+                        "ALTER TABLE data_collection_log ADD COLUMN reservations_collected INTEGER DEFAULT 0"
+                    ))
+                    session.commit()
+                logger.info("reservations_collected column added successfully")
+            else:
+                logger.info("reservations_collected column already exists")
+                
+        except Exception as e:
+            logger.error(f"Failed to add reservations_collected column: {str(e)}")
+            raise
     
     def validate_schema(self) -> Dict[str, Any]:
         """Validate database schema"""

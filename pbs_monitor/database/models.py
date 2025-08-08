@@ -23,6 +23,7 @@ import enum
 from ..models.job import JobState as PBSJobState
 from ..models.queue import QueueState as PBSQueueState  
 from ..models.node import NodeState as PBSNodeState
+from ..models.reservation import ReservationState as PBSReservationState
 
 Base = declarative_base()
 
@@ -66,6 +67,21 @@ class NodeState(enum.Enum):
     @classmethod
     def from_pbs_state(cls, pbs_state: PBSNodeState) -> 'NodeState':
         """Convert from existing PBSNodeState enum"""
+        return cls(pbs_state.value)
+
+class ReservationState(enum.Enum):
+    CONFIRMED = "RESV_CONFIRMED"
+    RUNNING = "RESV_RUNNING"
+    FINISHED = "RESV_FINISHED"
+    DELETED = "RESV_DELETED"
+    DEGRADED = "RESV_DEGRADED"
+    CONFIRMED_SHORT = "CO"
+    RUNNING_SHORT = "RN"
+    UNKNOWN = "unknown"
+    
+    @classmethod
+    def from_pbs_state(cls, pbs_state: PBSReservationState) -> 'ReservationState':
+        """Convert from existing PBSReservationState enum"""
         return cls(pbs_state.value)
 
 class DataCollectionStatus(enum.Enum):
@@ -406,6 +422,141 @@ class SystemSnapshot(Base):
         Index('ix_system_snapshots_timestamp', 'timestamp'),
     )
 
+class Reservation(Base):
+    """
+    Core reservation tracking table - represents current/final state of reservations
+    
+    Similar to jobs table but for PBS reservations.
+    Historical state changes tracked in reservation_history table.
+    """
+    __tablename__ = 'reservations'
+    
+    # Primary identifiers
+    reservation_id = Column(String(200), primary_key=True)  # Full ID can be long
+    reservation_name = Column(String(200))
+    owner = Column(String(50), index=True)
+    
+    # Current state
+    state = Column(SQLEnum(ReservationState), index=True)
+    queue = Column(String(50), index=True)
+    
+    # Resource allocation
+    nodes = Column(Integer)
+    ncpus = Column(Integer)
+    ngpus = Column(Integer)
+    walltime = Column(String(20))  # HH:MM:SS format
+    
+    # Timing information
+    start_time = Column(DateTime(timezone=True))
+    end_time = Column(DateTime(timezone=True))
+    duration_seconds = Column(Integer)
+    creation_time = Column(DateTime(timezone=True))
+    modification_time = Column(DateTime(timezone=True))
+    
+    # Access control
+    authorized_users = Column(JSON)  # Array of usernames
+    authorized_groups = Column(JSON)  # Array of group names
+    
+    # Additional metadata
+    server = Column(String(100))
+    partition = Column(String(50))
+    reserved_nodes = Column(Text)  # Can be very long
+    
+    # System tracking
+    first_seen = Column(DateTime(timezone=True), default=func.now())
+    last_updated = Column(DateTime(timezone=True), default=func.now(), onupdate=func.now())
+    final_state_recorded = Column(Boolean, default=False)
+    
+    # Raw data
+    raw_pbs_data = Column(JSON)  # Store original PBS text output
+    
+    # Relationships
+    history = relationship("ReservationHistory", back_populates="reservation", order_by="ReservationHistory.timestamp")
+    utilization_analyses = relationship("ReservationUtilization", back_populates="reservation")
+    
+    # Indexes
+    __table_args__ = (
+        Index('ix_reservations_owner_state', 'owner', 'state'),
+        Index('ix_reservations_start_end', 'start_time', 'end_time'),
+        Index('ix_reservations_state_updated', 'state', 'last_updated'),
+    )
+
+class ReservationHistory(Base):
+    """
+    Historical reservation state changes - tracks reservation lifecycle
+    
+    Similar to job_history but for reservations.
+    """
+    __tablename__ = 'reservation_history'
+    
+    id = Column(Integer, primary_key=True)
+    reservation_id = Column(String(200), ForeignKey('reservations.reservation_id'), index=True)
+    timestamp = Column(DateTime(timezone=True), default=func.now())
+    
+    # State at this point in time
+    state = Column(SQLEnum(ReservationState))
+    
+    # System info
+    data_collection_id = Column(Integer, ForeignKey('data_collection_log.id'))
+    
+    # Relationships
+    reservation = relationship("Reservation", back_populates="history")
+    collection_event = relationship("DataCollectionLog")
+    
+    # Indexes
+    __table_args__ = (
+        Index('ix_reservation_history_reservation_timestamp', 'reservation_id', 'timestamp'),
+        Index('ix_reservation_history_state_timestamp', 'state', 'timestamp'),
+    )
+
+class ReservationUtilization(Base):
+    """
+    Reservation utilization analysis results
+    
+    Stores calculated metrics about how well reservations were used.
+    """
+    __tablename__ = 'reservation_utilization'
+    
+    id = Column(Integer, primary_key=True)
+    reservation_id = Column(String(200), ForeignKey('reservations.reservation_id'), index=True)
+    analysis_timestamp = Column(DateTime(timezone=True), default=func.now())
+    
+    # Utilization metrics
+    total_node_hours_reserved = Column(Float)  # nodes * duration_hours
+    total_node_hours_used = Column(Float)      # Sum of job node-hours
+    utilization_percentage = Column(Float)     # used / reserved * 100
+    
+    # Job statistics
+    jobs_submitted = Column(Integer)           # Jobs submitted to reservation queue
+    jobs_completed = Column(Integer)           # Jobs that completed successfully
+    jobs_failed = Column(Integer)              # Jobs that failed
+    
+    # Resource efficiency
+    cpu_hours_reserved = Column(Float)
+    cpu_hours_used = Column(Float)
+    cpu_utilization_percentage = Column(Float)
+    
+    gpu_hours_reserved = Column(Float, nullable=True)
+    gpu_hours_used = Column(Float, nullable=True)
+    gpu_utilization_percentage = Column(Float, nullable=True)
+    
+    # Peak usage
+    peak_nodes_used = Column(Integer)
+    peak_usage_timestamp = Column(DateTime(timezone=True))
+    
+    # Analysis metadata
+    analysis_method = Column(String(50))  # e.g., "job_queue_analysis"
+    jobs_analyzed = Column(Integer)       # Number of jobs included in analysis
+    
+    # Relationships
+    reservation = relationship("Reservation", back_populates="utilization_analyses")
+    
+    # Indexes
+    __table_args__ = (
+        Index('ix_reservation_utilization_reservation_analysis', 'reservation_id', 'analysis_timestamp'),
+        Index('ix_reservation_utilization_utilization', 'utilization_percentage'),
+    )
+
 class DataCollectionLog(Base):
     """
     Log of data collection events
@@ -426,6 +577,7 @@ class DataCollectionLog(Base):
     jobs_collected = Column(Integer, default=0)
     queues_collected = Column(Integer, default=0)
     nodes_collected = Column(Integer, default=0)
+    reservations_collected = Column(Integer, default=0)
     
     # Timing
     duration_seconds = Column(Float)
@@ -446,7 +598,7 @@ class DataCollectionLog(Base):
     
     def total_entities_collected(self) -> int:
         """Get total number of entities collected"""
-        return (self.jobs_collected or 0) + (self.queues_collected or 0) + (self.nodes_collected or 0)
+        return (self.jobs_collected or 0) + (self.queues_collected or 0) + (self.nodes_collected or 0) + (self.reservations_collected or 0)
 
 # Export all models for easy import
 __all__ = [
@@ -458,9 +610,13 @@ __all__ = [
     'Node',
     'NodeSnapshot',
     'SystemSnapshot',
+    'Reservation',
+    'ReservationHistory',
+    'ReservationUtilization',
     'DataCollectionLog',
     'JobState',
     'QueueState',
     'NodeState',
+    'ReservationState',
     'DataCollectionStatus'
 ] 

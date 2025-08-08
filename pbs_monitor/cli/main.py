@@ -11,7 +11,7 @@ from typing import List, Optional
 from ..config import Config
 from ..utils.logging_setup import setup_logging
 from ..data_collector import DataCollector
-from .commands import StatusCommand, JobsCommand, NodesCommand, QueuesCommand, DatabaseCommand, HistoryCommand, DaemonCommand
+from .commands import StatusCommand, JobsCommand, NodesCommand, QueuesCommand, DatabaseCommand, HistoryCommand, DaemonCommand, ReservationsCommand
 from .analyze_commands import AnalyzeCommand
 
 
@@ -241,6 +241,40 @@ Examples:
       help="Collect and persist data to database after displaying"
    )
    
+   # Reservations command
+   reservations_parser = subparsers.add_parser(
+      "resv",
+      help="Reservation information and management",
+      aliases=["reservations", "reserv"]
+   )
+   
+   # Reservation subcommands
+   resv_subparsers = reservations_parser.add_subparsers(
+      dest="reservation_action",
+      help="Reservation actions"
+   )
+   
+   # List reservations
+   list_parser = resv_subparsers.add_parser(
+      "list",
+      help="List reservations",
+      aliases=["ls"]
+   )
+   list_parser.add_argument("-u", "--user", help="Filter by user")
+   list_parser.add_argument("-s", "--state", help="Filter by state")
+   list_parser.add_argument("-r", "--refresh", action="store_true", help="Force refresh of data")
+   list_parser.add_argument("--collect", action="store_true", help="Collect data to database")
+   list_parser.add_argument("--format", choices=["table", "json"], default="table", help="Output format")
+   list_parser.add_argument("--columns", help="Comma-separated list of columns to display. Available: reservation_id, name, owner, state, type, start_time, end_time, duration, nodes, queue")
+   
+   # Show reservation details  
+   show_parser = resv_subparsers.add_parser(
+      "show",
+      help="Show detailed reservation information"
+   )
+   show_parser.add_argument("reservation_ids", nargs="*", help="Reservation IDs to show")
+   show_parser.add_argument("--format", choices=["table", "json", "yaml"], default="table", help="Output format")
+   
    # History command
    history_parser = subparsers.add_parser(
       "history",
@@ -394,6 +428,77 @@ Examples:
       help="Maximum number of nodes allowed for job inclusion"
    )
    walltime_project_parser.add_argument(
+      "--format",
+      choices=["table", "csv"],
+      default="table",
+      help="Output format (default: table)"
+   )
+   
+   # Analyze reservation-utilization
+   reservation_util_parser = analyze_subparsers.add_parser(
+      "reservation-utilization",
+      help="Analyze reservation utilization efficiency"
+   )
+   reservation_util_parser.add_argument(
+      "reservation_ids",
+      nargs="*",
+      help="Specific reservation IDs to analyze (if not provided, analyzes all)"
+   )
+   reservation_util_parser.add_argument(
+      "--start-date",
+      type=str,
+      help="Start date for analysis period (YYYY-MM-DD format)"
+   )
+   reservation_util_parser.add_argument(
+      "--end-date",
+      type=str,
+      help="End date for analysis period (YYYY-MM-DD format)"
+   )
+   reservation_util_parser.add_argument(
+      "--format",
+      choices=["table", "csv"],
+      default="table",
+      help="Output format (default: table)"
+   )
+   
+   # Analyze reservation-trends
+   reservation_trends_parser = analyze_subparsers.add_parser(
+      "reservation-trends",
+      help="Analyze reservation utilization trends over time"
+   )
+   reservation_trends_parser.add_argument(
+      "-d", "--days",
+      type=int,
+      default=30,
+      help="Number of days to analyze (default: 30)"
+   )
+   reservation_trends_parser.add_argument(
+      "-o", "--owner",
+      help="Filter by reservation owner"
+   )
+   reservation_trends_parser.add_argument(
+      "-q", "--queue",
+      help="Filter by queue name"
+   )
+   reservation_trends_parser.add_argument(
+      "--format",
+      choices=["table", "csv"],
+      default="table",
+      help="Output format (default: table)"
+   )
+   
+   # Analyze reservation-owner-ranking
+   reservation_ranking_parser = analyze_subparsers.add_parser(
+      "reservation-owner-ranking",
+      help="Rank reservation owners by utilization efficiency"
+   )
+   reservation_ranking_parser.add_argument(
+      "-d", "--days",
+      type=int,
+      default=30,
+      help="Number of days to analyze (default: 30)"
+   )
+   reservation_ranking_parser.add_argument(
       "--format",
       choices=["table", "csv"],
       default="table",
@@ -696,6 +801,10 @@ def main(argv: Optional[List[str]] = None) -> int:
       
       elif args.command == "analyze":
          cmd = AnalyzeCommand(collector, config)
+         return cmd.execute(args)
+      
+      elif args.command in ["resv", "reservations", "reserv"]:
+         cmd = ReservationsCommand(collector, config)
          return cmd.execute(args)
       
       else:

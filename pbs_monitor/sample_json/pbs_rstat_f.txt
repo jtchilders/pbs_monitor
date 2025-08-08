@@ -1,0 +1,275 @@
+Resv ID: S6703362.aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov
+Reserve_Name = HACC-DAOS-Dbg
+Reserve_Owner = richp@aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov
+reserve_state = RESV_RUNNING
+reserve_substate = 10
+reserve_start = Wed Aug 06 10:00:00 2025
+reserve_end = Wed Aug 06 14:00:00 2025
+reserve_duration = 14400
+queue = S6703362
+Resource_List.allow_account_check_failure = True
+Resource_List.allow_negative_allocation = True
+Resource_List.backfill_factor = 84600
+Resource_List.backfill_max = 50
+Resource_List.base_score = 0
+Resource_List.enable_backfill = 0
+Resource_List.enable_fifo = 1
+Resource_List.enable_wfp = 0
+Resource_List.fifo_factor = 1800
+Resource_List.ncpus = 1705600
+Resource_List.ngpus = 49200
+Resource_List.ni_resource = aurora
+Resource_List.score_boost = 0
+Resource_List.total_cpus = 10624
+Resource_List.wfp_factor = 100000
+Resource_List.nodect = 8200
+Resource_List.select = 8200:ncpus=208:ngpus=6:broken=False:debug=False:at_queue=lustre_scaling
+Resource_List.place = scatter
+Resource_List.walltime = 04:00:00
+resv_nodes = (x4102c5s2b0n0:ncpus=208:ngpus=6)+(x4102c5s5b0n0:ncpus=208:ngpus=6)+(<truncated-this-list>)+(x4511c3s3b0n0:ncpus=208:ngpus=6)+(x4707c1s0b0n0:ncpus=208:ngpus=6)+(x4407c3s6b0n0:ncpus=208:ngpus=6)
+Authorized_Users = richp@aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov
+Authorized_Groups = LightDark
+server = aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov
+ctime = Wed Jul 23 14:01:53 2025
+mtime = Wed Aug 06 11:40:08 2025
+Variable_List = PBS_O_LOGNAME=richp,PBS_O_HOST=aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov,PBS_O_MAIL=/var/spool/mail/richp,PBS_TZID=America/Chicago
+reserve_rrule = FREQ=WEEKLY;COUNT=3
+reserve_index = 2
+reserve_count = 3
+reserve_retry = Wed Aug 06 12:58:58 2025
+partition = pbs-default
+
+Resv ID: R6710677.aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov
+Reserve_Name = ATPESC-806
+Reserve_Owner = richp@aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov
+reserve_state = RESV_RUNNING
+reserve_substate = 10
+reserve_start = Wed Aug 06 08:00:00 2025
+reserve_end = Wed Aug 06 19:00:00 2025
+reserve_duration = 39600
+queue = R6710677
+Resource_List.allow_account_check_failure = True
+Resource_List.allow_negative_allocation = True
+Resource_List.backfill_factor = 84600
+Resource_List.backfill_max = 50
+Resource_List.base_score = 0
+Resource_List.enable_backfill = 0
+Resource_List.enable_fifo = 1
+Resource_List.enable_wfp = 0
+Resource_List.fifo_factor = 1800
+Resource_List.ncpus = 106496
+Resource_List.ngpus = 3072
+Resource_List.ni_resource = aurora
+Resource_List.score_boost = 0
+Resource_List.total_cpus = 10624
+Resource_List.wfp_factor = 100000
+Resource_List.nodect = 512
+Resource_List.select = 512:at_queue=lustre_scaling:broken=False:debug=False:validation=False:ncpus=208:ngpus=6
+Resource_List.place = scatter
+Resource_List.walltime = 11:00:00
+resv_nodes = (x4204c5s6b0n0:ncpus=208:ngpus=6)+(x4409c4s2b0n0:ncpus=208:ngpus=6)+(<truncated-this-list>)+(x4702c2s4b0n0:ncpus=208:ngpus=6)+(x4702c2s5b0n0:ncpus=208:ngpus=6)+(x4702c2s6b0n0:ncpus=208:ngpus=6)+(x4702c6s3b0n0:ncpus=208:ngpus=6)
+Authorized_Users = richp@aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov
+Authorized_Groups = ATPESC2025,ATPESC_Instructors
+server = aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov
+ctime = Thu Jul 24 12:11:21 2025
+mtime = Wed Aug 06 11:40:08 2025
+Variable_List = PBS_O_LOGNAME=richp,PBS_O_HOST=aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov,PBS_O_MAIL=/var/spool/mail/richp
+reserve_count = 1
+reserve_retry = Wed Aug 06 12:59:02 2025
+partition = pbs-default
+
+Resv ID: R6710682.aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov
+Reserve_Name = ATPESC-807
+Reserve_Owner = richp@aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov
+reserve_state = RESV_CONFIRMED
+reserve_substate = 2
+reserve_start = Thu Aug 07 09:00:00 2025
+reserve_end = Thu Aug 07 21:00:00 2025
+reserve_duration = 43200
+queue = R6710682
+Resource_List.allow_account_check_failure = True
+Resource_List.allow_negative_allocation = True
+Resource_List.backfill_factor = 84600
+Resource_List.backfill_max = 50
+Resource_List.base_score = 0
+Resource_List.enable_backfill = 0
+Resource_List.enable_fifo = 1
+Resource_List.enable_wfp = 0
+Resource_List.fifo_factor = 1800
+Resource_List.ncpus = 106496
+Resource_List.ngpus = 3072
+Resource_List.ni_resource = aurora
+Resource_List.score_boost = 0
+Resource_List.total_cpus = 10624
+Resource_List.wfp_factor = 100000
+Resource_List.nodect = 512
+Resource_List.select = 512:at_queue=lustre_scaling:broken=False:debug=False:validation=False:ncpus=208:ngpus=6
+Resource_List.place = scatter
+Resource_List.walltime = 12:00:00
+resv_nodes = (x4102c5s2b0n0:ncpus=208:ngpus=6)+(x4102c5s5b0n0:ncpus=208:ngpus=6)+(<truncated-this-list>)+(x4520c0s4b0n0:ncpus=208:ngpus=6)+(x4520c0s5b0n0:ncpus=208:ngpus=6)+(x4520c0s7b0n0:ncpus=208:ngpus=6)+(x4520c1s0b0n0:ncpus=208:ngpus=6)
+Authorized_Users = richp@aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov
+Authorized_Groups = ATPESC2025,ATPESC_Instructors
+server = aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov
+ctime = Thu Jul 24 12:12:18 2025
+mtime = Tue Aug 05 17:29:47 2025
+Variable_List = PBS_O_LOGNAME=richp,PBS_O_HOST=aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov,PBS_O_MAIL=/var/spool/mail/richp
+reserve_count = 1
+reserve_retry = Wed Dec 31 18:00:00 1969
+partition = pbs-default
+
+Resv ID: R6711193.aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov
+Reserve_Name = ATPESC-BIG-806
+Reserve_Owner = richp@aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov
+reserve_state = RESV_CONFIRMED
+reserve_substate = 2
+reserve_start = Wed Aug 06 21:00:00 2025
+reserve_end = Thu Aug 07 06:00:00 2025
+reserve_duration = 32400
+queue = R6711193
+Resource_List.allow_account_check_failure = True
+Resource_List.allow_negative_allocation = True
+Resource_List.backfill_factor = 84600
+Resource_List.backfill_max = 50
+Resource_List.base_score = 0
+Resource_List.enable_backfill = 0
+Resource_List.enable_fifo = 1
+Resource_List.enable_wfp = 0
+Resource_List.fifo_factor = 1800
+Resource_List.ncpus = 212992
+Resource_List.ngpus = 6144
+Resource_List.ni_resource = aurora
+Resource_List.score_boost = 0
+Resource_List.total_cpus = 10624
+Resource_List.wfp_factor = 100000
+Resource_List.nodect = 1024
+Resource_List.select = 1024:at_queue=lustre_scaling:broken=False:debug=False:validation=False:ncpus=208:ngpus=6
+Resource_List.place = scatter
+Resource_List.walltime = 09:00:00
+resv_nodes = (x4102c5s2b0n0:ncpus=208:ngpus=6)+(x4102c5s5b0n0:ncpus=208:ngpus=6)+(<truncated-this-list>)+(x4318c3s3b0n0:ncpus=208:ngpus=6)+(x4318c3s4b0n0:ncpus=208:ngpus=6)+(x4318c3s5b0n0:ncpus=208:ngpus=6)+(x4318c3s6b0n0:ncpus=208:ngpus=6)+(x4318c3s7b0n0:ncpus=208:ngpus=6)
+Authorized_Users = richp@aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov
+Authorized_Groups = ATPESC2025,ATPESC_Instructors
+server = aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov
+ctime = Thu Jul 24 15:20:29 2025
+mtime = Tue Aug 05 17:29:55 2025
+Variable_List = PBS_O_LOGNAME=richp,PBS_O_HOST=aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov,PBS_O_MAIL=/var/spool/mail/richp
+reserve_count = 1
+reserve_retry = Wed Dec 31 18:00:00 1969
+partition = pbs-default
+
+Resv ID: R6711197.aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov
+Reserve_Name = ATPESC-BIG-807
+Reserve_Owner = richp@aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov
+reserve_state = RESV_CONFIRMED
+reserve_substate = 2
+reserve_start = Thu Aug 07 21:00:00 2025
+reserve_end = Fri Aug 08 06:00:00 2025
+reserve_duration = 32400
+queue = R6711197
+Resource_List.allow_account_check_failure = True
+Resource_List.allow_negative_allocation = True
+Resource_List.backfill_factor = 84600
+Resource_List.backfill_max = 50
+Resource_List.base_score = 0
+Resource_List.enable_backfill = 0
+Resource_List.enable_fifo = 1
+Resource_List.enable_wfp = 0
+Resource_List.fifo_factor = 1800
+Resource_List.ncpus = 212992
+Resource_List.ngpus = 6144
+Resource_List.ni_resource = aurora
+Resource_List.score_boost = 0
+Resource_List.total_cpus = 10624
+Resource_List.wfp_factor = 100000
+Resource_List.nodect = 1024
+Resource_List.select = 1024:at_queue=lustre_scaling:broken=False:debug=False:validation=False:ncpus=208:ngpus=6
+Resource_List.place = scatter
+Resource_List.walltime = 09:00:00
+resv_nodes = (x4102c5s2b0n0:ncpus=208:ngpus=6)+(x4102c5s5b0n0:ncpus=208:ngpus=6)+(<truncated-this-list>)+(x4318c3s4b0n0:ncpus=208:ngpus=6)+(x4318c3s5b0n0:ncpus=208:ngpus=6)+(x4318c3s6b0n0:ncpus=208:ngpus=6)+(x4318c3s7b0n0:ncpus=208:ngpus=6)
+Authorized_Users = richp@aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov
+Authorized_Groups = ATPESC2025,ATPESC_Instructors
+server = aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov
+ctime = Thu Jul 24 15:20:31 2025
+mtime = Tue Aug 05 17:30:00 2025
+Variable_List = PBS_O_LOGNAME=richp,PBS_O_HOST=aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov,PBS_O_MAIL=/var/spool/mail/richp
+reserve_count = 1
+reserve_retry = Wed Dec 31 18:00:00 1969
+partition = pbs-default
+
+Resv ID: R6711198.aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov
+Reserve_Name = ATPESC-BIG-808
+Reserve_Owner = richp@aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov
+reserve_state = RESV_CONFIRMED
+reserve_substate = 2
+reserve_start = Fri Aug 08 21:00:00 2025
+reserve_end = Sat Aug 09 03:00:00 2025
+reserve_duration = 21600
+queue = R6711198
+Resource_List.allow_account_check_failure = True
+Resource_List.allow_negative_allocation = True
+Resource_List.backfill_factor = 84600
+Resource_List.backfill_max = 50
+Resource_List.base_score = 0
+Resource_List.enable_backfill = 0
+Resource_List.enable_fifo = 1
+Resource_List.enable_wfp = 0
+Resource_List.fifo_factor = 1800
+Resource_List.ncpus = 212992
+Resource_List.ngpus = 6144
+Resource_List.ni_resource = aurora
+Resource_List.score_boost = 0
+Resource_List.total_cpus = 10624
+Resource_List.wfp_factor = 100000
+Resource_List.nodect = 1024
+Resource_List.select = 1024:at_queue=lustre_scaling:broken=False:debug=False:validation=False:ncpus=208:ngpus=6
+Resource_List.place = scatter
+Resource_List.walltime = 06:00:00
+resv_nodes = (x4102c5s2b0n0:ncpus=208:ngpus=6)+(x4102c5s5b0n0:ncpus=208:ngpus=6)+(<truncated-this-list>)+(x4318c3s4b0n0:ncpus=208:ngpus=6)+(x4318c3s5b0n0:ncpus=208:ngpus=6)+(x4318c3s6b0n0:ncpus=208:ngpus=6)+(x4318c3s7b0n0:ncpus=208:ngpus=6)
+Authorized_Users = richp@aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov
+Authorized_Groups = ATPESC2025,ATPESC_Instructors
+server = aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov
+ctime = Thu Jul 24 15:20:33 2025
+mtime = Tue Aug 05 17:30:05 2025
+Variable_List = PBS_O_LOGNAME=richp,PBS_O_HOST=aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov,PBS_O_MAIL=/var/spool/mail/richp
+reserve_count = 1
+reserve_retry = Wed Dec 31 18:00:00 1969
+partition = pbs-default
+
+Resv ID: R6711454.aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov
+Reserve_Name = DAOS32Scatter
+Reserve_Owner = richp@aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov
+reserve_state = RESV_RUNNING
+reserve_substate = 5
+reserve_start = Mon Jul 28 16:00:00 2025
+reserve_end = Thu Aug 14 00:00:00 2025
+reserve_duration = 1411200
+queue = R6711454
+Resource_List.allow_account_check_failure = True
+Resource_List.allow_negative_allocation = True
+Resource_List.backfill_factor = 84600
+Resource_List.backfill_max = 50
+Resource_List.base_score = 0
+Resource_List.enable_backfill = 0
+Resource_List.enable_fifo = 1
+Resource_List.enable_wfp = 0
+Resource_List.fifo_factor = 1800
+Resource_List.ncpus = 8320
+Resource_List.ngpus = 240
+Resource_List.ni_resource = aurora
+Resource_List.score_boost = 0
+Resource_List.total_cpus = 10624
+Resource_List.wfp_factor = 100000
+Resource_List.nodect = 40
+Resource_List.select = 1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4117+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4202+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4320+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4401+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4404+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4407+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4508+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4509+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4510+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4511+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4512+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4513+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4514+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4515+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4516+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4517+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4519+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4600+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4601+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4602+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4613+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4615+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4702+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4703+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4704+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4705+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4706+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4707+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4709+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4711+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4716+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4717+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4206+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4310+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4405+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4714+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4103+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4201+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4209+1:ncpus=208:ngpus=6:debug=False:broken=False:at_queue=lustre_scaling:tier0=x4306
+Resource_List.place = scatter
+Resource_List.walltime = 392:00:00
+resv_nodes = (x4117c0s6b0n0:ncpus=208:ngpus=6)+(x4202c6s2b0n0:ncpus=208:ngpus=6)+(<truncated-this-list>)+(x4714c1s4b0n0:ncpus=208:ngpus=6)+(x4103c6s2b0n0:ncpus=208:ngpus=6)+(x4201c0s3b0n0:ncpus=208:ngpus=6)+(x4209c1s3b0n0:ncpus=208:ngpus=6)+(x4306c5s3b0n0:ncpus=208:ngpus=6)
+Authorized_Users = richp@aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov
+Authorized_Groups = DAOS_HPE_TEST,Intel-Punchlist
+server = aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov
+ctime = Thu Jul 24 16:56:03 2025
+mtime = Fri Aug 01 09:07:52 2025
+Variable_List = PBS_O_LOGNAME=richp,PBS_O_HOST=aurora-uan-0010.hostmgmt1000.cm.aurora.alcf.anl.gov,PBS_O_MAIL=/var/spool/mail/richp
+reserve_count = 1
+reserve_retry = Wed Dec 31 18:00:00 1969
+partition = pbs-default
+

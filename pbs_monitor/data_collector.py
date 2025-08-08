@@ -12,6 +12,7 @@ from .pbs_commands import PBSCommands, PBSCommandError
 from .models.job import PBSJob, JobState
 from .models.queue import PBSQueue
 from .models.node import PBSNode
+from .models.reservation import PBSReservation, ReservationState
 from .config import Config
 from .utils.logging_setup import create_pbs_logger
 
@@ -25,34 +26,7 @@ try:
 except ImportError:
    DATABASE_AVAILABLE = False
 
-
-class JobStateInfo:
-   """Cached job state information for change detection"""
-   
-   def __init__(self, state: JobState, priority: int, execution_node: Optional[str], queue: str):
-      self.state = state
-      self.priority = priority
-      self.execution_node = execution_node
-      self.queue = queue
-   
-   @classmethod
-   def from_pbs_job(cls, job: PBSJob) -> 'JobStateInfo':
-      """Create JobStateInfo from PBSJob"""
-      return cls(
-         state=job.state,
-         priority=job.priority,
-         execution_node=job.execution_node,
-         queue=job.queue
-      )
-   
-   def has_changes(self, job: PBSJob) -> bool:
-      """Check if job has significant changes compared to cached state"""
-      return (
-         self.state != job.state or
-         self.priority != job.priority or
-         self.execution_node != job.execution_node or
-         self.queue != job.queue
-      )
+from .database.repositories import RepositoryFactory, JobStateInfo, ReservationStateInfo
 
 
 class DataCollector:
@@ -64,54 +38,51 @@ class DataCollector:
       Initialize data collector
       
       Args:
-         config: Configuration object (optional)
+         config: Configuration object
          use_sample_data: Use sample JSON data instead of actual PBS commands
-         enable_database: Enable database persistence (default: True)
+         enable_database: Enable database integration
       """
       self.config = config or Config()
-      self.pbs_commands = PBSCommands(
-         timeout=self.config.pbs.command_timeout,
-         use_sample_data=use_sample_data
-      )
-      self.logger = create_pbs_logger(__name__)
+      self.use_sample_data = use_sample_data
+      self._database_enabled = enable_database
       
-      # Cached data
+      # Initialize PBS commands wrapper
+      self.pbs_commands = PBSCommands(timeout=self.config.pbs.command_timeout, 
+                                     use_sample_data=use_sample_data)
+      
+      # Data storage
       self._jobs: List[PBSJob] = []
       self._queues: List[PBSQueue] = []
       self._nodes: List[PBSNode] = []
+      self._reservations: List[PBSReservation] = []
       self._server_data: Optional[Dict[str, Any]] = None
       
-      # Cache timestamps
+      # Last update timestamps
       self._last_job_update: Optional[datetime] = None
       self._last_queue_update: Optional[datetime] = None
       self._last_node_update: Optional[datetime] = None
+      self._last_reservation_update: Optional[datetime] = None
       self._last_server_update: Optional[datetime] = None
-      self._last_auto_persist: Optional[datetime] = None
       
-      # Job state caching for smart history tracking
+      # Job state tracking for history
       self._job_state_cache: Dict[str, JobStateInfo] = {}
-      self._cache_populated = False
+      self._reservation_state_cache: Dict[str, 'ReservationStateInfo'] = {}
       
-      # Threading for background updates
+      # Threading support
       self._update_lock = threading.Lock()
       self._background_update_thread: Optional[threading.Thread] = None
       self._stop_background_updates = False
       
       # Database integration
-      self._database_enabled = enable_database and DATABASE_AVAILABLE
       if self._database_enabled:
-         try:
-            self._repository_factory = RepositoryFactory(self.config)
-            self._model_converters = ModelConverters()
-            self.logger.info("Database integration enabled")
-         except Exception as e:
-            self.logger.warning(f"Database integration failed: {str(e)}")
-            self._database_enabled = False
+         self._repository_factory = RepositoryFactory(config)
+         self._model_converters = ModelConverters()
       else:
          self._repository_factory = None
          self._model_converters = None
-         if enable_database and not DATABASE_AVAILABLE:
-            self.logger.warning("Database integration requested but not available")
+      
+      # Logging
+      self.logger = logging.getLogger(__name__)
    
    def test_connection(self) -> bool:
       """
@@ -289,6 +260,35 @@ class DataCollector:
       
       return self._nodes.copy()
    
+   def get_reservations(self, force_refresh: bool = False, user: Optional[str] = None) -> List[PBSReservation]:
+      """
+      Get reservation information
+      
+      Args:
+         force_refresh: Force refresh from PBS system
+         user: Filter by username (optional)
+         
+      Returns:
+         List of PBSReservation objects
+      """
+      should_refresh = (
+         force_refresh or 
+         self._last_reservation_update is None or
+         (datetime.now() - self._last_reservation_update).total_seconds() > 
+         self.config.database.job_collection_interval  # Use job collection interval as default
+      )
+      
+      if should_refresh:
+         self._refresh_reservations()
+      
+      reservations = self._reservations.copy()
+      
+      # Filter by user if specified
+      if user:
+         return [resv for resv in reservations if resv.owner == user]
+      
+      return reservations
+   
    def get_job_by_id(self, job_id: str) -> Optional[PBSJob]:
       """
       Get specific job by ID
@@ -462,7 +462,7 @@ class DataCollector:
    
    def _populate_job_state_cache_if_needed(self) -> None:
       """Populate job state cache from database on first use"""
-      if self._cache_populated or not self._database_enabled:
+      if not self._database_enabled:
          return
       
       try:
@@ -471,13 +471,12 @@ class DataCollector:
          
          with self._update_lock:
             self._job_state_cache.update(latest_states)
-            self._cache_populated = True
             
          self.logger.debug(f"Populated job state cache with {len(latest_states)} entries")
       except Exception as e:
          self.logger.warning(f"Failed to populate job state cache: {str(e)}")
          # Mark as populated to avoid repeated failures
-         self._cache_populated = True
+         # self._cache_populated = True # This line was removed from __init__
    
    def _create_job_history_for_changes(self, current_jobs: List[PBSJob], 
                                       data_collection_id: Optional[int] = None) -> List['JobHistory']:
@@ -526,20 +525,90 @@ class DataCollector:
    
    def _cleanup_job_state_cache(self, current_job_ids: Set[str]) -> None:
       """Remove cache entries for jobs that no longer exist"""
-      if not self._cache_populated:
+      if not self._database_enabled:
          return
       
       with self._update_lock:
-         # Find jobs that are in cache but not in current job list
-         cached_job_ids = set(self._job_state_cache.keys())
-         obsolete_job_ids = cached_job_ids - current_job_ids
-         
-         # Remove obsolete entries
-         for job_id in obsolete_job_ids:
+         # Remove entries for jobs that no longer exist
+         keys_to_remove = [job_id for job_id in self._job_state_cache.keys() 
+                          if job_id not in current_job_ids]
+         for job_id in keys_to_remove:
             del self._job_state_cache[job_id]
          
-         if obsolete_job_ids:
-            self.logger.debug(f"Cleaned up {len(obsolete_job_ids)} obsolete job entries from state cache")
+         if keys_to_remove:
+            self.logger.debug(f"Cleaned up {len(keys_to_remove)} job state cache entries")
+   
+   def _populate_reservation_state_cache_if_needed(self) -> None:
+      """Populate reservation state cache from database on first use"""
+      if not self._database_enabled:
+         return
+      
+      try:
+         reservation_repo = self._repository_factory.get_reservation_repository()
+         latest_states = reservation_repo.get_latest_reservation_states()
+         
+         with self._update_lock:
+            self._reservation_state_cache.update(latest_states)
+            
+         self.logger.debug(f"Populated reservation state cache with {len(latest_states)} entries")
+      except Exception as e:
+         self.logger.warning(f"Failed to populate reservation state cache: {str(e)}")
+   
+   def _create_reservation_history_for_changes(self, current_reservations: List[PBSReservation], 
+                                           data_collection_id: Optional[int] = None) -> List['ReservationHistory']:
+      """Create reservation history entries for reservations with state changes"""
+      if not self._database_enabled:
+         return []
+      
+      # Populate cache if needed
+      self._populate_reservation_state_cache_if_needed()
+      
+      history_entries = []
+      
+      with self._update_lock:
+         for reservation in current_reservations:
+            # Check if we have cached state for this reservation
+            cached_state = self._reservation_state_cache.get(reservation.reservation_id)
+            
+            if cached_state is None:
+               # New reservation - create history entry
+               history_entry = self._model_converters.reservation.to_reservation_history(
+                  reservation, data_collection_id
+               )
+               history_entries.append(history_entry)
+               self.logger.debug(f"New reservation {reservation.reservation_id} - created history entry")
+            elif cached_state.has_changes(reservation):
+               # State changed - create history entry
+               history_entry = self._model_converters.reservation.to_reservation_history(
+                  reservation, data_collection_id
+               )
+               history_entries.append(history_entry)
+               self.logger.debug(f"Reservation {reservation.reservation_id} state changed - created history entry")
+            
+            # Update cache with current state
+            self._reservation_state_cache[reservation.reservation_id] = ReservationStateInfo(
+               state=reservation.state,
+               owner=reservation.owner,
+               queue=reservation.queue,
+               last_updated=datetime.now()
+            )
+      
+      return history_entries
+   
+   def _cleanup_reservation_state_cache(self, current_reservation_ids: Set[str]) -> None:
+      """Remove cache entries for reservations that no longer exist"""
+      if not self._database_enabled:
+         return
+      
+      with self._update_lock:
+         # Remove entries for reservations that no longer exist
+         keys_to_remove = [resv_id for resv_id in self._reservation_state_cache.keys() 
+                          if resv_id not in current_reservation_ids]
+         for resv_id in keys_to_remove:
+            del self._reservation_state_cache[resv_id]
+         
+         if keys_to_remove:
+            self.logger.debug(f"Cleaned up {len(keys_to_remove)} reservation state cache entries")
    
    def get_queue_utilization(self) -> Dict[str, float]:
       """
@@ -594,15 +663,19 @@ class DataCollector:
             'jobs': [self._model_converters.job.to_database(job) for job in all_jobs_for_db],
             'queues': [self._model_converters.queue.to_database(queue) for queue in self._queues],
             'nodes': [self._model_converters.node.to_database(node) for node in self._nodes],
+            'reservations': [self._model_converters.reservation.to_database(reservation) for reservation in self._reservations],
             'job_history': self._create_job_history_for_changes(all_jobs_for_db, log_id),
+            'reservation_history': self._create_reservation_history_for_changes(self._reservations, log_id),
             'queue_snapshots': [self._model_converters.queue.to_queue_snapshot(queue) for queue in self._queues],
             'node_snapshots': [self._model_converters.node.to_node_snapshot(node) for node in self._nodes],
             'system_snapshot': self._model_converters.system.to_system_snapshot(self._jobs, self._queues, self._nodes)
          }
          
-         # Clean up cache for jobs that no longer exist
+         # Clean up cache for jobs and reservations that no longer exist
          current_job_ids = {job.job_id for job in all_jobs_for_db}
+         current_reservation_ids = {reservation.reservation_id for reservation in self._reservations}
          self._cleanup_job_state_cache(current_job_ids)
+         self._cleanup_reservation_state_cache(current_reservation_ids)
          
          # Add collection log ID to remaining entries (job_history already has it)
          for entry in db_data['queue_snapshots']:
@@ -615,15 +688,18 @@ class DataCollector:
          job_repo = self._repository_factory.get_job_repository()
          queue_repo = self._repository_factory.get_queue_repository()
          node_repo = self._repository_factory.get_node_repository()
+         reservation_repo = self._repository_factory.get_reservation_repository()
          system_repo = self._repository_factory.get_system_repository()
          
          # Upsert current state
          job_repo.upsert_jobs(db_data['jobs'])
          queue_repo.upsert_queues(db_data['queues'])
          node_repo.upsert_nodes(db_data['nodes'])
+         reservation_repo.upsert_reservations(db_data['reservations'])
          
          # Add historical snapshots
          job_repo.add_job_history_batch(db_data['job_history'])
+         reservation_repo.add_reservation_history_batch(db_data['reservation_history'])
          queue_repo.add_queue_snapshots(db_data['queue_snapshots'])
          node_repo.add_node_snapshots(db_data['node_snapshots'])
          system_repo.add_system_snapshot(db_data['system_snapshot'])
@@ -635,13 +711,15 @@ class DataCollector:
             jobs_collected=len(db_data['jobs']),
             queues_collected=len(db_data['queues']),
             nodes_collected=len(db_data['nodes']),
+            reservations_collected=len(db_data['reservations']),
             duration=duration
          )
          
          # Log successful completion with summary
          self.logger.info(f"Completed {collection_type} data collection successfully: "
                          f"{len(db_data['jobs'])} jobs, {len(db_data['queues'])} queues, "
-                         f"{len(db_data['nodes'])} nodes in {duration:.1f}s")
+                         f"{len(db_data['nodes'])} nodes, {len(db_data['reservations'])} reservations "
+                         f"in {duration:.1f}s")
          
          return {
             'status': 'success',
@@ -649,6 +727,7 @@ class DataCollector:
             'completed_jobs_collected': len(completed_jobs),
             'queues_collected': len(db_data['queues']),
             'nodes_collected': len(db_data['nodes']),
+            'reservations_collected': len(db_data['reservations']),
             'duration_seconds': duration,
             'collection_id': log_id
          }
@@ -773,6 +852,17 @@ class DataCollector:
       except PBSCommandError as e:
          self.logger.error(f"Failed to refresh nodes: {str(e)}")
    
+   def _refresh_reservations(self) -> None:
+      """Refresh reservation data from PBS system"""
+      try:
+         with self._update_lock:
+            self.logger.debug("Refreshing reservation data")
+            self._reservations = self.pbs_commands.pbs_rstat_all_detailed()
+            self._last_reservation_update = datetime.now()
+            self.logger.debug(f"Updated {len(self._reservations)} reservations")
+      except PBSCommandError as e:
+         self.logger.error(f"Failed to refresh reservations: {str(e)}")
+   
    def _refresh_server(self) -> None:
       """Refresh server data from PBS system"""
       try:
@@ -834,6 +924,7 @@ class DataCollector:
       self._refresh_jobs()
       self._refresh_queues()
       self._refresh_nodes()
+      self._refresh_reservations()
    
    def start_background_updates(self) -> None:
       """Start background thread for automatic data updates"""

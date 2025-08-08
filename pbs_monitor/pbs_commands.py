@@ -13,6 +13,7 @@ from pathlib import Path
 from .models.job import PBSJob
 from .models.queue import PBSQueue
 from .models.node import PBSNode
+from .models.reservation import PBSReservation, ReservationState
 
 
 class PBSCommandError(Exception):
@@ -693,4 +694,135 @@ class PBSCommands:
          self._run_command(["/opt/pbs/bin/qstat", "--version"])
          return True
       except PBSCommandError:
-         return False 
+         return False
+
+   # Reservation methods
+   
+   def pbs_rstat_summary(self) -> List[PBSReservation]:
+      """Get reservation summary list"""
+      if self.use_sample_data:
+         return self._load_sample_reservations_summary()
+      
+      try:
+         output = self._run_command(["/opt/pbs/bin/pbs_rstat"])
+         return self._parse_rstat_summary(output)
+      except Exception as e:
+         raise PBSCommandError(f"Failed to get reservation summary: {str(e)}")
+   
+   def pbs_rstat_detailed(self, reservation_id: str) -> PBSReservation:
+      """Get detailed reservation information"""
+      if self.use_sample_data:
+         return self._load_sample_reservation_detail(reservation_id)
+      
+      try:
+         output = self._run_command(["/opt/pbs/bin/pbs_rstat", "-f", reservation_id])
+         return self._parse_rstat_detailed(output)
+      except Exception as e:
+         raise PBSCommandError(f"Failed to get reservation details for {reservation_id}: {str(e)}")
+   
+   def pbs_rstat_all_detailed(self) -> List[PBSReservation]:
+      """Get detailed information for all reservations"""
+      # Strategy: Get summary first, then detailed for each ID
+      summary_reservations = self.pbs_rstat_summary()
+      detailed_reservations = []
+      
+      for reservation in summary_reservations:
+         try:
+            detailed = self.pbs_rstat_detailed(reservation.reservation_id)
+            detailed_reservations.append(detailed)
+         except Exception as e:
+            self.logger.warning(f"Failed to get details for {reservation.reservation_id}: {e}")
+            # Fall back to summary data
+            detailed_reservations.append(reservation)
+      
+      return detailed_reservations
+   
+   def _parse_rstat_summary(self, output: str) -> List[PBSReservation]:
+      """Parse pbs_rstat summary output"""
+      reservations = []
+      lines = output.strip().split('\n')
+      
+      # Skip header lines
+      data_lines = [line for line in lines if not line.startswith('Resv ID') and not line.startswith('---')]
+      
+      for line in data_lines:
+         if line.strip():
+            try:
+               reservation = PBSReservation.from_summary_line(line)
+               reservations.append(reservation)
+            except Exception as e:
+               self.logger.warning(f"Failed to parse reservation line: {line[:50]}... Error: {e}")
+      
+      return reservations
+   
+   def _parse_rstat_detailed(self, output: str) -> PBSReservation:
+      """Parse pbs_rstat -f detailed output"""
+      return PBSReservation.from_detailed_output(output)
+   
+   def _load_sample_reservations_summary(self) -> List[PBSReservation]:
+      """Load sample reservation summary data"""
+      try:
+         with open(self.sample_data_dir / "pbs_rstat.txt", 'r') as f:
+            output = f.read()
+         return self._parse_rstat_summary(output)
+      except Exception as e:
+         self.logger.error(f"Failed to load sample reservation summary data: {str(e)}")
+         return []
+   
+   def _load_sample_reservation_detail(self, reservation_id: str) -> PBSReservation:
+      """Load sample detailed reservation data"""
+      try:
+         with open(self.sample_data_dir / "pbs_rstat_f.txt", 'r') as f:
+            content = f.read()
+         
+         # Split by reservation entries (each starts with "Resv ID:")
+         reservations = content.split("Resv ID: ")[1:]  # Skip empty first part
+         
+         # Create a mapping from short ID to full ID
+         id_mapping = {}
+         for resv_text in reservations:
+            first_line = resv_text.split('\n')[0]
+            full_id = first_line.strip()
+            # Extract short ID (everything before the first dot after the main ID)
+            if '.' in full_id:
+               short_id = full_id.split('.')[0] + '.' + full_id.split('.')[1]  # e.g., "S6703362.aurora"
+               id_mapping[short_id] = full_id
+         
+         # Try to find the reservation by various ID formats
+         target_full_id = None
+         
+         # 1. Direct match with full ID
+         if reservation_id in [resv_text.split('\n')[0].strip() for resv_text in reservations]:
+            target_full_id = reservation_id
+         
+         # 2. Match via short ID mapping
+         elif reservation_id in id_mapping:
+            target_full_id = id_mapping[reservation_id]
+         
+         # 3. Partial match - check if reservation_id is contained in any full ID
+         else:
+            for resv_text in reservations:
+               full_id = resv_text.split('\n')[0].strip()
+               if reservation_id in full_id or full_id.startswith(reservation_id):
+                  target_full_id = full_id
+                  break
+         
+         # Find and return the matching reservation
+         if target_full_id:
+            for resv_text in reservations:
+               first_line = resv_text.split('\n')[0]
+               full_id = first_line.strip()
+               if full_id == target_full_id:
+                  resv_text = "Resv ID: " + resv_text.strip()
+                  return PBSReservation.from_detailed_output(resv_text)
+         
+         # If not found, return the first reservation as fallback
+         if reservations:
+            resv_text = "Resv ID: " + reservations[0].strip()
+            return PBSReservation.from_detailed_output(resv_text)
+         
+         raise PBSCommandError(f"No sample reservation data found for {reservation_id}")
+         
+      except Exception as e:
+         self.logger.error(f"Failed to load sample reservation detail for {reservation_id}: {str(e)}")
+         raise PBSCommandError(f"Failed to load sample reservation data: {str(e)}") 
