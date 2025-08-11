@@ -154,7 +154,7 @@ class AnalyzeCommand(BaseCommand):
           if free <= 0:
              self.console.print("[yellow]No immediate backfill window: all free nodes are consumed by queued jobs.[/yellow]")
              # Still show the next contention source for transparency
-             next_info = self._find_next_contention(now, remaining, release_events, reservations, buffer_minutes)
+             next_info = self._compute_horizon(now, 0, remaining, release_events, reservations, buffer_minutes)
              if next_info.get('contention_time'):
                 ts = next_info['contention_time']
                 src = next_info['contention_source']
