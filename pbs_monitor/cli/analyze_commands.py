@@ -442,7 +442,7 @@ class AnalyzeCommand(BaseCommand):
       
       # Prepare table data
       headers = [
-         'Reservation ID', 'Owner', 'Queue', 'Utilization %', 
+         'Reservation ID', 'Reservation Name', 'Owner', 'Queue', 'Utilization %', 
          'Node Hours Reserved', 'Node Hours Used', 'Jobs Submitted', 'Jobs Completed'
       ]
       rows = []
@@ -450,6 +450,7 @@ class AnalyzeCommand(BaseCommand):
       for util in utilizations:
          rows.append([
             util['reservation_id'][:20] + '...' if len(util['reservation_id']) > 20 else util['reservation_id'],
+            util.get('reservation_name', '') or '',
             util['owner'],
             util['queue'],
             f"{util['utilization_percentage']:.1f}%",
@@ -479,6 +480,7 @@ class AnalyzeCommand(BaseCommand):
       for util in utilizations:
          data.append({
             'reservation_id': util['reservation_id'],
+            'reservation_name': util.get('reservation_name', '') or '',
             'owner': util['owner'],
             'queue': util['queue'],
             'utilization_percentage': util['utilization_percentage'],

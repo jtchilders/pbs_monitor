@@ -257,8 +257,7 @@ Examples:
    # List reservations
    list_parser = resv_subparsers.add_parser(
       "list",
-      help="List reservations",
-      aliases=["ls"]
+      help="List reservations"
    )
    list_parser.add_argument("-u", "--user", help="Filter by user")
    list_parser.add_argument("-s", "--state", help="Filter by state")

@@ -26,10 +26,10 @@ class ReservationUtilizationAnalyzer:
         self.logger = logging.getLogger(__name__)
     
     def analyze_reservation_utilization(self, 
-                                      reservation_id: str,
-                                      start_date: Optional[datetime] = None,
-                                      end_date: Optional[datetime] = None,
-                                      analysis_method: str = "job_queue_analysis") -> Dict[str, Any]:
+                                       reservation_id: str,
+                                       start_date: Optional[datetime] = None,
+                                       end_date: Optional[datetime] = None,
+                                       analysis_method: str = "job_queue_analysis") -> Dict[str, Any]:
         """
         Analyze how well a reservation was utilized by examining:
         1. Jobs submitted to the reservation's queue
@@ -52,19 +52,24 @@ class ReservationUtilizationAnalyzer:
                 if not reservation:
                     raise ValueError(f"Reservation {reservation_id} not found")
                 
-                # Find jobs that used this reservation
+                # Determine analysis window (respect overrides)
+                window_start = start_date or reservation.start_time
+                window_end = end_date or reservation.end_time
+
+                # Find jobs whose run interval overlaps the reservation window
                 reservation_jobs = self._find_reservation_jobs(
-                    session, reservation, start_date, end_date
+                    session, reservation, window_start, window_end
                 )
                 
                 # Calculate utilization metrics
                 metrics = self._calculate_utilization_metrics(
-                    reservation, reservation_jobs, analysis_method
+                    reservation, reservation_jobs, analysis_method, window_start, window_end
                 )
                 
                 # Convert reservation data to dictionary
                 result = {
                     'reservation_id': reservation.reservation_id,
+                    'reservation_name': reservation.reservation_name,
                     'owner': reservation.owner,
                     'queue': reservation.queue,
                     'state': reservation.state.value if reservation.state else 'unknown',
@@ -216,10 +221,10 @@ class ReservationUtilizationAnalyzer:
         return query.all()
     
     def _find_reservation_jobs(self, 
-                              session: Session,
-                              reservation: Reservation,
-                              start_date: Optional[datetime],
-                              end_date: Optional[datetime]) -> List[Dict[str, Any]]:
+                               session: Session,
+                               reservation: Reservation,
+                               start_date: Optional[datetime],
+                               end_date: Optional[datetime]) -> List[Dict[str, Any]]:
         """
         Find jobs that submitted to the reservation's queue during the reservation period
         
@@ -240,11 +245,16 @@ class ReservationUtilizationAnalyzer:
             self.logger.warning(f"Reservation {reservation.reservation_id} has no start/end time")
             return []
         
+        # Select jobs by run-interval overlap with the analysis window, not submit time
+        # Only include jobs with a non-zero runtime
         jobs = session.query(Job).filter(
             Job.queue == reservation.queue,
-            Job.submit_time >= query_start,
-            Job.submit_time <= query_end,
-            Job.state.in_([JobState.RUNNING, JobState.COMPLETED, JobState.FINISHED])
+            Job.start_time.isnot(None),
+            Job.end_time.isnot(None),
+            Job.actual_runtime_seconds.isnot(None),
+            Job.actual_runtime_seconds > 0,
+            Job.start_time <= query_end,
+            Job.end_time >= query_start
         ).all()
         
         # Convert to simple Python objects
@@ -256,7 +266,8 @@ class ReservationUtilizationAnalyzer:
                 'ngpus': getattr(job, 'ngpus', None),
                 'actual_runtime_seconds': job.actual_runtime_seconds,
                 'state': job.state,
-                'start_time': job.start_time
+                'start_time': job.start_time,
+                'end_time': job.end_time
             }
             for job in jobs
         ]
@@ -267,7 +278,9 @@ class ReservationUtilizationAnalyzer:
     def _calculate_utilization_metrics(self,
                                      reservation: Reservation,
                                      jobs: List[Dict[str, Any]],
-                                     analysis_method: str) -> Dict[str, Any]:
+                                     analysis_method: str,
+                                     window_start: Optional[datetime] = None,
+                                     window_end: Optional[datetime] = None) -> Dict[str, Any]:
         """
         Calculate detailed utilization metrics
         
@@ -279,10 +292,18 @@ class ReservationUtilizationAnalyzer:
         Returns:
             Dictionary of utilization metrics
         """
-        # Calculate reserved resources
-        duration_hours = reservation.duration_seconds / 3600 if reservation.duration_seconds else 0
-        total_node_hours_reserved = reservation.nodes * duration_hours if reservation.nodes else 0
-        total_cpu_hours_reserved = reservation.ncpus * duration_hours if reservation.ncpus else 0
+        # Determine effective analysis window
+        effective_start = window_start or reservation.start_time
+        effective_end = window_end or reservation.end_time
+
+        if not effective_start or not effective_end or effective_end <= effective_start:
+            duration_hours = 0
+        else:
+            duration_hours = (effective_end - effective_start).total_seconds() / 3600
+
+        # Calculate reserved resources over the effective window
+        total_node_hours_reserved = (reservation.nodes or 0) * duration_hours if reservation.nodes else 0
+        total_cpu_hours_reserved = (reservation.ncpus or 0) * duration_hours if reservation.ncpus else 0
         total_gpu_hours_reserved = (reservation.ngpus * duration_hours) if reservation.ngpus else None
         
         # Calculate used resources (from jobs)
@@ -295,24 +316,32 @@ class ReservationUtilizationAnalyzer:
         peak_usage_timestamp = None
         
         for job in jobs:
-            if job['actual_runtime_seconds'] and job['nodes']:
-                job_hours = job['actual_runtime_seconds'] / 3600
-                job_node_hours = job['nodes'] * job_hours
-                total_node_hours_used += job_node_hours
-                
-                # CPU usage
-                job_cpus = job['total_cores']
-                total_cpu_hours_used += job_cpus * job_hours
-                
-                # GPU usage (if job used GPUs)
-                if job['ngpus']:
-                    total_gpu_hours_used += job['ngpus'] * job_hours
-                
-                # Track peak usage
-                if job['start_time'] and job['actual_runtime_seconds']:
+            if job['actual_runtime_seconds'] and job['nodes'] and job.get('start_time') and job.get('end_time'):
+                # Calculate overlap between job run interval and effective reservation window
+                overlap_start = max(job['start_time'], effective_start) if effective_start else job['start_time']
+                overlap_end = min(job['end_time'], effective_end) if effective_end else job['end_time']
+
+                if overlap_end and overlap_start and overlap_end > overlap_start:
+                    overlap_hours = (overlap_end - overlap_start).total_seconds() / 3600
+                else:
+                    overlap_hours = 0
+
+                if overlap_hours > 0:
+                    job_node_hours = job['nodes'] * overlap_hours
+                    total_node_hours_used += job_node_hours
+                    
+                    # CPU usage
+                    job_cpus = job['total_cores']
+                    total_cpu_hours_used += job_cpus * overlap_hours
+                    
+                    # GPU usage (if job used GPUs)
+                    if job['ngpus']:
+                        total_gpu_hours_used += job['ngpus'] * overlap_hours
+                    
+                    # Track peak usage (approximate: max nodes of any overlapping job)
                     if job['nodes'] > peak_nodes_used:
                         peak_nodes_used = job['nodes']
-                        peak_usage_timestamp = job['start_time']
+                        peak_usage_timestamp = overlap_start
             
             # Job completion status
             if job['state'] == JobState.COMPLETED:

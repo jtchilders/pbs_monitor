@@ -2047,7 +2047,7 @@ class ReservationsCommand(BaseCommand):
       if args.reservation_action is None:
          print("Error: No reservation action specified")
          print("\nAvailable reservation actions:")
-         print("  list, ls     List reservations with summary information")
+         print("  list         List reservations with summary information")
          print("  show         Show detailed reservation information")
          print("\nExamples:")
          print("  pbs-monitor resv list                    # List all reservations")
