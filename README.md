@@ -31,10 +31,23 @@ A comprehensive Python toolkit for monitoring and managing PBS (Portable Batch S
 
 ## Documentation
 
-For comprehensive documentation, see the [docs](docs/) folder:
-- **[Database Documentation](docs/DATABASE.md)** - Database setup, configuration, and usage
-- **[Phase 2 Database Plan](docs/PHASE2_DATABASE_PLAN.md)** - Detailed implementation plan
-- **[Documentation Index](docs/README.md)** - Complete documentation overview
+Use this README as a table of contents. Full docs live in `docs/`.
+
+### User Docs
+- Quick Start: `docs/user/quickstart.md`
+- CLI Reference: `docs/user/cli_reference.md` (auto-generated)
+- Configuration: `docs/user/configuration.md`
+- Database Guide: `docs/user/database.md`
+- Daemon & Deployment: `docs/user/daemon_and_deployment.md`
+- Historical Job Analysis: `docs/user/history.md`
+- Performance & Maintenance: `docs/user/performance_and_maintenance.md`
+- Architecture Overview: `docs/user/architecture.md`
+- Development Setup & Contributing: `docs/user/development_setup_and_contributing.md`
+
+### Planning
+- Roadmap: `docs/planning/ROADMAP.md`
+- Planning Notes: `docs/planning/PLANNING_NOTES.md`
+- Archive: `docs/planning/archive/`
 
 ## Installation
 
@@ -282,7 +295,7 @@ Shows:
 All data display commands (`status`, `jobs`, `nodes`, `queues`) support an additional option:
 - `--collect`: Collect and persist data to database after displaying
 
-For detailed command documentation, see [Database Documentation](docs/DATABASE.md).
+For detailed command documentation, see `docs/user/database.md` and `docs/user/cli_reference.md`.
 
 ## Configuration
 
@@ -479,7 +492,7 @@ pbs-monitor -v status
 echo "database: { echo_sql: true }" >> ~/.pbs_monitor.yaml
 ```
 
-For detailed troubleshooting, see [Database Documentation](docs/DATABASE.md#troubleshooting).
+For configuration and operations, see `docs/user/configuration.md`, `docs/user/database.md`, and `docs/user/daemon_and_deployment.md`.
 
 ## Contributing
 
@@ -525,4 +538,4 @@ For issues and questions:
 - Advanced visualization
 - Multi-cluster support
 
-For detailed roadmap, see [Phase 2 Database Plan](docs/PHASE2_DATABASE_PLAN.md). 
+For the roadmap, see `docs/planning/ROADMAP.md`.
