@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 import pandas as pd
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, func, desc
+from sqlalchemy import and_, func, desc, or_
 
 from ..database.models import (
     Reservation, ReservationUtilization, Job, JobState, 
@@ -52,9 +52,14 @@ class ReservationUtilizationAnalyzer:
                 if not reservation:
                     raise ValueError(f"Reservation {reservation_id} not found")
                 
-                # Determine analysis window (respect overrides)
+                # Determine analysis window (respect overrides), and cap at now if reservation is running and no explicit end_date provided
                 window_start = start_date or reservation.start_time
                 window_end = end_date or reservation.end_time
+
+                # Cap to now when analyzing an ongoing reservation unless user provided explicit end_date
+                now_ts = datetime.now()
+                if end_date is None and window_end and window_end > now_ts:
+                    window_end = now_ts
 
                 # Find jobs whose run interval overlaps the reservation window
                 reservation_jobs = self._find_reservation_jobs(
@@ -246,15 +251,12 @@ class ReservationUtilizationAnalyzer:
             return []
         
         # Select jobs by run-interval overlap with the analysis window, not submit time
-        # Only include jobs with a non-zero runtime
+        # Include running jobs (end_time may be NULL) and completed jobs
         jobs = session.query(Job).filter(
             Job.queue == reservation.queue,
             Job.start_time.isnot(None),
-            Job.end_time.isnot(None),
-            Job.actual_runtime_seconds.isnot(None),
-            Job.actual_runtime_seconds > 0,
             Job.start_time <= query_end,
-            Job.end_time >= query_start
+            or_(Job.end_time == None, Job.end_time >= query_start)
         ).all()
         
         # Convert to simple Python objects
@@ -316,10 +318,11 @@ class ReservationUtilizationAnalyzer:
         peak_usage_timestamp = None
         
         for job in jobs:
-            if job['actual_runtime_seconds'] and job['nodes'] and job.get('start_time') and job.get('end_time'):
+            if job.get('nodes') and job.get('start_time'):
                 # Calculate overlap between job run interval and effective reservation window
+                real_job_end = job.get('end_time') or datetime.now()
                 overlap_start = max(job['start_time'], effective_start) if effective_start else job['start_time']
-                overlap_end = min(job['end_time'], effective_end) if effective_end else job['end_time']
+                overlap_end = min(real_job_end, effective_end) if effective_end else real_job_end
 
                 if overlap_end and overlap_start and overlap_end > overlap_start:
                     overlap_hours = (overlap_end - overlap_start).total_seconds() / 3600
