@@ -2107,12 +2107,45 @@ class ReservationsCommand(BaseCommand):
             # Show specific reservations
             all_reservations = self.collector.get_reservations()
             reservations = []
+            seen_ids = set()
             for res_id in args.reservation_ids:
-               # Find reservations that match (partial matches allowed)
+               # Find reservations that match (partial matches allowed) from live PBS
                matches = [r for r in all_reservations if res_id in r.reservation_id or r.reservation_id.startswith(res_id)]
-               if matches:
-                  reservations.extend(matches)
-               else:
+               for m in matches:
+                  if m.reservation_id not in seen_ids:
+                     reservations.append(m)
+                     seen_ids.add(m.reservation_id)
+               
+               # If not found via PBS, attempt database fallback for completed/archived reservations
+               if not matches and getattr(self.collector, 'database_enabled', False):
+                  try:
+                     repo = self.collector._repository_factory.get_reservation_repository()
+                     converters = self.collector._model_converters
+                     db_found = []
+                     # 1) Exact ID match
+                     db_res = repo.get_reservation_by_id(res_id)
+                     if db_res:
+                        db_found = [db_res]
+                     else:
+                        # 2) Try recent reservations first, then broader historical window
+                        recent = repo.get_recent_reservations(limit=1000)
+                        db_found = [r for r in recent if res_id in r.reservation_id or r.reservation_id.startswith(res_id)]
+                        if not db_found:
+                           historical = repo.get_historical_reservations(days=365)
+                           db_found = [r for r in historical if res_id in r.reservation_id or r.reservation_id.startswith(res_id)]
+                     
+                     if db_found:
+                        for db_r in db_found:
+                           pbs_r = converters.reservation.from_database(db_r)
+                           if pbs_r.reservation_id not in seen_ids:
+                              reservations.append(pbs_r)
+                              seen_ids.add(pbs_r.reservation_id)
+                     else:
+                        print(f"Warning: Could not find reservation {res_id}")
+                  except Exception as e:
+                     self.logger.warning(f"DB fallback failed for reservation {res_id}: {e}")
+                     print(f"Warning: Could not find reservation {res_id}")
+               elif not matches:
                   print(f"Warning: Could not find reservation {res_id}")
          else:
             # Show all reservations with details
