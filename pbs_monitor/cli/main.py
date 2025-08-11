@@ -331,6 +331,29 @@ Examples:
       help="Analysis actions"
    )
    
+   # Analyze run-now
+   run_now_parser = analyze_subparsers.add_parser(
+      "run-now",
+      help="Suggest a job shape you can run right now safely"
+   )
+   run_now_parser.add_argument(
+      "-b", "--buffer-minutes",
+      type=int,
+      default=8,
+      help="Safety buffer before contention in minutes (default: 8)"
+   )
+   run_now_parser.add_argument(
+      "--format",
+      choices=["table", "json"],
+      default="table",
+      help="Output format (default: table)"
+   )
+   run_now_parser.add_argument(
+      "-r", "--refresh",
+      action="store_true",
+      help="Force refresh of data"
+   )
+   
    # Analyze run-score
    run_score_parser = analyze_subparsers.add_parser(
       "run-score",

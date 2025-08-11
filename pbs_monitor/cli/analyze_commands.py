@@ -22,6 +22,7 @@ class AnalyzeCommand(BaseCommand):
       if args.analyze_action is None:
          print("Error: No analyze action specified")
          print("\nAvailable analyze actions:")
+         print("  run-now                      Suggest a job shape you can run right now safely")
          print("  run-score                    Analyze job scores at queue → run transitions")
          print("  walltime-efficiency-by-user  Analyze walltime efficiency by user")
          print("  walltime-efficiency-by-project Analyze walltime efficiency by project")
@@ -29,11 +30,14 @@ class AnalyzeCommand(BaseCommand):
          print("  reservation-trends           Analyze reservation usage trends over time")
          print("  reservation-owner-ranking    Analyze reservation usage by owner ranking")
          print("\nExamples:")
+         print("  pbs-monitor analyze run-now                    # Get a run-now suggestion")
          print("  pbs-monitor analyze run-score                    # Analyze job scores")
          print("  pbs-monitor analyze walltime-efficiency-by-user  # Analyze user efficiency")
          print("  pbs-monitor analyze reservation-utilization      # Analyze reservation usage")
          print("\nUse 'pbs-monitor analyze <action> --help' for more information about each action")
          return 1
+      elif args.analyze_action == "run-now":
+          return self._analyze_run_now(args)
       elif args.analyze_action == "run-score":
          return self._analyze_run_score(args)
       elif args.analyze_action == "walltime-efficiency-by-user":
@@ -50,6 +54,389 @@ class AnalyzeCommand(BaseCommand):
          self.logger.error(f"Unknown analyze action: {args.analyze_action}")
          print("\nAvailable actions: run-score, walltime-efficiency-by-user, walltime-efficiency-by-project, reservation-utilization, reservation-trends, reservation-owner-ranking")
          return 1
+
+   def _analyze_run_now(self, args: argparse.Namespace) -> int:
+       """Suggest a single best job shape that can run now without delaying queued jobs.
+
+       Logic:
+       - Greedily place queued jobs (by score desc) into current free nodes to find the leftover "hole" L.
+       - Determine earliest contention time from either:
+         a) the next queued job that cannot fit now but could after running-job releases, or
+         b) the earliest upcoming CONFIRMED reservation start.
+       - Apply safety buffer (default 8 minutes, configurable with --buffer-minutes).
+       - Output a single suggestion: nodes=L and max walltime (or open-ended up to 24h if no contention found).
+       """
+       from datetime import datetime, timedelta
+       try:
+          buffer_minutes = getattr(args, 'buffer_minutes', 8)
+          open_end_cap_hours = 24  # hard cap for "open-ended"
+
+          now = datetime.now()
+
+          # Gather data
+          nodes = self.collector.get_nodes(force_refresh=getattr(args, 'refresh', False))
+          jobs = self.collector.get_jobs(force_refresh=getattr(args, 'refresh', False))
+          reservations = []
+          try:
+             reservations = self.collector.get_reservations(force_refresh=getattr(args, 'refresh', False))
+          except Exception as e:
+             # Reservations can fail on some systems; continue without blocking
+             self.logger.warning(f"Reservations unavailable: {e}")
+
+          # Count free nodes (full-node model)
+          free_nodes_now = sum(1 for n in nodes if getattr(n.state, 'value', '').lower() == 'free')
+
+          # Separate jobs, deriving required nodes robustly (nodect/select) when needed
+          queued_jobs = []
+          running_jobs = []
+          for j in jobs:
+             state_val = getattr(j.state, 'value', None)
+             if state_val == 'Q':
+                req = self._get_required_nodes(j)
+                if req and req > 0:
+                   queued_jobs.append((j, req))
+             elif state_val == 'R':
+                req = self._get_required_nodes(j)
+                if req and req > 0 and getattr(j, 'start_time', None) and getattr(j, 'walltime', None):
+                   running_jobs.append((j, req))
+
+          # Sort queued by score desc (None -> very low)
+          def score_key(job_and_req):
+             job = job_and_req[0]
+             s = getattr(job, 'score', None)
+             return s if s is not None else float('-inf')
+          queued_jobs.sort(key=score_key, reverse=True)
+
+          # Release events from running jobs
+          # Use PBSCommands walltime parser if available; else fallback parser
+          def parse_walltime_seconds(wt: str) -> int:
+             try:
+                if hasattr(self.collector, 'pbs_commands') and hasattr(self.collector.pbs_commands, '_parse_walltime_to_seconds'):
+                   return int(self.collector.pbs_commands._parse_walltime_to_seconds(wt))
+             except Exception:
+                pass
+             # Fallback: HH:MM:SS or DD:HH:MM:SS
+             try:
+                parts = [int(x) for x in str(wt).split(':')]
+                if len(parts) == 3:
+                   h, m, s = parts
+                   return h*3600 + m*60 + s
+                if len(parts) == 4:
+                   d, h, m, s = parts
+                   return d*86400 + h*3600 + m*60 + s
+             except Exception:
+                return 0
+             return 0
+
+          release_events = []  # (datetime, nodes)
+          for (j, req_nodes) in running_jobs:
+             try:
+                secs = parse_walltime_seconds(j.walltime)
+                if secs > 0 and j.start_time:
+                   release_at = j.start_time + timedelta(seconds=secs)
+                   if release_at > now:
+                      release_events.append((release_at, int(req_nodes)))
+             except Exception:
+                continue
+          release_events.sort(key=lambda x: x[0])
+
+          # Greedy place queued jobs into current free pool
+          free = int(free_nodes_now)
+          placed = []  # list of (job, req)
+          remaining = []  # list of (job, req)
+          for (job, req) in queued_jobs:
+             if req <= free:
+                placed.append((job, req))
+                free -= req
+             else:
+                remaining.append((job, req))
+
+          if free <= 0:
+             self.console.print("[yellow]No immediate backfill window: all free nodes are consumed by queued jobs.[/yellow]")
+             # Still show the next contention source for transparency
+             next_info = self._find_next_contention(now, remaining, release_events, reservations, buffer_minutes)
+             if next_info.get('contention_time'):
+                ts = next_info['contention_time']
+                src = next_info['contention_source']
+                bid = next_info.get('blocking_id') or 'N/A'
+                self.console.print(f"[dim]Earliest contention at {ts} from {src} ({bid}).[/dim]")
+             return 0
+
+          # There is a hole L = free
+          L = free
+
+          # Determine contention horizon
+          horizon_info = self._compute_horizon(now, L, remaining, release_events, reservations, buffer_minutes)
+
+          # Build suggestion
+          suggestion = {
+             'nodes': L,
+             'buffer_minutes': buffer_minutes,
+          }
+
+          reservations_in_window = []
+          if horizon_info['open_ended']:
+             # Cap open-ended at 24h
+             T_eff = now + timedelta(hours=open_end_cap_hours)
+             suggestion['max_walltime_seconds'] = int((T_eff - now).total_seconds())
+             suggestion['max_walltime_display'] = self._format_seconds_hhmm(suggestion['max_walltime_seconds'])
+             suggestion['contention_source'] = 'none'
+             suggestion['earliest_contention'] = None
+             # list next reservations up to cap window
+             reservations_in_window = self._reservations_within_window(reservations, now, T_eff)
+          else:
+             T_eff = horizon_info['contention_time']
+             # Apply buffer
+             wall_secs = int(max(0, (T_eff - now).total_seconds() - buffer_minutes*60))
+             if wall_secs <= 0:
+                self.console.print("[yellow]No safe walltime window before contention after applying buffer.[/yellow]")
+                return 0
+             suggestion['max_walltime_seconds'] = wall_secs
+             suggestion['max_walltime_display'] = self._format_seconds_hhmm(wall_secs)
+             suggestion['contention_source'] = horizon_info['contention_source']
+             suggestion['blocking_id'] = horizon_info.get('blocking_id')
+             suggestion['earliest_contention'] = T_eff
+             # reservations that start before contention
+             reservations_in_window = self._reservations_within_window(reservations, now, T_eff)
+
+          # Output
+          output_format = getattr(args, 'format', 'table')
+          if output_format == 'json':
+             self._display_run_now_json(suggestion, reservations_in_window)
+          else:
+             self._display_run_now_table(suggestion, reservations_in_window)
+
+          return 0
+       except Exception as e:
+          self.logger.error(f"Error computing run-now suggestion: {str(e)}")
+          self.console.print(f"[red]Error: {str(e)}[/red]")
+          return 1
+
+   def _compute_horizon(self, now, hole_nodes: int, remaining_jobs, release_events, reservations, buffer_minutes: int) -> Dict[str, Any]:
+       """Compute earliest contention time from next queued job or reservations.
+
+       Returns dict with keys:
+         - open_ended: bool
+         - contention_time: datetime or None
+         - contention_source: 'queued_job' | 'reservation' | 'none'
+         - blocking_id: job_id or reservation_id when applicable
+       """
+        # Next queued job contention
+       from datetime import datetime
+       T_job = None
+       blocking_job_id = None
+       # Consider earliest time any remaining queued job could start
+        # Limit scan to first N to keep this lightweight
+       MAX_CHECK = 200
+       for (job, req) in (remaining_jobs[:MAX_CHECK] if remaining_jobs else []):
+          need = int(req) - int(hole_nodes)
+          if need <= 0:
+             candidate_T = now
+          else:
+             released = 0
+             candidate_T = None
+             for (t, n) in release_events:
+                if t <= now:
+                   continue
+                released += int(n)
+                if released >= need:
+                   candidate_T = t
+                   break
+          if candidate_T is not None:
+             if T_job is None or candidate_T < T_job:
+                T_job = candidate_T
+                blocking_job_id = getattr(job, 'job_id', None)
+
+       # Reservation contention (confirmed-only, exclude running)
+       T_resv = None
+       blocking_resv_id = None
+       confirmed_values = {"CONFIRMED", "RESV_CONFIRMED"}
+       for r in sorted(reservations or [], key=lambda x: getattr(x, 'start_time', now) or now):
+          try:
+             state_val = getattr(r.state, 'value', '').upper()
+             if state_val in confirmed_values:
+                st = getattr(r, 'start_time', None)
+                if st and st > now:
+                   T_resv = st
+                   blocking_resv_id = getattr(r, 'reservation_id', None)
+                   break
+          except Exception:
+             continue
+
+       # Decide horizon
+       times = [t for t in [T_job, T_resv] if t is not None]
+       if not times:
+          return {
+             'open_ended': True,
+             'contention_time': None,
+             'contention_source': 'none'
+          }
+
+       T_eff = min(times)
+       if T_resv and T_eff == T_resv:
+          return {
+             'open_ended': False,
+             'contention_time': T_eff,
+             'contention_source': 'reservation',
+             'blocking_id': blocking_resv_id
+          }
+       return {
+          'open_ended': False,
+          'contention_time': T_eff,
+          'contention_source': 'queued_job',
+          'blocking_id': blocking_job_id
+       }
+
+   def _reservations_within_window(self, reservations, start_dt, end_dt):
+       """Return reservations starting within (start_dt, end_dt] with confirmed states."""
+       confirmed_values = {"CONFIRMED", "RESV_CONFIRMED"}
+       in_window = []
+       for r in reservations or []:
+          try:
+             st = getattr(r, 'start_time', None)
+             if not st:
+                continue
+             if not (start_dt < st <= end_dt):
+                continue
+             state_val = getattr(r.state, 'value', '').upper()
+             if state_val in confirmed_values:
+                in_window.append(r)
+          except Exception:
+             continue
+       return in_window
+
+   def _format_seconds_hhmm(self, total_seconds: int) -> str:
+       if total_seconds <= 0:
+          return "00:00"
+       minutes = total_seconds // 60
+       hours = minutes // 60
+       mins = minutes % 60
+       return f"{hours:02d}:{mins:02d}"
+
+   def _get_required_nodes(self, job: Any) -> Optional[int]:
+       """Derive required nodes from job fields.
+
+       Priority:
+       - job.nodes if set and >0
+       - job.raw_attributes.Resource_List.nodect
+       - parse job.raw_attributes.Resource_List.select strings like "select=2:ncpus=64+3:ncpus=32"
+       """
+       try:
+          # 1) direct
+          if getattr(job, 'nodes', None):
+             return int(job.nodes)
+          # 2) from Resource_List
+          rl = None
+          try:
+             rl = job.raw_attributes.get('Resource_List') if hasattr(job, 'raw_attributes') else None
+          except Exception:
+             rl = None
+          if isinstance(rl, dict):
+             # nodect
+             try:
+                nd = rl.get('nodect')
+                if nd is not None:
+                   nd_int = int(str(nd))
+                   if nd_int > 0:
+                      return nd_int
+             except Exception:
+                pass
+             # select
+             try:
+                sel = rl.get('select')
+                if sel:
+                   # Accept either a plain number or a full string with chunks
+                   sel_str = str(sel)
+                   if sel_str.isdigit():
+                      return int(sel_str)
+                   # Sum up counts in patterns like "2:ncpus=64+3:gpus=2"
+                   total = 0
+                   for chunk in sel_str.split('+'):
+                      part = chunk.strip()
+                      if not part:
+                         continue
+                      # Either "2:ncpus=64" or possibly just "2"
+                      if ':' in part:
+                         count_str = part.split(':', 1)[0]
+                      else:
+                         count_str = part
+                      try:
+                         total += int(count_str)
+                      except Exception:
+                         continue
+                   if total > 0:
+                      return total
+             except Exception:
+                pass
+       except Exception:
+          return None
+       return None
+
+   def _display_run_now_table(self, suggestion: Dict[str, Any], reservations_in_window) -> None:
+       headers = [
+          'Nodes', 'Max Walltime', 'Earliest Contention', 'Contention Source', 'Blocking ID', 'Buffer (min)'
+       ]
+       row = [
+          str(suggestion.get('nodes')),
+          suggestion.get('max_walltime_display') or 'open-ended',
+          suggestion.get('earliest_contention').isoformat(sep=' ') if suggestion.get('earliest_contention') else 'none',
+          suggestion.get('contention_source', 'none'),
+          suggestion.get('blocking_id') or 'N/A',
+          str(suggestion.get('buffer_minutes'))
+       ]
+       table = self._create_table(
+          title="Run-Now Suggestion",
+          headers=headers,
+          rows=[row]
+       )
+       self.console.print(table)
+
+       # Disclaimer: only shown when we have a suggestion
+       self.console.print("[dim]Disclaimer: suggested windows are estimates based on current queue behavior and may not start immediately.[/dim]")
+
+       # Reservations in window
+       if reservations_in_window:
+          from ..utils.formatters import format_timestamp
+          resv_headers = ['Reservation ID', 'Owner', 'Start Time', 'Nodes']
+          resv_rows = []
+          for r in reservations_in_window:
+             resv_rows.append([
+                getattr(r, 'reservation_id', '')[:30],
+                getattr(r, 'owner', '') or '',
+                format_timestamp(getattr(r, 'start_time', None)) if getattr(r, 'start_time', None) else '',
+                str(getattr(r, 'nodes', '') or '')
+             ])
+          resv_table = self._create_table(
+             title="Reservations within Window",
+             headers=resv_headers,
+             rows=resv_rows
+          )
+          self.console.print(resv_table)
+
+   def _display_run_now_json(self, suggestion: Dict[str, Any], reservations_in_window) -> None:
+       import json
+       out = {
+          'suggestion': {
+             'nodes': suggestion.get('nodes'),
+             'max_walltime_seconds': suggestion.get('max_walltime_seconds'),
+             'max_walltime_display': suggestion.get('max_walltime_display'),
+             'earliest_contention': suggestion.get('earliest_contention').isoformat() if suggestion.get('earliest_contention') else None,
+             'contention_source': suggestion.get('contention_source'),
+             'blocking_id': suggestion.get('blocking_id'),
+             'buffer_minutes': suggestion.get('buffer_minutes'),
+             'disclaimer': 'suggested windows are estimates based on current queue behavior and may not start immediately.'
+          },
+          'reservations_in_window': [
+             {
+                'reservation_id': getattr(r, 'reservation_id', None),
+                'owner': getattr(r, 'owner', None),
+                'start_time': getattr(r, 'start_time', None).isoformat() if getattr(r, 'start_time', None) else None,
+                'nodes': getattr(r, 'nodes', None),
+             }
+             for r in (reservations_in_window or [])
+          ]
+       }
+       self.console.print(json.dumps(out, indent=2))
    
    def _analyze_run_score(self, args: argparse.Namespace) -> int:
       """Analyze job scores at queue → run transitions"""
