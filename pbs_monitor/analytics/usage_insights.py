@@ -156,7 +156,11 @@ class UsageInsights:
       If save_dir is None or plotting backends unavailable, returns an empty dict.
       """
       outputs: Dict[str, str] = {}
-      if df.empty or plt is None or sns is None:
+      if df.empty:
+         self.logger.warning("No data to plot - dataframe is empty")
+         return outputs
+      if plt is None or sns is None:
+         self.logger.warning("Plotting libraries not available - matplotlib or seaborn import failed")
          return outputs
 
       os.makedirs(save_dir, exist_ok=True) if save_dir else None
@@ -287,7 +291,11 @@ class UsageInsights:
       Returns mapping of plot name to saved file path when saved.
       """
       outputs: Dict[str, str] = {}
-      if df.empty or plt is None or sns is None:
+      if df.empty:
+         self.logger.warning("No data to plot - dataframe is empty")
+         return outputs
+      if plt is None or sns is None:
+         self.logger.warning("Plotting libraries not available - matplotlib or seaborn import failed")
          return outputs
 
       try:
