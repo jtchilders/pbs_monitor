@@ -147,3 +147,8 @@ Thumbs.db
 # Project-specific files
 pbs_monitor-log.txt
 test_final_integration.py
+
+# Generated plots and visualizations
+plots/
+advanced/*.png
+*.png
