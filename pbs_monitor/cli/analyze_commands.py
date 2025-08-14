@@ -12,6 +12,7 @@ from datetime import datetime
 
 from .commands import BaseCommand
 from ..analytics import RunScoreAnalyzer, WalltimeEfficiencyAnalyzer, ReservationUtilizationAnalyzer, ReservationTrendAnalyzer
+from ..analytics.usage_insights import UsageInsights, QueueFilter
 
 
 class AnalyzeCommand(BaseCommand):
@@ -29,11 +30,13 @@ class AnalyzeCommand(BaseCommand):
          print("  reservation-utilization      Analyze reservation utilization patterns")
          print("  reservation-trends           Analyze reservation usage trends over time")
          print("  reservation-owner-ranking    Analyze reservation usage by owner ranking")
+         print("  usage-insights               Usage derived metrics and initial plots (Milestone 1)")
          print("\nExamples:")
          print("  pbs-monitor analyze run-now                    # Get a run-now suggestion")
          print("  pbs-monitor analyze run-score                    # Analyze job scores")
          print("  pbs-monitor analyze walltime-efficiency-by-user  # Analyze user efficiency")
          print("  pbs-monitor analyze reservation-utilization      # Analyze reservation usage")
+         print("  pbs-monitor analyze usage-insights --format csv  # Metrics CSV for last 30 days")
          print("\nUse 'pbs-monitor analyze <action> --help' for more information about each action")
          return 1
       elif args.analyze_action == "run-now":
@@ -50,10 +53,12 @@ class AnalyzeCommand(BaseCommand):
          return self._analyze_reservation_trends(args)
       elif args.analyze_action == "reservation-owner-ranking":
          return self._analyze_reservation_owner_ranking(args)
+      elif args.analyze_action == "usage-insights":
+         return self._analyze_usage_insights(args)
       else:
-         self.logger.error(f"Unknown analyze action: {args.analyze_action}")
-         print("\nAvailable actions: run-score, walltime-efficiency-by-user, walltime-efficiency-by-project, reservation-utilization, reservation-trends, reservation-owner-ranking")
-         return 1
+          self.logger.error(f"Unknown analyze action: {args.analyze_action}")
+          print("\nAvailable actions: run-score, walltime-efficiency-by-user, walltime-efficiency-by-project, reservation-utilization, reservation-trends, reservation-owner-ranking, usage-insights")
+          return 1
 
    def _analyze_run_now(self, args: argparse.Namespace) -> int:
        """Suggest a single best job shape that can run now without delaying queued jobs.
@@ -519,6 +524,74 @@ class AnalyzeCommand(BaseCommand):
       
       # Output CSV
       self.console.print(csv_df.to_csv(index=False))
+
+   def _analyze_usage_insights(self, args: argparse.Namespace) -> int:
+      """Usage insights analysis and plots (Milestones 1 and 2)"""
+      try:
+         days = getattr(args, 'days', 30)
+         min_q_node_hours = getattr(args, 'min_queue_node_hours', 100.0)
+         top_n = getattr(args, 'top_n_queues', None)
+         include_reservations = getattr(args, 'incl_resv', False)
+         allowlist = getattr(args, 'allowlist_queues', None)
+         ignore_queues = getattr(args, 'ignore_queues', None)
+         out_dir = getattr(args, 'output_dir', None)
+         output_format = getattr(args, 'format', 'table')
+         ts_freq = getattr(args, 'ts_freq', 'D')
+         per_user_top_n = getattr(args, 'per_user_top_n', 20)
+         per_user_min_jobs = getattr(args, 'per_user_min_jobs', 3)
+
+         qf = QueueFilter(
+            days=days,
+            min_queue_node_hours=float(min_q_node_hours),
+            top_n_queues=top_n,
+            allowlist_queues=allowlist,
+            ignore_queues=ignore_queues,
+            include_reservations=include_reservations
+         )
+
+         analyzer = UsageInsights()
+         self.console.print(f"[bold blue]Building usage metrics (last {days} days)...[/bold blue]")
+         df = analyzer.build_job_metrics(qf)
+
+         if df.empty:
+            self.console.print("[yellow]No jobs found for the specified period.[/yellow]")
+            return 0
+
+         # Optional CSV dump for user preference
+         if output_format == 'csv':
+            # keep it concise by shipping selected columns
+            cols = [
+               'job_id', 'owner', 'project', 'queue', 'nodes', 'walltime_hours',
+               'submit_time', 'start_time', 'end_time', 'wait_time_hours',
+               'run_time_hours', 'requested_node_hours', 'start_score', 'start_score_quantile', 'slowdown'
+            ]
+            cols = [c for c in cols if c in df.columns]
+            self.console.print(df[cols].to_csv(index=False))
+
+         # Plots
+         if getattr(args, 'no_plots', False):
+            return 0
+         self.console.print("[bold blue]Generating plots...[/bold blue]")
+         # Always generate both basic and advanced plots
+         saved_basic = analyzer.generate_plots(df, save_dir=out_dir)
+         saved_adv = analyzer.generate_plots_extended(
+            df,
+            days=days,
+            save_dir=out_dir,
+            per_user_top_n=per_user_top_n,
+            per_user_min_jobs=per_user_min_jobs,
+            ts_freq=ts_freq
+         )
+         saved = {**(saved_basic or {}), **(saved_adv or {})}
+         if saved:
+            self.console.print("Saved:")
+            for k, v in saved.items():
+               self.console.print(f"  {k}: {v}")
+         return 0
+      except Exception as e:
+         self.logger.error(f"Error computing usage insights: {str(e)}")
+         self.console.print(f"[red]Error: {str(e)}[/red]")
+         return 1
    
    def _analyze_walltime_efficiency_by_user(self, args: argparse.Namespace) -> int:
       """Analyze walltime efficiency by user"""

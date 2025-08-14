@@ -35,6 +35,27 @@ class BaseRepository:
 class JobRepository(BaseRepository):
     """Repository for job-related database operations"""
     
+    def create_or_update_job(self, job_data: Dict[str, Any]) -> Job:
+        """Create or update a Job from a dict and return the Job instance."""
+        with self.get_session() as session:
+            job = session.query(Job).filter(Job.job_id == job_data.get('job_id')).first()
+            if not job:
+                job = Job(job_id=job_data.get('job_id'))
+                session.add(job)
+            for key, value in job_data.items():
+                if hasattr(job, key):
+                    setattr(job, key, value)
+            # Calculate derived fields where possible
+            try:
+                job.calculate_derived_fields()
+            except Exception:
+                pass
+            session.commit()
+            session.refresh(job)
+            # Detach to avoid DetachedInstanceError on access
+            session.expunge(job)
+            return job
+    
     def get_job_by_id(self, job_id: str) -> Optional[Job]:
         """Get job by ID"""
         with self.get_session() as session:
@@ -132,16 +153,41 @@ class JobRepository(BaseRepository):
     def get_job_history(self, job_id: str) -> List[JobHistory]:
         """Get history entries for a job"""
         with self.get_session() as session:
-            return session.query(JobHistory).filter(
+            records = session.query(JobHistory).filter(
                 JobHistory.job_id == job_id
             ).order_by(JobHistory.timestamp).all()
+            # Detach records so attributes are accessible after session closes
+            for rec in records:
+                session.expunge(rec)
+            return records
     
-    def add_job_history(self, job_history: JobHistory) -> JobHistory:
-        """Add job history entry"""
+    def add_job_history(self, job_history: JobHistory | str, state: Optional[JobState] = None) -> JobHistory:
+        """Add job history entry. Accepts either a JobHistory or (job_id, state)."""
         with self.get_session() as session:
-            session.add(job_history)
+            if isinstance(job_history, JobHistory):
+                hist = job_history
+            else:
+                hist = JobHistory(job_id=job_history, state=state)
+            session.add(hist)
             session.commit()
-            return job_history
+            session.refresh(hist)
+            session.expunge(hist)
+            return hist
+
+    def get_job_statistics(self) -> Dict[str, Any]:
+        """Return simple aggregate statistics across all jobs."""
+        with self.get_session() as session:
+            total_jobs = session.query(func.count(Job.job_id)).scalar() or 0
+            counts = {
+                f"{st.value}_count": session.query(func.count(Job.job_id)).filter(Job.state == st).scalar() or 0
+                for st in JobState
+            }
+            active_jobs = session.query(func.count(Job.job_id)).filter(Job.state.in_([JobState.RUNNING, JobState.QUEUED, JobState.HELD])).scalar() or 0
+            return {
+                'total_jobs': total_jobs,
+                'active_jobs': active_jobs,
+                **counts,
+            }
     
     def add_job_history_batch(self, job_histories: List[JobHistory]) -> None:
         """Add multiple job history entries"""
@@ -273,6 +319,19 @@ class JobStateInfo:
 
 class QueueRepository(BaseRepository):
     """Repository for queue-related database operations"""
+    def create_or_update_queue(self, queue_data: Dict[str, Any]) -> Queue:
+        with self.get_session() as session:
+            q = session.query(Queue).filter(Queue.name == queue_data.get('name')).first()
+            if not q:
+                q = Queue(name=queue_data.get('name'))
+                session.add(q)
+            for key, value in queue_data.items():
+                if hasattr(q, key):
+                    setattr(q, key, value)
+            session.commit()
+            session.refresh(q)
+            session.expunge(q)
+            return q
     
     def get_queue_by_name(self, name: str) -> Optional[Queue]:
         """Get queue by name"""
@@ -349,12 +408,20 @@ class QueueRepository(BaseRepository):
                      QueueSnapshot.timestamp >= cutoff_time)
             ).order_by(QueueSnapshot.timestamp).all()
     
-    def add_queue_snapshot(self, snapshot: QueueSnapshot) -> QueueSnapshot:
-        """Add queue snapshot"""
+    def add_queue_snapshot(self, queue_name: str | QueueSnapshot, snapshot_data: Optional[Dict[str, Any]] = None) -> QueueSnapshot:
+        """Add queue snapshot. Accepts either a QueueSnapshot or (queue_name, data)."""
         with self.get_session() as session:
-            session.add(snapshot)
+            if isinstance(queue_name, QueueSnapshot):
+                snap = queue_name
+            else:
+                data = snapshot_data or {}
+                filtered = {k: v for k, v in data.items() if hasattr(QueueSnapshot, k)}
+                snap = QueueSnapshot(queue_name=queue_name, **filtered)
+            session.add(snap)
             session.commit()
-            return snapshot
+            session.refresh(snap)
+            session.expunge(snap)
+            return snap
     
     def add_queue_snapshots(self, snapshots: List[QueueSnapshot]) -> None:
         """Add multiple queue snapshots"""
@@ -384,6 +451,19 @@ class QueueRepository(BaseRepository):
 
 class NodeRepository(BaseRepository):
     """Repository for node-related database operations"""
+    def create_or_update_node(self, node_data: Dict[str, Any]) -> Node:
+        with self.get_session() as session:
+            n = session.query(Node).filter(Node.name == node_data.get('name')).first()
+            if not n:
+                n = Node(name=node_data.get('name'))
+                session.add(n)
+            for key, value in node_data.items():
+                if hasattr(n, key):
+                    setattr(n, key, value)
+            session.commit()
+            session.refresh(n)
+            session.expunge(n)
+            return n
     
     def get_node_by_name(self, name: str) -> Optional[Node]:
         """Get node by name"""
@@ -468,12 +548,20 @@ class NodeRepository(BaseRepository):
                      NodeSnapshot.timestamp >= cutoff_time)
             ).order_by(NodeSnapshot.timestamp).all()
     
-    def add_node_snapshot(self, snapshot: NodeSnapshot) -> NodeSnapshot:
-        """Add node snapshot"""
+    def add_node_snapshot(self, node_name: str | NodeSnapshot, snapshot_data: Optional[Dict[str, Any]] = None) -> NodeSnapshot:
+        """Add node snapshot. Accepts either a NodeSnapshot or (node_name, data)."""
         with self.get_session() as session:
-            session.add(snapshot)
+            if isinstance(node_name, NodeSnapshot):
+                snap = node_name
+            else:
+                data = snapshot_data or {}
+                filtered = {k: v for k, v in data.items() if hasattr(NodeSnapshot, k)}
+                snap = NodeSnapshot(node_name=node_name, **filtered)
+            session.add(snap)
             session.commit()
-            return snapshot
+            session.refresh(snap)
+            session.expunge(snap)
+            return snap
     
     def add_node_snapshots(self, snapshots: List[NodeSnapshot]) -> None:
         """Add multiple node snapshots"""

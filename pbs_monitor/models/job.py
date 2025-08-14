@@ -81,13 +81,40 @@ class PBSJob:
       # Parse resource requirements
       resources = job_data.get('Resource_List', {})
       
-      # Handle nodes - use nodect which contains the actual node count as an integer
-      nodes_str = resources.get('nodect', '1')
-      try:
-         nodes = int(nodes_str)
-      except (ValueError, TypeError):
-         # If it's not a number, default to 1
-         nodes = 1
+      # Handle nodes - prefer nodect; fallback to nodes; finally try select parsing
+      nodes_val = resources.get('nodect')
+      nodes = 1
+      if nodes_val is None:
+         nodes_val = resources.get('nodes')
+      if nodes_val is not None:
+         try:
+            # Accept plain integers or strings like "2" or "2:ppn=4"
+            nodes_str = str(nodes_val)
+            if ':' in nodes_str:
+               nodes_str = nodes_str.split(':', 1)[0]
+            nodes = int(nodes_str)
+         except (ValueError, TypeError):
+            nodes = 1
+      else:
+         # Try parsing PBS select format if present
+         sel = resources.get('select')
+         if sel:
+            try:
+               total = 0
+               sel_str = str(sel)
+               if sel_str.isdigit():
+                  total = int(sel_str)
+               else:
+                  for chunk in sel_str.split('+'):
+                     part = chunk.strip()
+                     if not part:
+                        continue
+                     count_str = part.split(':', 1)[0]
+                     total += int(count_str)
+               if total > 0:
+                  nodes = total
+            except Exception:
+               nodes = 1
       
       ppn = int(resources.get('ppn', '1'))
       walltime = resources.get('walltime')

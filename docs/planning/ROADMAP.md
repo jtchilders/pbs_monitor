@@ -7,6 +7,7 @@
 ## Near-term
 - Automate CLI reference generation from code
 - Add analytics docs (run-score, trends) as features stabilize
+- Add usage insights plotting plan ([USAGE_INSIGHTS_PLOTTING_PLAN](./USAGE_INSIGHTS_PLOTTING_PLAN.md))
 
 ## Future
 - Prediction engine

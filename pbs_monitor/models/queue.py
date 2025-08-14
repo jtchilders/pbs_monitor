@@ -10,6 +10,7 @@ import re
 
 class QueueState(Enum):
    """PBS queue operational states"""
+   ENABLED = "enabled"  # Simplified state expected by tests
    ENABLED_STARTED = "enabled_started"
    ENABLED_STOPPED = "enabled_stopped"
    DISABLED = "disabled"
@@ -152,7 +153,7 @@ class PBSQueue:
    
    def is_enabled(self) -> bool:
       """Check if queue is enabled"""
-      return self.state in [QueueState.ENABLED_STARTED, QueueState.ENABLED_STOPPED]
+      return self.state in [QueueState.ENABLED, QueueState.ENABLED_STARTED, QueueState.ENABLED_STOPPED]
    
    def is_started(self) -> bool:
       """Check if queue is started"""
@@ -160,7 +161,7 @@ class PBSQueue:
    
    def status_description(self) -> str:
       """Get human-readable status description"""
-      if self.state == QueueState.ENABLED_STARTED:
+      if self.state in [QueueState.ENABLED, QueueState.ENABLED_STARTED]:
          return "Enabled"
       elif self.state == QueueState.ENABLED_STOPPED:
          return "Enabled/Stopped"

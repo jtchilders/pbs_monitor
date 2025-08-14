@@ -59,16 +59,16 @@ class DatabaseManager:
         logger.info("Database connection initialized successfully")
     
     def _get_database_url(self) -> str:
-        """Get database URL from configuration"""
+        """Get database URL from configuration, preferring explicit config over env vars."""
         url = None
         
-        # Check environment variable first
-        if 'PBS_MONITOR_DB_URL' in os.environ:
-            url = os.environ['PBS_MONITOR_DB_URL']
-        
-        # Check for database configuration in config
-        elif hasattr(self.config, 'database') and hasattr(self.config.database, 'url'):
+        # Prefer configuration-provided URL when available (important for tests)
+        if hasattr(self.config, 'database') and hasattr(self.config.database, 'url') and self.config.database.url:
             url = self.config.database.url
+        
+        # Fallback to environment variable
+        elif 'PBS_MONITOR_DB_URL' in os.environ:
+            url = os.environ['PBS_MONITOR_DB_URL']
         
         # Default to SQLite in user home directory
         else:
@@ -249,9 +249,14 @@ def get_database_manager(config: Optional[Config] = None) -> DatabaseManager:
     """
     global _database_manager
     
+    global _database_manager
+    # If a specific config is provided, always create/replace the global manager
+    # so callers can target isolated databases (e.g., tests with temp files).
+    if config is not None:
+        _database_manager = DatabaseManager(config)
+        return _database_manager
     if _database_manager is None:
         _database_manager = DatabaseManager(config)
-    
     return _database_manager
 
 def create_tables(config: Optional[Config] = None) -> None:

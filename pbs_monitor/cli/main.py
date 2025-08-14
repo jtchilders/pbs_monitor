@@ -526,6 +526,82 @@ Examples:
       default="table",
       help="Output format (default: table)"
    )
+
+   # Analyze usage-insights (Milestone 1)
+   usage_insights_parser = analyze_subparsers.add_parser(
+      "usage-insights",
+      help="Usage insights derived metrics and initial plots"
+   )
+   usage_insights_parser.add_argument(
+      "-d", "--days",
+      type=int,
+      default=30,
+      help="Number of days to analyze (default: 30)"
+   )
+   usage_insights_parser.add_argument(
+       "-m", "--min-queue-node-hours",
+      type=float,
+      default=100.0,
+      help="Minimum requested node-hours per queue to include (default: 100)"
+   )
+   usage_insights_parser.add_argument(
+       "-n", "--top-n-queues",
+      type=int,
+      help="Limit to top-N queues by requested node-hours"
+   )
+   usage_insights_parser.add_argument(
+       "-R", "--incl-resv",
+       action="store_true",
+       help="Include reservation queues (names like M12345/R12345/S12345) in analysis"
+    )
+   usage_insights_parser.add_argument(
+       "-a", "--allowlist-queues",
+      nargs='+',
+      help="Queues to always include regardless of thresholds"
+   )
+   usage_insights_parser.add_argument(
+       "-x", "--ignore-queues",
+      nargs='+',
+      help="Queues to exclude from analysis and plots"
+   )
+   usage_insights_parser.add_argument(
+       "-o", "--output-dir",
+      help="Directory to save plots"
+   )
+   usage_insights_parser.add_argument(
+       "-P", "--no-plots",
+      action="store_true",
+      help="Do not generate plots; only compute metrics"
+   )
+   usage_insights_parser.add_argument(
+       "-f", "--format",
+      choices=["table", "csv"],
+      default="table",
+      help="Metrics output format (default: table)"
+   )
+   usage_insights_parser.add_argument(
+       "-t", "--ts-freq",
+      choices=["H", "D", "W"],
+      default="D",
+      help="Time-series frequency for advanced plots: H (hourly), D (daily), W (weekly)"
+   )
+   usage_insights_parser.add_argument(
+       "-U", "--per-user-top-n",
+      type=int,
+      default=20,
+      help="Top N users by job count to include in per-user plots (advanced suite)"
+   )
+   usage_insights_parser.add_argument(
+       "-j", "--per-user-min-jobs",
+      type=int,
+      default=3,
+      help="Minimum jobs per user to be included in per-user plots (advanced suite)"
+   )
+   usage_insights_parser.add_argument(
+      "--total-cluster-nodes",
+      type=int,
+      help=argparse.SUPPRESS
+   )
    
    # Config command
    config_parser = subparsers.add_parser(
