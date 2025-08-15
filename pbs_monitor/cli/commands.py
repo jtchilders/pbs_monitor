@@ -325,7 +325,8 @@ class JobsCommand(BaseCommand):
          'start_time': lambda j: j.start_time or datetime.min,
          'priority': lambda j: j.priority,
          'cores': lambda j: j.estimated_total_cores(),
-         'score': lambda j: j.score if j.score is not None else -1  # Put jobs without scores at the end
+         'score': lambda j: j.score if j.score is not None else -1,  # Put jobs without scores at the end
+         'queue_time': lambda j: self._calculate_current_queue_seconds(j)
       }
       
       if sort_key in sort_functions:
@@ -384,23 +385,30 @@ class JobsCommand(BaseCommand):
       
       return 0
    
-   def _format_queue_time(self, job: PBSJob) -> str:
-      """Format queue time, using current time for jobs still in queue"""
+   def _calculate_current_queue_seconds(self, job: PBSJob) -> int:
+      """Calculate current queue time in seconds for sorting"""
       from datetime import datetime
       
       if not job.submit_time:
-         return "N/A"
+         return -1
       
       # For completed/running jobs, use queue_time_seconds if available
       if job.queue_time_seconds is not None:
-         return format_duration(job.queue_time_seconds)
+         return job.queue_time_seconds
       
       # For jobs still in queue, calculate against current time
       if job.state.value in ['Q', 'H', 'W']:  # Queued, Held, or Waiting states
          now = datetime.now(job.submit_time.tzinfo)  # Use same timezone as submit_time
          queue_duration = now - job.submit_time
-         return format_duration(int(queue_duration.total_seconds()))
+         return int(queue_duration.total_seconds())
       
+      return -1
+
+   def _format_queue_time(self, job: PBSJob) -> str:
+      """Format queue time, using current time for jobs still in queue"""
+      seconds = self._calculate_current_queue_seconds(job)
+      if seconds >= 0:
+         return format_duration(seconds)
       return "N/A"
 
    def _show_job_details(self, args: argparse.Namespace) -> int:
@@ -1414,7 +1422,8 @@ class HistoryCommand(BaseCommand):
          'start_time': lambda j: j.start_time or datetime.min,
          'end_time': lambda j: j.end_time or datetime.min,
          'queued': lambda j: self._calculate_queue_seconds(j),
-         'runtime': lambda j: self._calculate_runtime_seconds(j)
+         'runtime': lambda j: self._calculate_runtime_seconds(j),
+         'queue_time': lambda j: self._calculate_current_queue_seconds(j)
       }
       
       if sort_key in sort_functions:
