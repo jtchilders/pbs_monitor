@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - plotting is optional for headless testin
    sns = None
 
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, or_
 
 from ..database.repositories import RepositoryFactory
 from ..database.models import Job, JobHistory, JobState
@@ -71,7 +71,9 @@ class UsageInsights:
       queue_filter: QueueFilter,
    ) -> pd.DataFrame:
       """
-      Build a DataFrame of job-level derived metrics for jobs that started within the window.
+      Build a DataFrame of job-level derived metrics for jobs that:
+      1) Started within the window
+      2) Are currently queued
 
       Columns include:
       - job_id, owner, project, queue
@@ -80,17 +82,22 @@ class UsageInsights:
       - wait_time_hours, run_time_hours, requested_node_hours
       - start_score
       - start_score_quantile (within queue over the window)
+      - state (job state)
       """
       with self.repo_factory.get_job_repository().get_session() as session:
          cutoff_start = datetime.now() - timedelta(days=queue_filter.days)
 
-         jobs = self._query_started_jobs(session, cutoff_start)
+         # Get both started and queued jobs
+         started_jobs = self._query_started_jobs(session, cutoff_start)
+         queued_jobs = self._query_queued_jobs(session)
+         jobs = started_jobs + queued_jobs
+
          if not jobs:
             return pd.DataFrame(columns=[
                'job_id', 'owner', 'project', 'queue', 'nodes', 'walltime_hours',
                'submit_time', 'start_time', 'end_time', 'wait_time_hours',
                'run_time_hours', 'requested_node_hours', 'start_score',
-               'start_score_quantile'
+               'start_score_quantile', 'state'
             ])
 
          # Build raw records with derived metrics
@@ -116,6 +123,7 @@ class UsageInsights:
                   'run_time_hours': float(run_h) if run_h is not None else np.nan,
                   'requested_node_hours': float(requested_node_hours),
                   'start_score': float(start_score) if start_score is not None else np.nan,
+                  'state': str(job.state) if job.state else None,
                })
             except Exception as e:  # robust to malformed rows
                self.logger.debug(f"Skipping job {getattr(job, 'job_id', '?')}: {e}")
@@ -362,6 +370,46 @@ class UsageInsights:
       except Exception as e:
          self.logger.debug(f"Plot backlog_node_hours failed: {e}")
 
+      # ---- Current wait time distribution by queue ----
+      try:
+         self.logger.debug("Computing current wait bins...")
+         wait_bins = self._compute_current_wait_bins(df)
+         self.logger.debug(f"Wait bins result: {len(wait_bins)} rows")
+         if not wait_bins.empty:
+            # Aggregate across all queues to get total count per wait bin
+            total_by_bin = wait_bins.groupby('wait_bin')['count'].sum().reset_index()
+            
+            # Ensure all bins are present (even with 0 count)
+            all_bins = ['<1hr', '1-6hrs', '6-12hrs', '12-24hrs', 
+                       '1-2days', '2-7days', '7-14days', '>14days']
+            total_by_bin = total_by_bin.set_index('wait_bin').reindex(all_bins, fill_value=0).reset_index()
+
+            # Plot simple bar chart
+            fig, ax = plt.subplots(figsize=(12, 6))
+            bars = ax.bar(total_by_bin['wait_bin'], total_by_bin['count'], width=0.8)
+            
+            # Add value labels on top of bars
+            for bar in bars:
+               height = bar.get_height()
+               if height > 0:
+                  ax.text(bar.get_x() + bar.get_width()/2., height,
+                         f'{int(height)}',
+                         ha='center', va='bottom')
+            
+            ax.set_title('Current wait time distribution of queued jobs')
+            ax.set_xlabel('Wait time')
+            ax.set_ylabel('Number of jobs')
+            plt.xticks(rotation=45)
+            if save_dir:
+               pth = os.path.join(save_dir, 'current_wait_distribution.png')
+               fig.savefig(pth, bbox_inches='tight', dpi=dpi)
+               outputs['current_wait_distribution'] = pth
+            plt.close(fig)
+         else:
+            self.logger.warning("No data to plot - current_wait_distribution is empty")
+      except Exception as e:
+         self.logger.debug(f"Plot current_wait_distribution failed: {e}")
+
       # ---- Active nodes over time by queue ----
       try:
          an_df = self._compute_active_nodes_timeseries(df, window_start, freq=ts_freq)
@@ -486,6 +534,21 @@ class UsageInsights:
             Job.start_time >= cutoff_start,
          )
       ).all()
+      return jobs
+
+   def _query_queued_jobs(self, session: Session) -> List[Job]:
+      """Get currently queued jobs (submitted but not started or in Q state)."""
+      now = datetime.now()
+      jobs = session.query(Job).filter(
+         and_(
+            Job.submit_time.isnot(None),
+            Job.nodes.isnot(None),
+            Job.walltime.isnot(None),
+            Job.start_time.is_(None),
+            Job.state == JobState.QUEUED
+         )
+      ).all()
+      self.logger.debug(f"Found {len(jobs)} queued jobs in database")
       return jobs
 
    def _find_start_score(self, session: Session, job: Job) -> Optional[float]:
@@ -791,6 +854,78 @@ class UsageInsights:
             .sort_values('timestamp')
       )
       return out
+
+   def _compute_current_wait_bins(self, df: pd.DataFrame) -> pd.DataFrame:
+      """
+      Compute wait time bins for currently queued jobs.
+      Returns DataFrame with columns: ['queue', 'wait_bin', 'count']
+      """
+      if df.empty:
+         self.logger.debug("Input DataFrame is empty")
+         return pd.DataFrame(columns=['queue', 'wait_bin', 'count'])
+
+      # Debug: Log the DataFrame info
+      self.logger.debug(f"Input DataFrame has {len(df)} rows")
+      if 'state' in df.columns:
+         state_counts = df['state'].value_counts()
+         self.logger.debug(f"State distribution: {state_counts.to_dict()}")
+      else:
+         self.logger.debug("No 'state' column in DataFrame")
+
+      # Define bin edges in hours
+      bins = [0, 1, 6, 12, 24, 48, 24*7, 24*14, float('inf')]
+      labels = [
+         '<1hr', '1-6hrs', '6-12hrs', '12-24hrs',
+         '1-2days', '2-7days', '7-14days', '>14days'
+      ]
+
+      # Get currently queued jobs - only those in QUEUED state
+      now = pd.Timestamp.now(tz=None)
+      
+      # More flexible filtering to debug what's happening
+      if 'state' not in df.columns:
+         self.logger.warning("No 'state' column found in DataFrame")
+         return pd.DataFrame(columns=['queue', 'wait_bin', 'count'])
+      
+      # Check various conditions separately
+      has_submit = df['submit_time'].notna()
+      # JobState.QUEUED has value "Q", so check for both
+      is_queued = df['state'].astype(str).isin(['Q', 'QUEUED', 'JobState.QUEUED'])
+      no_start = df['start_time'].isna()
+      
+      self.logger.debug(f"Jobs with submit_time: {has_submit.sum()}")
+      self.logger.debug(f"Jobs in QUEUED state: {is_queued.sum()}")
+      self.logger.debug(f"Jobs without start_time: {no_start.sum()}")
+      self.logger.debug(f"Unique state values: {df['state'].unique()}")
+      
+      queued = df[has_submit & is_queued & no_start].copy()
+      
+      self.logger.debug(f"Final queued jobs after filtering: {len(queued)}")
+      
+      if queued.empty:
+         self.logger.warning("No queued jobs found after filtering")
+         return pd.DataFrame(columns=['queue', 'wait_bin', 'count'])
+
+      # Compute current wait time in hours
+      queued['wait_hours'] = (now - queued['submit_time']).dt.total_seconds() / 3600.0
+      
+      # Bin the wait times
+      queued['wait_bin'] = pd.cut(
+         queued['wait_hours'],
+         bins=bins,
+         labels=labels,
+         right=False
+      )
+      
+      # Group by queue and wait bin
+      counts = (
+         queued.groupby(['queue', 'wait_bin'])
+         .size()
+         .reset_index(name='count')
+         .sort_values(['queue', 'wait_bin'])
+      )
+      
+      return counts
 
    def _detect_total_cluster_nodes(self) -> Optional[int]:
       """
