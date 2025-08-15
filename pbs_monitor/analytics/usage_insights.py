@@ -381,7 +381,7 @@ class UsageInsights:
             
             # Ensure all bins are present (even with 0 count)
             all_bins = ['<1hr', '1-6hrs', '6-12hrs', '12-24hrs', 
-                       '1-2days', '2-7days', '7-14days', '>14days']
+                       '1-2days', '2-7days', '7-14days', '2-3weeks', '3-5weeks', '>1month']
             total_by_bin = total_by_bin.set_index('wait_bin').reindex(all_bins, fill_value=0).reset_index()
 
             # Plot simple bar chart
@@ -873,10 +873,10 @@ class UsageInsights:
          self.logger.debug("No 'state' column in DataFrame")
 
       # Define bin edges in hours
-      bins = [0, 1, 6, 12, 24, 48, 24*7, 24*14, float('inf')]
+      bins = [0, 1, 6, 12, 24, 48, 24*7, 24*14, 24*21, 24*35, float('inf')]
       labels = [
          '<1hr', '1-6hrs', '6-12hrs', '12-24hrs',
-         '1-2days', '2-7days', '7-14days', '>14days'
+         '1-2days', '2-7days', '7-14days', '2-3weeks', '3-5weeks', '>1month'
       ]
 
       # Get currently queued jobs - only those in QUEUED state
