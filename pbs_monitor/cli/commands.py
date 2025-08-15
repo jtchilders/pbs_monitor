@@ -359,9 +359,10 @@ class JobsCommand(BaseCommand):
          'runtime': lambda j: j.runtime_duration() or 'N/A',
          'priority': lambda j: format_number(j.priority),
          'cores': lambda j: format_number(j.estimated_total_cores()),
-         'score': lambda j: j.format_score()
+                  'score': lambda j: j.format_score(),
+         'queue_time': lambda j: self._format_queue_time(j)
       }
-      
+
       # Build headers and rows
       for col in columns:
          if col in column_formatters:
@@ -383,6 +384,25 @@ class JobsCommand(BaseCommand):
       
       return 0
    
+   def _format_queue_time(self, job: PBSJob) -> str:
+      """Format queue time, using current time for jobs still in queue"""
+      from datetime import datetime
+      
+      if not job.submit_time:
+         return "N/A"
+      
+      # For completed/running jobs, use queue_time_seconds if available
+      if job.queue_time_seconds is not None:
+         return format_duration(job.queue_time_seconds)
+      
+      # For jobs still in queue, calculate against current time
+      if job.state.value in ['Q', 'H', 'W']:  # Queued, Held, or Waiting states
+         now = datetime.now(job.submit_time.tzinfo)  # Use same timezone as submit_time
+         queue_duration = now - job.submit_time
+         return format_duration(int(queue_duration.total_seconds()))
+      
+      return "N/A"
+
    def _show_job_details(self, args: argparse.Namespace) -> int:
       """Show detailed information for specific jobs"""
       
@@ -1528,6 +1548,23 @@ class HistoryCommand(BaseCommand):
          return "Unknown*"  # Job completed but exit status missing
       else:
          return "N/A"  # Job not completed yet
+         
+   def _format_queue_time(self, job: PBSJob) -> str:
+      """Format queue time, using current time for jobs still in queue"""
+      from datetime import datetime
+      
+      if not job.submit_time:
+         return "N/A"
+      
+      # For completed/running jobs, use queue_time_seconds if available
+      if job.queue_time_seconds is not None:
+         return format_duration(job.queue_time_seconds)
+      
+      # For jobs still in queue, calculate against current time
+      if job.state.value in ['Q', 'H', 'W']:  # Queued, Held, or Waiting states
+         now = datetime.now(job.submit_time.tzinfo)  # Use same timezone as submit_time
+         queue_duration = now - job.submit_time
+         return format_duration(int(queue_duration.total_seconds()))
 
 
 class DaemonCommand(BaseCommand):
