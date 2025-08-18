@@ -141,6 +141,10 @@ Examples:
       help="Filter by username"
    )
    jobs_parser.add_argument(
+      "-p", "--project",
+      help="Filter by project name (partial string matching)"
+   )
+   jobs_parser.add_argument(
       "-s", "--state",
       choices=["R", "Q", "H", "W", "T", "E", "S", "C", "F"],
       help="Filter by job state"

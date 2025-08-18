@@ -117,6 +117,7 @@ class DataCollector:
    
    def get_jobs(self, 
                 user: Optional[str] = None,
+                project: Optional[str] = None,
                 force_refresh: bool = False,
                 include_historical: bool = False) -> List[PBSJob]:
       """
@@ -124,6 +125,7 @@ class DataCollector:
       
       Args:
          user: Filter by username (optional)
+         project: Filter by project name using partial string matching (optional)
          force_refresh: Force refresh from PBS system
          include_historical: Include historical jobs from database
          
@@ -160,7 +162,12 @@ class DataCollector:
       
       # Filter by user if specified
       if user:
-         return [job for job in jobs if job.owner == user]
+         jobs = [job for job in jobs if job.owner == user]
+      
+      # Filter by project if specified (using partial string matching)
+      if project:
+         project_lower = project.lower()
+         jobs = [job for job in jobs if job.project and project_lower in job.project.lower()]
       
       return jobs
    
