@@ -288,6 +288,10 @@ Examples:
       help="Filter by username"
    )
    history_parser.add_argument(
+      "-p", "--project",
+      help="Filter by project name (partial string matching, case-sensitive)"
+   )
+   history_parser.add_argument(
       "-d", "--days",
       type=int,
       default=30,

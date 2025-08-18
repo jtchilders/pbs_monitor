@@ -294,12 +294,13 @@ class PBSCommands:
       
       return jobs
    
-   def qstat_completed_jobs(self, user: Optional[str] = None, days: int = 7) -> List[PBSJob]:
+   def qstat_completed_jobs(self, user: Optional[str] = None, project: Optional[str] = None, days: int = 7) -> List[PBSJob]:
       """
       Get completed job information using qstat -x
       
       Args:
          user: Filter by username
+         project: Filter by project name (partial string matching, case-sensitive)
          days: Number of days back to look for completed jobs
          
       Returns:
@@ -336,6 +337,10 @@ class PBSCommands:
             
             # Apply user filter if specified (works for both real PBS and sample data)
             if user and job.owner != user:
+               continue
+            
+            # Apply project filter if specified (works for both real PBS and sample data)
+            if project and (not job.project or project.lower() not in job.project.lower()):
                continue
                
             # Only include completed jobs (should be all of them from qstat -x, but double-check)

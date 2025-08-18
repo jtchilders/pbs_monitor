@@ -1328,12 +1328,13 @@ class HistoryCommand(BaseCommand):
          # Include PBS history if requested
          if args.include_pbs_history:
             try:
-               pbs_completed_jobs = self.collector.pbs_commands.qstat_completed_jobs(user=args.user)
+               pbs_completed_jobs = self.collector.pbs_commands.qstat_completed_jobs(user=args.user, project=getattr(args, 'project', None))
                # Merge with historical jobs, avoiding duplicates
                historical_job_ids = {job.job_id for job in historical_jobs}
                for pbs_job in pbs_completed_jobs:
                   if pbs_job.job_id not in historical_job_ids:
                      historical_jobs.append(pbs_job)
+               
                if pbs_completed_jobs:
                   print(f"Added {len(pbs_completed_jobs)} jobs from recent PBS history")
             except Exception as e:
@@ -1402,6 +1403,11 @@ class HistoryCommand(BaseCommand):
             historical_jobs.append(pbs_job)
          except Exception as e:
             self.logger.warning(f"Failed to convert job {db_job.job_id}: {str(e)}")
+      
+      # Apply project filter if specified
+      if hasattr(args, 'project') and args.project:
+         project_filter = args.project.lower()
+         historical_jobs = [job for job in historical_jobs if job.project and project_filter in job.project.lower()]
       
       return historical_jobs
    
