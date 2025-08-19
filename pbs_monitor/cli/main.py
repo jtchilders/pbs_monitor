@@ -277,6 +277,7 @@ Examples:
    )
    show_parser.add_argument("reservation_ids", nargs="*", help="Reservation IDs to show")
    show_parser.add_argument("--format", choices=["table", "json", "yaml"], default="table", help="Output format")
+   show_parser.add_argument("--show-nodes", action="store_true", help="Show all reserved nodes (not truncated)")
    
    # History command
    history_parser = subparsers.add_parser(

@@ -2330,7 +2330,7 @@ class ReservationsCommand(BaseCommand):
       
       self.console.print(table)
    
-   def _display_reservations_json(self, reservations: List[PBSReservation]):
+   def _display_reservations_json(self, reservations: List[PBSReservation], args: argparse.Namespace):
       """Display reservations in JSON format"""
       import json
       reservation_data = []
@@ -2354,6 +2354,11 @@ class ReservationsCommand(BaseCommand):
             'server': reservation.server,
             'partition': reservation.partition
          }
+         
+         # Include reserved nodes if requested
+         if getattr(args, 'show_nodes', False) and reservation.reserved_nodes:
+            data['reserved_nodes'] = reservation.reserved_nodes
+         
          reservation_data.append(data)
       
       print(json.dumps(reservation_data, indent=2))
@@ -2361,10 +2366,10 @@ class ReservationsCommand(BaseCommand):
    def _display_reservation_details(self, reservations: List[PBSReservation], args: argparse.Namespace):
       """Display detailed reservation information"""
       if args.format == "json":
-         self._display_reservations_json(reservations)
+         self._display_reservations_json(reservations, args)
          return
       elif args.format == "yaml":
-         self._display_reservations_yaml(reservations)
+         self._display_reservations_yaml(reservations, args)
          return
       
       # Table format (default)
@@ -2372,9 +2377,9 @@ class ReservationsCommand(BaseCommand):
          if i > 0:
             print()  # Blank line between reservations
          
-         self._display_single_reservation_details(reservation)
+         self._display_single_reservation_details(reservation, args)
    
-   def _display_single_reservation_details(self, reservation: PBSReservation):
+   def _display_single_reservation_details(self, reservation: PBSReservation, args: argparse.Namespace):
       """Display detailed information for a single reservation"""
       
       # Main information table
@@ -2461,16 +2466,22 @@ class ReservationsCommand(BaseCommand):
             )
             self.console.print(windows_table)
       
-      # Show reserved nodes if available (truncated for display)
+      # Show reserved nodes if available
       if reservation.reserved_nodes:
          nodes_display = reservation.reserved_nodes
-         if len(nodes_display) > 200:
-            nodes_display = nodes_display[:200] + "... (truncated)"
          
-         self.console.print(f"\n[bold]Reserved Nodes:[/bold]")
-         self.console.print(f"[dim]{nodes_display}[/dim]")
+         # Check if we should show all nodes or truncate
+         show_all_nodes = getattr(args, 'show_nodes', False)
+         if not show_all_nodes and len(nodes_display) > 200:
+            nodes_display = nodes_display[:200] + "... (truncated)"
+            self.console.print(f"\n[bold]Reserved Nodes:[/bold]")
+            self.console.print(f"[dim]{nodes_display}[/dim]")
+            self.console.print(f"[dim]Use --show-nodes to see all {len(reservation.reserved_nodes)} characters[/dim]")
+         else:
+            self.console.print(f"\n[bold]Reserved Nodes:[/bold]")
+            self.console.print(f"[dim]{nodes_display}[/dim]")
    
-   def _display_reservations_yaml(self, reservations: List[PBSReservation]):
+   def _display_reservations_yaml(self, reservations: List[PBSReservation], args: argparse.Namespace):
       """Display reservations in YAML format"""
       import yaml
       
@@ -2504,6 +2515,11 @@ class ReservationsCommand(BaseCommand):
                'modification_time': reservation.modification_time.isoformat() if reservation.modification_time else None
             }
          }
+         
+         # Include reserved nodes if requested
+         if getattr(args, 'show_nodes', False) and reservation.reserved_nodes:
+            data['reserved_nodes'] = reservation.reserved_nodes
+         
          reservation_data.append(data)
       
       print(yaml.dump(reservation_data, default_flow_style=False))
