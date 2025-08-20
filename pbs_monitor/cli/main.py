@@ -711,6 +711,43 @@ Examples:
       help="Skip confirmation prompt"
    )
    
+   # Database show
+   db_show_parser = database_subparsers.add_parser(
+      "show",
+      help="Show table data from database"
+   )
+   db_show_parser.add_argument(
+      "-t", "--table",
+      required=True,
+      help="Table name to show data from"
+   )
+   db_show_parser.add_argument(
+      "-a", "--after",
+      type=int,
+      help="Show last N rows (mutually exclusive with -b and -s/-n)"
+   )
+   db_show_parser.add_argument(
+      "-b", "--before",
+      type=int,
+      help="Show first N rows (mutually exclusive with -a and -s/-n)"
+   )
+   db_show_parser.add_argument(
+      "-s", "--start",
+      type=int,
+      help="Starting row number (use with -n, mutually exclusive with -a and -b)"
+   )
+   db_show_parser.add_argument(
+      "-n", "--num-rows",
+      type=int,
+      help="Number of rows to show (use with -s, mutually exclusive with -a and -b)"
+   )
+   db_show_parser.add_argument(
+      "--format",
+      choices=["table", "csv"],
+      default="table",
+      help="Output format (default: table)"
+   )
+   
    # Daemon command
    daemon_parser = subparsers.add_parser(
       "daemon",

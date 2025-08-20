@@ -1107,11 +1107,13 @@ class DatabaseCommand(BaseCommand):
             print("  backup    Create database backup")
             print("  restore   Restore database from backup")
             print("  cleanup   Clean up old data from database")
+            print("  show      Show table data from database")
             print("\nExamples:")
             print("  pbs-monitor database init                    # Initialize database")
             print("  pbs-monitor database status                  # Show database status")
             print("  pbs-monitor database backup                  # Create backup")
             print("  pbs-monitor database cleanup --days 30       # Clean up old data")
+            print("  pbs-monitor database show -t jobs -a 10     # Show last 10 rows from jobs table")
             print("\nUse 'pbs-monitor database <action> --help' for more information about each action")
             return 1
          elif subcommand == 'init':
@@ -1128,9 +1130,11 @@ class DatabaseCommand(BaseCommand):
             return self._restore_database(args)
          elif subcommand == 'cleanup':
             return self._cleanup_database(args)
+         elif subcommand == 'show':
+            return self._show_table_data(args)
          else:
             print(f"Unknown database subcommand: {subcommand}")
-            print("\nAvailable actions: init, migrate, status, validate, backup, restore, cleanup")
+            print("\nAvailable actions: init, migrate, status, validate, backup, restore, cleanup, show")
             return 1
             
       except Exception as e:
@@ -1307,6 +1311,164 @@ class DatabaseCommand(BaseCommand):
       except Exception as e:
          print(f"Database cleanup failed: {str(e)}")
          return 1
+   
+   def _show_table_data(self, args: argparse.Namespace) -> int:
+      """Show table data from database"""
+      try:
+         # Validate arguments
+         if not self._validate_show_arguments(args):
+            return 1
+         
+         # Get table data
+         table_data = self._query_table_data(args)
+         
+         if not table_data:
+            print(f"No data found in table '{args.table}'")
+            return 0
+         
+         # Display data
+         if args.format == "csv":
+            self._display_csv_output(table_data)
+         else:
+            self._display_table_output(table_data)
+         
+         return 0
+         
+      except Exception as e:
+         self.logger.error(f"Failed to show table data: {str(e)}")
+         print(f"Error: {str(e)}")
+         return 1
+   
+   def _validate_show_arguments(self, args: argparse.Namespace) -> bool:
+      """Validate show command arguments"""
+      # Check that only one query type is specified
+      query_types = []
+      if args.after is not None:
+         query_types.append("after")
+      if args.before is not None:
+         query_types.append("before")
+      if args.start is not None or args.num_rows is not None:
+         query_types.append("range")
+      
+      if len(query_types) > 1:
+         print("Error: Only one query type can be specified. Use either:")
+         print("  -a/--after for last N rows")
+         print("  -b/--before for first N rows")
+         print("  -s/--start and -n/--num-rows for range")
+         return False
+      
+      if len(query_types) == 0:
+         print("Error: Must specify one of:")
+         print("  -a/--after for last N rows")
+         print("  -b/--before for first N rows")
+         print("  -s/--start and -n/--num-rows for range")
+         return False
+      
+      # Check that both start and num_rows are provided for range queries
+      if "range" in query_types:
+         if args.start is None or args.num_rows is None:
+            print("Error: Both -s/--start and -n/--num-rows must be specified for range queries")
+            return False
+         
+         if args.start < 0:
+            print("Error: Start row must be non-negative")
+            return False
+         
+         if args.num_rows <= 0:
+            print("Error: Number of rows must be positive")
+            return False
+      
+      # Check that after/before values are positive
+      if args.after is not None and args.after <= 0:
+         print("Error: After value must be positive")
+         return False
+      
+      if args.before is not None and args.before <= 0:
+         print("Error: Before value must be positive")
+         return False
+      
+      return True
+   
+   def _query_table_data(self, args: argparse.Namespace) -> List[Dict[str, Any]]:
+      """Query table data based on arguments"""
+      from ..database.connection import get_database_manager
+      from sqlalchemy import text
+      
+      db_manager = get_database_manager(self.config)
+      
+      # Check if table exists
+      if not db_manager.table_exists(args.table):
+         raise ValueError(f"Table '{args.table}' does not exist")
+      
+      # Build query based on arguments
+      if args.after is not None:
+         # Last N rows
+         query = f"SELECT * FROM {args.table} ORDER BY rowid DESC LIMIT {args.after}"
+      elif args.before is not None:
+         # First N rows
+         query = f"SELECT * FROM {args.table} ORDER BY rowid ASC LIMIT {args.before}"
+      else:
+         # Range query
+         query = f"SELECT * FROM {args.table} ORDER BY rowid ASC LIMIT {args.num_rows} OFFSET {args.start}"
+      
+      # Execute query
+      with db_manager.get_session() as session:
+         result = session.execute(text(query))
+         rows = result.fetchall()
+         
+         # Convert to list of dictionaries
+         if rows:
+            columns = result.keys()
+            return [dict(zip(columns, row)) for row in rows]
+         else:
+            return []
+   
+   def _display_csv_output(self, data: List[Dict[str, Any]]) -> None:
+      """Display data in CSV format"""
+      if not data:
+         return
+      
+      # Get column names from first row
+      columns = list(data[0].keys())
+      
+      # Print header
+      print(",".join(columns))
+      
+      # Print data rows
+      for row in data:
+         values = []
+         for col in columns:
+            value = row.get(col, "")
+            # Handle None values and escape commas
+            if value is None:
+               value = ""
+            elif isinstance(value, str) and "," in value:
+               value = f'"{value}"'
+            values.append(str(value))
+         print(",".join(values))
+   
+   def _display_table_output(self, data: List[Dict[str, Any]]) -> None:
+      """Display data in table format"""
+      if not data:
+         return
+      
+      # Get column names from first row
+      columns = list(data[0].keys())
+      
+      # Prepare data for tabulate
+      table_data = []
+      for row in data:
+         values = []
+         for col in columns:
+            value = row.get(col, "")
+            if value is None:
+               value = ""
+            values.append(str(value))
+         table_data.append(values)
+      
+      # Display table
+      from tabulate import tabulate
+      print(tabulate(table_data, headers=columns, tablefmt="grid"))
 
 
 class HistoryCommand(BaseCommand):
