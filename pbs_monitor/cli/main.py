@@ -11,7 +11,7 @@ from typing import List, Optional
 from ..config import Config
 from ..utils.logging_setup import setup_logging
 from ..data_collector import DataCollector
-from .commands import StatusCommand, JobsCommand, NodesCommand, QueuesCommand, DatabaseCommand, HistoryCommand, DaemonCommand, ReservationsCommand
+from .commands import StatusCommand, JobsCommand, NodesCommand, QueuesCommand, DatabaseCommand, HistoryCommand, DaemonCommand, ReservationsCommand, PlaybackCommand
 from .analyze_commands import AnalyzeCommand
 
 
@@ -853,6 +853,49 @@ Examples:
       help="Show daemon status and recent collection activity"
    )
    
+   # Playback command
+   playback_parser = subparsers.add_parser(
+      "playback",
+      help="Render historical playback of running jobs"
+   )
+   playback_parser.add_argument(
+      "--start-time",
+      required=True,
+      help="Start time for playback (ISO 8601 or 'YYYY-MM-DD HH:MM[:SS]')"
+   )
+   playback_parser.add_argument(
+      "--end-time",
+      required=True,
+      help="End time for playback (exclusive)"
+   )
+   playback_parser.add_argument(
+      "--time-step",
+      default=None,
+      help="Playback timestep size (HH:MM:SS or DD:HH:MM)"
+   )
+   playback_parser.add_argument(
+      "--speed",
+      type=float,
+      default=None,
+      help="Seconds to sleep between rendered timesteps"
+   )
+   playback_parser.add_argument(
+      "--columns",
+      help="Comma-separated list of columns to display for each job"
+   )
+   playback_parser.add_argument(
+      "--bar-width",
+      type=int,
+      default=None,
+      help="Width of occupancy bar"
+   )
+   playback_parser.add_argument(
+      "--total-nodes",
+      type=int,
+      default=None,
+      help="Override total node count if PBS unavailable"
+   )
+   
    return parser
 
 
@@ -935,7 +978,12 @@ def main(argv: Optional[List[str]] = None) -> int:
    
    # Parse arguments
    parser = create_parser()
-   args = parser.parse_args(argv)
+   try:
+      args = parser.parse_args(argv)
+   except SystemExit as exc:
+      if exc.code == 0:
+         return 0
+      raise
    
    # Load configuration
    try:
@@ -1013,6 +1061,10 @@ def main(argv: Optional[List[str]] = None) -> int:
       
       elif args.command in ["resv", "reservations", "reserv"]:
          cmd = ReservationsCommand(collector, config)
+         return cmd.execute(args)
+      
+      elif args.command == "playback":
+         cmd = PlaybackCommand(collector, config)
          return cmd.execute(args)
       
       else:

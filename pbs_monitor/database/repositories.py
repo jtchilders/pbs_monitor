@@ -291,6 +291,56 @@ class JobRepository(BaseRepository):
             return jobs
 
 
+class PlaybackRepository(BaseRepository):
+    """Repository providing playback-focused queries."""
+
+    DEFAULT_STATES: List[JobState] = [
+        JobState.RUNNING,
+        JobState.EXITING,
+        JobState.COMPLETED,
+        JobState.FINISHED,
+        JobState.UNKNOWN_END,
+    ]
+
+    def get_jobs_overlapping_window(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+        states: Optional[List[JobState]] = None,
+    ) -> List[Job]:
+        """
+        Fetch jobs whose runtime intersects a window.
+
+        Args:
+            window_start: Inclusive window start.
+            window_end: Exclusive window end.
+            states: Optional list of job states to include.
+
+        Returns:
+            List of jobs overlapping the specified window.
+        """
+        if window_start >= window_end:
+            raise ValueError("window_start must be before window_end")
+
+        active_states = states or self.DEFAULT_STATES
+
+        with self.get_session() as session:
+            query = session.query(Job).filter(
+                Job.start_time.isnot(None),
+                Job.start_time < window_end,
+                or_(Job.end_time.is_(None), Job.end_time > window_start),
+                Job.state.in_(active_states)
+            )
+
+            jobs = query.all()
+            session.expunge_all()
+            return jobs
+
+    def get_jobs_at_tick(self, tick: datetime, step: timedelta) -> List[Job]:
+        """Convenience wrapper to fetch jobs during a timestep starting at tick."""
+        return self.get_jobs_overlapping_window(tick, tick + step)
+
+
 class JobStateInfo:
     """Information about a job's current state"""
     
@@ -1039,4 +1089,7 @@ class RepositoryFactory:
         return ReservationRepository(self.config)
     
     def get_data_collection_repository(self) -> DataCollectionRepository:
-        return DataCollectionRepository(self.config) 
+        return DataCollectionRepository(self.config)
+
+    def get_playback_repository(self) -> PlaybackRepository:
+        return PlaybackRepository(self.config) 

@@ -4,8 +4,8 @@ Command implementations for PBS Monitor CLI
 
 import argparse
 import logging
-from typing import List, Dict, Any, Optional
-from datetime import datetime
+from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime, timedelta
 from abc import ABC, abstractmethod
 
 from tabulate import tabulate
@@ -38,6 +38,15 @@ import getpass
 from pathlib import Path
 
 import pandas as pd
+from dateutil import parser as dateutil_parser
+
+from ..playback import (
+   PlaybackEngine,
+   PlaybackSnapshot,
+   build_header_text,
+   render_occupancy_bar,
+   render_jobs_table,
+)
 
 
 class BaseCommand(ABC):
@@ -2958,3 +2967,140 @@ class ReservationsCommand(BaseCommand):
          reservation_data.append(data)
       
       print(yaml.dump(reservation_data, default_flow_style=False))
+
+
+class PlaybackCommand(BaseCommand):
+   """Render scheduler playback snapshots for a given time range."""
+
+   def __init__(self, collector: DataCollector, config: Config):
+      super().__init__(collector, config)
+      self.engine = PlaybackEngine(
+         config=config,
+         repository_factory=getattr(collector, '_repository_factory', None),
+         data_collector=collector,
+         pbs_commands=collector.pbs_commands if collector else None
+      )
+
+   def execute(self, args: argparse.Namespace) -> int:
+      try:
+         start, end = self._parse_time_range(args)
+         step = self._resolve_time_step(args)
+         speed = self._resolve_speed(args)
+         bar_width = self._resolve_bar_width(args)
+         total_nodes_override = getattr(args, 'total_nodes', None)
+         columns = self._resolve_columns(args)
+
+         if total_nodes_override is not None:
+            if total_nodes_override <= 0:
+               raise ValueError("--total-nodes must be positive if provided")
+            self.engine._total_nodes = total_nodes_override
+         else:
+            self.engine.resolve_total_nodes(fallback=None)
+
+         tick_iter = self.engine.generate_ticks(start, end, step)
+
+         for tick in tick_iter:
+            snapshot = self.engine.build_snapshot(tick, step)
+            self._render_snapshot(snapshot, columns, bar_width)
+            if speed > 0:
+               time.sleep(speed)
+
+         return 0
+
+      except KeyboardInterrupt:
+         print("\nPlayback interrupted by user")
+         return 130
+      except ValueError as exc:
+         self.logger.error(f"Playback argument error: {exc}")
+         print(f"Error: {exc}")
+         return 2
+      except Exception as exc:
+         self.logger.error(f"Playback failed: {exc}")
+         print(f"Error: {exc}")
+         return 1
+
+   def _parse_time_range(self, args: argparse.Namespace) -> Tuple[datetime, datetime]:
+      start_str = args.start_time
+      end_str = args.end_time
+
+      start = self._parse_datetime(start_str)
+      end = self._parse_datetime(end_str)
+
+      if start >= end:
+         raise ValueError("--start-time must be earlier than --end-time")
+
+      max_span = timedelta(days=self.config.playback.max_time_span_days)
+      if end - start > max_span:
+         raise ValueError(
+            f"Playback range exceeds maximum span of {self.config.playback.max_time_span_days} days"
+         )
+
+      return start, end
+
+   def _parse_datetime(self, value: str) -> datetime:
+      try:
+         parsed = dateutil_parser.parse(value)
+      except (ValueError, TypeError) as exc:
+         raise ValueError(f"Invalid datetime format: {value}") from exc
+
+      if parsed.tzinfo is None:
+         parsed = parsed.replace(tzinfo=None)
+
+      return parsed
+
+   def _resolve_time_step(self, args: argparse.Namespace) -> timedelta:
+      requested = args.time_step or self.config.playback.default_time_step
+      return self.engine.parse_time_step(requested)
+
+   def _resolve_speed(self, args: argparse.Namespace) -> float:
+      speed = args.speed if args.speed is not None else self.config.playback.default_speed
+      if speed < 0:
+         raise ValueError("--speed cannot be negative")
+      return speed
+
+   def _resolve_bar_width(self, args: argparse.Namespace) -> int:
+      width = args.bar_width if args.bar_width is not None else self.config.playback.default_bar_width
+      if width <= 0:
+         raise ValueError("--bar-width must be positive")
+      return width
+
+   def _resolve_columns(self, args: argparse.Namespace) -> list[str]:
+      if args.columns:
+         columns = [col.strip() for col in args.columns.split(',') if col.strip()]
+         if not columns:
+            raise ValueError("--columns must include at least one column name")
+         return columns
+      return list(self.config.playback.default_columns)
+
+   def _render_snapshot(self, snapshot: PlaybackSnapshot, columns: list[str], bar_width: int) -> None:
+      header = build_header_text(
+         snapshot.tick,
+         int((snapshot.tick_end - snapshot.tick).total_seconds()),
+         snapshot.total_nodes,
+         snapshot.occupied_nodes,
+         snapshot.occupancy_percent,
+      )
+      self.console.clear()
+      self.console.print(header)
+      self.console.print(render_occupancy_bar(snapshot.occupancy_percent, width=bar_width))
+
+      job_dicts = [
+         {
+            'job_id': job.job_id,
+            'owner': job.owner,
+            'project': job.project,
+            'allocation': job.allocation,
+            'queue': job.queue,
+            'state': job.state,
+            'nodes': job.nodes,
+            'score_at_runtime': job.score_at_runtime,
+            'walltime_actual': job.walltime_actual_seconds,
+         }
+         for job in snapshot.jobs
+      ]
+
+      if job_dicts:
+         table = render_jobs_table(self.config, columns, job_dicts)
+         self.console.print(table)
+      else:
+         self.console.print("No jobs running during this interval")

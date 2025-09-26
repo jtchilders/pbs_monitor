@@ -165,6 +165,8 @@ class Job(Base):
         Index('ix_jobs_final_state', 'final_state_recorded'),
         Index('ix_jobs_project_state', 'project', 'state'),
         Index('ix_jobs_allocation_type_state', 'allocation_type', 'state'),
+        Index('ix_jobs_state_start_time', 'state', 'start_time'),
+        Index('ix_jobs_start_end_time', 'start_time', 'end_time'),
     )
     
     def is_active(self) -> bool:

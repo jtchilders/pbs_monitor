@@ -36,6 +36,19 @@ class PBSConfig:
 
 
 @dataclass
+class PlaybackConfig:
+   """Playback feature configuration"""
+   
+   default_time_step: str = "00:05:00"
+   default_speed: float = 1.0
+   default_bar_width: int = 60
+   max_time_span_days: int = 7
+   default_columns: List[str] = field(default_factory=lambda: [
+      "job_id", "owner", "project", "allocation", "nodes", "score_at_runtime", "walltime_actual"
+   ])
+
+
+@dataclass
 class DisplayConfig:
    """Display and output configuration"""
    
@@ -141,6 +154,7 @@ class Config:
       # Initialize default configurations
       self.pbs = PBSConfig()
       self.display = DisplayConfig()
+      self.playback = PlaybackConfig()
       self.logging = LoggingConfig()
       self.database = DatabaseConfig()
       
@@ -184,6 +198,10 @@ class Config:
          # Update display configuration
          if 'display' in config_data:
             self._update_config_object(self.display, config_data['display'])
+
+         # Update playback configuration
+         if 'playback' in config_data:
+            self._update_config_object(self.playback, config_data['playback'])
          
          # Update logging configuration
          if 'logging' in config_data:
@@ -215,6 +233,7 @@ class Config:
          config_data = {
             'pbs': self._config_to_dict(self.pbs),
             'display': self._config_to_dict(self.display),
+            'playback': self._config_to_dict(self.playback),
             'logging': self._config_to_dict(self.logging),
             'database': self._config_to_dict(self.database)
          }
@@ -290,6 +309,15 @@ class Config:
             'orphaned_job_threshold_minutes': 60,
             'missing_reservation_detection': True,
             'missing_reservation_threshold_minutes': 30
+         },
+         'playback': {
+            'default_time_step': '00:05:00',
+            'default_speed': 1.0,
+            'default_bar_width': 60,
+            'max_time_span_days': 7,
+            'default_columns': [
+               'job_id', 'owner', 'project', 'allocation', 'nodes', 'score_at_runtime', 'walltime_actual'
+            ]
          }
       }
       
