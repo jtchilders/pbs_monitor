@@ -150,6 +150,48 @@ README or `docs/` section covering:
 
 ---
 
+## Multi-System Support
+
+### Design: PostgreSQL schemas
+
+Each monitored system gets its own Postgres schema within a single `pbs_monitor` database. Tables don't collide; cross-system queries are still possible.
+
+```
+pbs_monitor DB
+├── aurora.jobs, aurora.nodes, aurora.queues, ...
+├── polaris.jobs, polaris.nodes, polaris.queues, ...
+└── <future_system>.jobs, <future_system>.nodes, ...
+```
+
+Each collector connects with a role whose `search_path` is set to its own schema, so it writes to `jobs` and Postgres routes it to e.g. `aurora.jobs` automatically. Adding a new system = create a new schema, grant the collector role, point a new collector instance at it.
+
+### Configuration
+
+Schema name is a config value each collector reads at startup:
+
+```yaml
+database:
+  url: postgresql://collector_user:PASSWORD@cels-vm:5432/pbs_monitor
+  schema: aurora   # or "polaris", etc.
+```
+
+### SQLAlchemy changes
+
+SQLAlchemy supports schema-qualified tables natively via `schema=` on model definitions. The schema name will be injected from config at startup rather than hardcoded — models will be dynamically bound to the configured schema. This is the main code change required beyond the SQLite→Postgres connection layer work.
+
+### Web dashboard
+
+Single unified view with a system selector. The web server queries the selected schema (e.g. `SET search_path TO aurora`) and re-queries on system switch. A system list endpoint will enumerate available schemas so the selector populates dynamically as new systems are added — no hardcoding required.
+
+Cross-system aggregate views (e.g. total jobs running across all systems) are possible via SQL `UNION ALL` across schemas and can be added later.
+
+### Why not alternatives
+
+- **Single table + `system` column** — simpler migration but tables grow large, indexes bloat, easy to forget the filter and get mixed data.
+- **Separate databases per system** — complete isolation but cross-system queries require app-level joins and more ops overhead.
+
+---
+
 ## Authentication Architecture
 
 ### Web users → web server (SSO/OIDC)
