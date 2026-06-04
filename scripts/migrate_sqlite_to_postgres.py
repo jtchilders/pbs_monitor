@@ -48,7 +48,7 @@ DATA_COLLECTION_CHILD_TABLES = {
     "node_snapshots": "data_collection_id",
     "system_snapshots": "data_collection_id",
     "reservation_history": "data_collection_id",
-    "reservation_utilization": "data_collection_id",
+    # reservation_utilization does NOT have data_collection_id in SQLite schema
 }
 
 # ── table migration order (respects FK constraints) ─────────────────────────
