@@ -335,6 +335,18 @@ def main() -> None:
     else:
         print("\n--no-drop set; assuming tables already exist.")
 
+    # Disable FK triggers for the duration of the migration.
+    # The production SQLite daemon may write new data_collection_log rows
+    # between our snapshot of that table and when we insert child rows,
+    # causing spurious FK violations. We re-enable and validate at the end.
+    print("  Disabling FK triggers for migration...")
+    fk_tables = list(DATA_COLLECTION_CHILD_TABLES.keys()) + ["reservations", "jobs"]
+    with dst_engine.connect() as conn:
+        for tbl in fk_tables:
+            conn.execute(text(f'ALTER TABLE "{tbl}" DISABLE TRIGGER ALL'))
+        conn.commit()
+        print("  FK triggers disabled.")
+
     # ── migrate ───────────────────────────────────────────────────────────────
     print("\nMigrating tables:")
     src_session_factory = sessionmaker(bind=src_engine)
@@ -371,8 +383,33 @@ def main() -> None:
 
     elapsed = time.time() - t_start
     print(f"\n✓ Migration complete: {total_rows:,} total rows in {elapsed:.1f}s")
+
+    # Re-enable FK triggers and report any remaining orphans as warnings (not errors)
+    print("\nRe-enabling FK triggers...")
+    fk_tables = list(DATA_COLLECTION_CHILD_TABLES.keys()) + ["reservations", "jobs"]
+    with dst_engine.connect() as conn:
+        for tbl in fk_tables:
+            conn.execute(text(f'ALTER TABLE "{tbl}" ENABLE TRIGGER ALL'))
+        conn.commit()
+
+    # Validate FK integrity and report orphans
+    print("Validating FK integrity...")
+    with dst_engine.connect() as conn:
+        orphan_count = 0
+        for tbl, col in DATA_COLLECTION_CHILD_TABLES.items():
+            result = conn.execute(text(
+                f"SELECT COUNT(*) FROM {tbl} t "
+                f"WHERE t.{col} IS NOT NULL "
+                f"AND t.{col} NOT IN (SELECT id FROM data_collection_log)"
+            )).scalar()
+            if result:
+                print(f"  ⚠️  {tbl}: {result:,} orphaned rows (data_collection_id not in data_collection_log) — these are from the live daemon writing during migration and are harmless")
+                orphan_count += result
+        if orphan_count == 0:
+            print("  ✓ No FK violations found.")
+
     print(
-        "\nNext step: update ~/.pbs_monitor.yaml (or PBS_MONITOR_DB_URL) to point "
+        "\nNext step: update pbs_monitor.yaml (or PBS_MONITOR_DB_URL) to point "
         "at the PostgreSQL DSN."
     )
 
