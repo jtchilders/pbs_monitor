@@ -13,6 +13,8 @@ Usage:
 Options:
     --sqlite     SQLite URL (sqlite:////absolute/path or sqlite:///relative/path)
     --postgres   PostgreSQL DSN
+    --schema     Target Postgres schema (default: public). Use per-system names
+                 like 'polaris' or 'aurora' for multi-system deployments.
     --batch-size Number of rows per insert batch (default: 500)
     --dry-run    Print row counts only; do not write to PostgreSQL
     --skip-table Comma-separated table names to skip (e.g. node_snapshots)
@@ -32,7 +34,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Generator, List, Optional
 
-from sqlalchemy import create_engine, text, inspect, MetaData, Table
+from sqlalchemy import create_engine, event, text, inspect, MetaData, Table
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -110,6 +112,7 @@ def migrate_table(
     dst_session: Session,
     dst_engine,
     table_name: str,
+    schema: str = "public",
     batch_size: int = 500,
     verbose: bool = False,
 ) -> int:
@@ -122,9 +125,11 @@ def migrate_table(
     print(f"  {table_name}: {src_count:,} rows ...", end="", flush=True)
     t0 = time.time()
 
-    # Reflect destination table so we can do typed inserts
+    # Reflect destination table — pass schema explicitly so reflection works
+    # regardless of search_path session state
+    pg_schema = schema if schema != "public" else None
     meta = MetaData()
-    dst_table = Table(table_name, meta, autoload_with=dst_engine)
+    dst_table = Table(table_name, meta, autoload_with=dst_engine, schema=pg_schema)
 
     dst_cols = {col.name for col in dst_table.columns}
 
@@ -192,6 +197,11 @@ def main() -> None:
         help="PostgreSQL destination DSN, e.g. postgresql://pbs_monitor:password@localhost:5432/pbs_monitor",
     )
     parser.add_argument(
+        "--schema",
+        default="public",
+        help="Target Postgres schema (default: public). Use per-system names like 'polaris' or 'aurora'.",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=500,
@@ -250,15 +260,29 @@ def main() -> None:
         return
 
     # ── destination: PostgreSQL ───────────────────────────────────────────────
-    print(f"\nDestination (PostgreSQL): {args.postgres.split('@')[-1]}")  # hide creds
+    schema = args.schema
+    print(f"\nDestination (PostgreSQL): {args.postgres.split('@')[-1]}")
+    print(f"  Schema: {schema}")
     dst_engine = create_engine(
         args.postgres,
         pool_pre_ping=True,
         pool_recycle=3600,
     )
 
+    # Set search_path on every connection so tables land in the right schema
+    @event.listens_for(dst_engine, "connect")
+    def set_search_path(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute(f'SET search_path TO "{schema}", public')
+        cursor.close()
+
+    # Ensure the target schema exists
+    with dst_engine.connect() as conn:
+        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+        conn.commit()
+
     if not args.no_drop:
-        print("\nCreating schema in PostgreSQL (drop + recreate)...")
+        print(f"\nCreating tables in schema '{schema}' (drop + recreate)...")
         sys.path.insert(0, ".")
         from pbs_monitor.database.models import Base
 
@@ -266,7 +290,7 @@ def main() -> None:
         Base.metadata.create_all(dst_engine)
         print("  Schema ready.")
     else:
-        print("\n--no-drop set; assuming schema already exists.")
+        print("\n--no-drop set; assuming tables already exist.")
 
     # ── migrate ───────────────────────────────────────────────────────────────
     print("\nMigrating tables:")
@@ -289,6 +313,7 @@ def main() -> None:
                 dst_session,
                 dst_engine,
                 table,
+                schema=schema,
                 batch_size=args.batch_size,
                 verbose=args.verbose,
             )

@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from typing import Dict, Optional, Any, Generator
 from pathlib import Path
 
-from sqlalchemy import create_engine, MetaData, inspect, text
+from sqlalchemy import create_engine, MetaData, inspect, text, event
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
@@ -44,15 +44,15 @@ class ReadOnlyDatabaseError(Exception):
         return (
             "Database is read-only. Write operations are not permitted.\n\n"
             "This can happen when:\n"
-            "  - You don't have write permission to the database file\n"
-            "  - The database file is owned by another user\n"
+            "  - You don't have write permission to the database\n"
+            "  - The database credentials only allow SELECT\n"
             "  - The database is on a read-only filesystem\n\n"
             "If you need read-only access, commands like 'jobs', 'nodes', 'queues', \n"
             "'history', and 'analyze' will still work for viewing data.\n\n"
             "To enable writes, either:\n"
             "  - Ask the database owner to grant write permissions\n"
             "  - Create your own database: pbs-monitor config --create && pbs-monitor database init\n"
-            "  - Set PBS_MONITOR_DB_URL to point to your own database file"
+            "  - Set PBS_MONITOR_DB_URL or configure 'database.url' in ~/.pbs_monitor.yaml"
         )
 
 
@@ -103,11 +103,30 @@ class DatabaseManager:
             return
         
         database_url = self._get_database_url()
+        schema = getattr(self.config.database, 'schema', 'public') if hasattr(self.config, 'database') else 'public'
         engine_options = self._get_engine_options()
         
         logger.debug(f"Initializing database connection to: {self._mask_url(database_url)}")
         
         self.engine = create_engine(database_url, **engine_options)
+        
+        # For Postgres: set search_path so all queries land in the right schema
+        if database_url.startswith('postgresql'):
+            schema = schema or 'public'
+            
+            @event.listens_for(self.engine, 'connect')
+            def set_search_path(dbapi_conn, connection_record):
+                cursor = dbapi_conn.cursor()
+                cursor.execute(f'SET search_path TO "{schema}", public')
+                cursor.close()
+            
+            # Ensure the schema exists
+            if schema != 'public':
+                with self.engine.connect() as conn:
+                    conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+                    conn.commit()
+                logger.info(f"Using Postgres schema: {schema}")
+        
         self.session_factory = sessionmaker(bind=self.engine)
         self._initialized = True
         
