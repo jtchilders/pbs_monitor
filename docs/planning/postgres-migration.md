@@ -142,6 +142,19 @@ README or `docs/` section covering:
 - Systemd/cron for the collector daemon
 - How co-workers connect (`http://polaris-login-XX:PORT`)
 
+#### ⚠️ Polaris build note: unload XALT before building Postgres
+
+Polaris injects XALT (`libxalt_init.so`) via `LD_PRELOAD` to track software usage. XALT causes a segfault when `postgres -V` is run, which breaks `initdb` before it can do anything. Unload it before running `./configure` and `make`, and keep it unset when running the Postgres daemon:
+
+```bash
+module unload xalt   # or: unset LD_PRELOAD / export XALT_EXECUTABLE_TRACKING=no
+./configure --prefix=/home/parton/pbs_monitor_dev/venv/ --without-icu
+make -j4
+make install
+```
+
+Keep `XALT_EXECUTABLE_TRACKING=no` (or `unset LD_PRELOAD`) in any script that starts `pg_ctl` or the pbs_monitor daemon.
+
 ### Phase 8 — Testing
 
 - Run existing test suite against a local Postgres instance
