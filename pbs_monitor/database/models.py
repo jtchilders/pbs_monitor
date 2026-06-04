@@ -142,7 +142,7 @@ class Job(Base):
     # Job outcomes
     priority = Column(Integer, default=0)
     exit_status = Column(Integer)
-    execution_node = Column(String(500))
+    execution_node = Column(Text)  # Multi-node strings can exceed 10k chars
     
     # Calculated fields
     total_cores = Column(Integer)
@@ -211,7 +211,7 @@ class JobHistory(Base):
     state = Column(SQLEnum(JobState))
     queue = Column(String(50))
     priority = Column(Integer)
-    execution_node = Column(String(500))
+    execution_node = Column(Text)  # Multi-node strings can exceed 10k chars
     
     # PBS score (if available)
     score = Column(Float)

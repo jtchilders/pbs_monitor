@@ -62,12 +62,25 @@ def _row_to_dict(row) -> dict:
     return dict(row._mapping)
 
 
+def _sanitize_json_string(s: str) -> str:
+    """
+    Replace non-standard JSON tokens (Infinity, -Infinity, NaN) with null
+    so that json.loads() and PostgreSQL JSONB can parse the string.
+    """
+    import re
+    # Replace bare Infinity / -Infinity / NaN tokens (not inside quotes)
+    s = re.sub(r'(?<!["\w])(-?Infinity|NaN)(?!["\w])', 'null', s)
+    return s
+
+
 def _coerce_row(row: dict) -> dict:
     """
     Normalize values so they are PostgreSQL-friendly.
 
     SQLite stores JSON columns as text; PostgreSQL expects dict/list.
     SQLite stores booleans as 0/1 integers; PostgreSQL wants True/False.
+    Some PBS environment variables contain non-standard JSON tokens (Infinity)
+    which need to be sanitized before Postgres JSONB can accept them.
     """
     out = {}
     for k, v in row.items():
@@ -75,10 +88,13 @@ def _coerce_row(row: dict) -> dict:
         if isinstance(v, str):
             stripped = v.strip()
             if stripped and stripped[0] in ("{", "["):
+                # Sanitize non-standard tokens before parsing
+                sanitized = _sanitize_json_string(v)
                 try:
-                    v = json.loads(v)
+                    v = json.loads(sanitized)
                 except json.JSONDecodeError:
-                    pass  # leave as-is
+                    # Still can't parse — store as null to avoid blocking migration
+                    v = None
         out[k] = v
     return out
 
