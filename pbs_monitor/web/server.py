@@ -10,7 +10,7 @@ from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from sqlalchemy import create_engine, func, or_, and_
+from sqlalchemy import create_engine, event, func, or_, and_
 from sqlalchemy.orm import sessionmaker, Session
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -249,7 +249,20 @@ def create_app(config=None) -> FastAPI:
             connect_args=connect_args,
         )
     else:
-        engine = create_engine(db_url, connect_args=connect_args)
+        engine = create_engine(
+            db_url,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+        )
+        # Apply schema search_path for PostgreSQL multi-system deployments
+        schema = getattr(config.database, 'schema', 'public') or 'public'
+        if schema != 'public':
+            @event.listens_for(engine, 'connect')
+            def set_search_path(dbapi_conn, connection_record):
+                cursor = dbapi_conn.cursor()
+                cursor.execute(f'SET search_path TO "{schema}", public')
+                cursor.close()
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     app = FastAPI(title="PBS Monitor Dashboard")

@@ -90,13 +90,13 @@ class AnalyticsCache:
 
 def make_cache(main_db_url: str) -> AnalyticsCache:
     """
-    Build an AnalyticsCache whose DB sits alongside the main SQLite DB.
-    Accepts either a raw file path or a SQLAlchemy URL like
-    'sqlite:////path/to/file.db'.
+    Build an AnalyticsCache whose DB sits alongside the main SQLite DB,
+    or in the user's home directory when using PostgreSQL.
     """
     if main_db_url.startswith("sqlite:///"):
         main_path = main_db_url[len("sqlite:///"):]
+        cache_path = str(Path(main_path).parent / "analytics_cache.db")
     else:
-        main_path = main_db_url
-    cache_path = str(Path(main_path).parent / "analytics_cache.db")
+        # PostgreSQL or other non-file backend — use a fixed cache location
+        cache_path = str(Path.home() / ".pbs_monitor_analytics_cache.db")
     return AnalyticsCache(cache_path)
