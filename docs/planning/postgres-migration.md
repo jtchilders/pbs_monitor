@@ -1,8 +1,8 @@
 # PBS Monitor: SQLite → PostgreSQL Migration Plan
 
-**Status:** Planning — no code changes yet
+**Status:** In progress — migration tested on Polaris login-04
 **Branch:** `feature/postgres-backend` (created off main)
-**Last updated:** 2026-06-03
+**Last updated:** 2026-06-04
 
 ---
 
@@ -279,3 +279,23 @@ host  pbs_monitor  web_user        127.0.0.1/32    scram-sha-256
 - When will an external server be available? That's the gating question for Phase 2.
 - Firewall rules: can Polaris/Aurora login nodes reach an external server on the ALCF network?
 - Login node sysadmin awareness for running Postgres on shared hardware.
+
+---
+
+## Known Bugs / Tech Debt
+
+### Config file not respected by daemon and web server when run from a non-home directory
+
+**Discovered:** 2026-06-04 during Polaris dev testing
+
+The daemon (`pbs-monitor daemon start`) and web server pick up `~/.pbs_monitor.yaml` even when a local `pbs_monitor.yaml` exists in the current working directory. The documented config search order (current dir first) is not being honored, at least for the daemon and web subcommands.
+
+**Impact:** Running a dev instance in `~/pbs_monitor_dev` alongside a production instance on a different login node is difficult — both end up using the same `~/.pbs_monitor.yaml` and therefore the same database.
+
+**Workaround:** Temporarily edit `~/.pbs_monitor.yaml` to point at the dev DB, or export `PBS_MONITOR_DB_URL` before starting the daemon/web server.
+
+**Proper fix:** 
+- Investigate where the daemon resolves config (likely at import time or via a singleton, not from `cwd` at startup)
+- Add a `--config` CLI flag to all subcommands that need it (daemon, web)
+- Or: support `PBS_MONITOR_CONFIG_FILE` env var as an explicit override
+- Ensure the daemon records which config file it loaded in its status output
