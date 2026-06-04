@@ -39,6 +39,18 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 
+# ── tables that reference data_collection_log.id ────────────────────────────
+# SQLite silently allowed orphaned FK references; Postgres rejects them.
+# We filter these tables at source to only include rows with valid parents.
+DATA_COLLECTION_CHILD_TABLES = {
+    "job_history": "data_collection_id",
+    "queue_snapshots": "data_collection_id",
+    "node_snapshots": "data_collection_id",
+    "system_snapshots": "data_collection_id",
+    "reservation_history": "data_collection_id",
+    "reservation_utilization": "data_collection_id",
+}
+
 # ── table migration order (respects FK constraints) ─────────────────────────
 TABLE_ORDER = [
     "data_collection_log",
@@ -151,10 +163,25 @@ def migrate_table(
 
     offset = 0
     inserted = 0
+    skipped = 0
+
+    # For tables with FK refs to data_collection_log, filter orphans at source.
+    # SQLite never enforced these constraints; Postgres will reject them.
+    fk_filter = ""
+    fk_col = DATA_COLLECTION_CHILD_TABLES.get(table_name)
+    if fk_col:
+        fk_filter = f" WHERE {fk_col} IN (SELECT id FROM data_collection_log)"
+        # Recount with filter applied
+        filtered_count = src_session.execute(
+            text(f"SELECT COUNT(*) FROM {table_name}{fk_filter}")
+        ).scalar()
+        if filtered_count < src_count:
+            print(f"\n    (filtering {src_count - filtered_count:,} orphaned rows with no parent in data_collection_log)", end="", flush=True)
+        src_count = filtered_count
 
     while offset < src_count:
         rows_raw = src_session.execute(
-            text(f"SELECT * FROM {table_name} LIMIT {batch_size} OFFSET {offset}")
+            text(f"SELECT * FROM {table_name}{fk_filter} LIMIT {batch_size} OFFSET {offset}")
         ).fetchall()
 
         if not rows_raw:
