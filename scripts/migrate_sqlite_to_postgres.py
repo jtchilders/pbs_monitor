@@ -392,8 +392,46 @@ def main() -> None:
             conn.execute(text(f'ALTER TABLE "{tbl}" ENABLE TRIGGER ALL'))
         conn.commit()
 
+    # Reset all sequences to max(id) so new inserts don't collide with migrated data.
+    # SQLite manages autoincrement implicitly; Postgres sequences start at 1 unless told otherwise.
+    print("\nResetting PostgreSQL sequences...")
+    with dst_engine.connect() as conn:
+        # Get all sequences in the schema
+        seqs = conn.execute(text("""
+            SELECT sequence_name
+            FROM information_schema.sequences
+            WHERE sequence_schema = :schema
+        """), {"schema": schema}).fetchall()
+
+        for (seq_name,) in seqs:
+            # Sequence names follow the pattern <table>_<col>_seq
+            # Derive table name by stripping trailing _<col>_seq
+            # Try to find the associated table and column via pg_class
+            result = conn.execute(text("""
+                SELECT n.nspname, t.relname, a.attname
+                FROM pg_class s
+                JOIN pg_depend d ON d.objid = s.oid
+                JOIN pg_class t ON t.oid = d.refobjid
+                JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid
+                JOIN pg_namespace n ON n.oid = t.relnamespace
+                WHERE s.relkind = 'S'
+                AND s.relname = :seq_name
+            """), {"seq_name": seq_name}).fetchone()
+
+            if result:
+                _, tbl, col = result
+                max_val = conn.execute(
+                    text(f'SELECT MAX("{col}") FROM "{tbl}"')
+                ).scalar()
+                if max_val is not None:
+                    conn.execute(text(f"SELECT setval('{schema}.{seq_name}', {max_val})"))
+                    print(f"  {seq_name}: reset to {max_val:,}")
+                else:
+                    print(f"  {seq_name}: table empty, leaving at default")
+        conn.commit()
+
     # Validate FK integrity and report orphans
-    print("Validating FK integrity...")
+    print("\nValidating FK integrity...")
     with dst_engine.connect() as conn:
         orphan_count = 0
         for tbl, col in DATA_COLLECTION_CHILD_TABLES.items():
