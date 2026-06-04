@@ -994,7 +994,7 @@ def create_app(config=None) -> FastAPI:
     # ---- analytics helpers ----
 
     from pbs_monitor.web.analytics_cache import make_cache
-    _analytics_cache = make_cache(db_url)
+    _analytics_cache = make_cache(db_url, engine=engine)
 
     # total-nodes module-level cache (refreshed every 5 min)
     _tnc: dict[str, Any] = {"value": None, "ts": 0.0}
