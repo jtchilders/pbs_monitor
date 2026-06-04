@@ -909,8 +909,8 @@ def create_app(config=None) -> FastAPI:
                             THEN j.nodes * j.actual_runtime_seconds / 3600.0
                             ELSE 0 END) as node_hours_used
             FROM reservations r
-            LEFT JOIN jobs j ON j.queue = substr(r.reservation_id, 1, instr(r.reservation_id, '.') - 1)
-            WHERE instr(r.reservation_id, '.') > 0
+            LEFT JOIN jobs j ON j.queue = substr(r.reservation_id, 1, strpos(r.reservation_id, '.') - 1)
+            WHERE strpos(r.reservation_id, '.') > 0
               AND (
                 -- currently active: already started, not yet ended (or end unknown)
                 (r.start_time <= :now AND (r.end_time IS NULL OR r.end_time >= :now))
