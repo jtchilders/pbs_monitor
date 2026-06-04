@@ -956,7 +956,8 @@ def create_app(config=None) -> FastAPI:
 
             node_hours_reserved = None
             utilization_pct = None
-            node_hours_used = round(r.node_hours_used, 1) if r.node_hours_used else 0.0
+            # Postgres SUM() returns Decimal; cast to float for arithmetic compatibility
+            node_hours_used = round(float(r.node_hours_used), 1) if r.node_hours_used else 0.0
             if r.nodes and r.duration_seconds:
                 node_hours_reserved = round(r.nodes * r.duration_seconds / 3600, 1)
                 if node_hours_reserved > 0:
