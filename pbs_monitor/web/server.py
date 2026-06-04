@@ -926,8 +926,9 @@ def create_app(config=None) -> FastAPI:
         import json as _json
         result = []
         for r in rows:
-            start = datetime.fromisoformat(r.start_time) if r.start_time else None
-            end   = datetime.fromisoformat(r.end_time)   if r.end_time   else None
+            # SQLite returns timestamps as strings; Postgres returns datetime objects directly
+            start = (datetime.fromisoformat(r.start_time) if isinstance(r.start_time, str) else r.start_time) if r.start_time else None
+            end   = (datetime.fromisoformat(r.end_time)   if isinstance(r.end_time,   str) else r.end_time)   if r.end_time   else None
             # Normalise state → a clean display label + CSS key
             # Map verbose/internal enum names to tidy display tokens
             _STATE_DISPLAY = {
