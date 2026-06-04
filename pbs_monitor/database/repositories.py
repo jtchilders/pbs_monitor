@@ -4,7 +4,7 @@ Database repositories for PBS Monitor
 Provides data access layer for database operations.
 """
 
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 from sqlalchemy import desc, func, and_, or_
 from sqlalchemy.orm import Session
@@ -178,7 +178,7 @@ class JobRepository(BaseRepository):
                 session.expunge(rec)
             return records
     
-    def add_job_history(self, job_history: Union[JobHistory, str], state: Optional[JobState] = None) -> JobHistory:
+    def add_job_history(self, job_history: JobHistory | str, state: Optional[JobState] = None) -> JobHistory:
         """Add job history entry. Accepts either a JobHistory or (job_id, state)."""
         with self.get_session() as session:
             if isinstance(job_history, JobHistory):
@@ -425,7 +425,7 @@ class QueueRepository(BaseRepository):
                      QueueSnapshot.timestamp >= cutoff_time)
             ).order_by(QueueSnapshot.timestamp).all()
     
-    def add_queue_snapshot(self, queue_name: Union[str, QueueSnapshot], snapshot_data: Optional[Dict[str, Any]] = None) -> QueueSnapshot:
+    def add_queue_snapshot(self, queue_name: str | QueueSnapshot, snapshot_data: Optional[Dict[str, Any]] = None) -> QueueSnapshot:
         """Add queue snapshot. Accepts either a QueueSnapshot or (queue_name, data)."""
         with self.get_session() as session:
             if isinstance(queue_name, QueueSnapshot):
