@@ -25,7 +25,7 @@ import json as _json
 
 from pbs_monitor.database.models import (
     Job, JobState, Node, NodeSnapshot, SystemSnapshot,
-    DataCollectionLog,
+    DataCollectionLog, Reservation,
 )
 
 # State character → human-readable label
@@ -896,39 +896,45 @@ def create_app(config=None) -> FastAPI:
     # ---- reservations endpoint ----
     @app.get("/api/reservations")
     async def get_reservations(db: Session = Depends(get_db)):
-        from sqlalchemy import text
+        import json as _json
+        from sqlalchemy import func as safunc
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=14)
-        rows = db.execute(text("""
-            SELECT r.reservation_id, r.reservation_name, r.owner, r.state,
-                   r.nodes, r.ncpus, r.ngpus, r.walltime,
-                   r.start_time, r.end_time, r.duration_seconds,
-                   r.authorized_users, r.authorized_groups,
-                   COUNT(j.job_id) as jobs_submitted,
-                   SUM(CASE WHEN j.actual_runtime_seconds IS NOT NULL
-                            THEN j.nodes * j.actual_runtime_seconds / 3600.0
-                            ELSE 0 END) as node_hours_used
-            FROM reservations r
-            LEFT JOIN jobs j ON j.queue = substr(r.reservation_id, 1, strpos(r.reservation_id, '.') - 1)
-            WHERE strpos(r.reservation_id, '.') > 0
-              AND (
-                -- currently active: already started, not yet ended (or end unknown)
-                (r.start_time <= :now AND (r.end_time IS NULL OR r.end_time >= :now))
-                -- upcoming: hasn't started yet
-                OR r.start_time > :now
-                -- recently completed/cancelled: ended within past 14 days
-                OR r.end_time >= :cutoff
-              )
-            GROUP BY r.reservation_id
-            ORDER BY r.start_time DESC
-        """), {"cutoff": cutoff.replace(tzinfo=None), "now": now.replace(tzinfo=None)}).fetchall()
 
-        import json as _json
+        # Fetch reservations via ORM (dialect-safe; avoids raw SQL string functions
+        # like strpos/substr which differ between SQLite and Postgres)
+        reservations = db.query(Reservation).filter(
+            or_(
+                # currently active: started, not yet ended
+                and_(Reservation.start_time <= now,
+                     or_(Reservation.end_time == None, Reservation.end_time >= now)),
+                # upcoming
+                Reservation.start_time > now,
+                # recently ended (within 14 days)
+                Reservation.end_time >= cutoff,
+            )
+        ).order_by(Reservation.start_time.desc()).all()
+
+        # Aggregate job stats per reservation using the stored queue name directly.
+        # reservation.queue is already the short queue name (e.g. 'R7176379'),
+        # so no string-splitting of reservation_id is needed.
         result = []
-        for r in rows:
-            # SQLite returns timestamps as strings; Postgres returns datetime objects directly
-            start = (datetime.fromisoformat(r.start_time) if isinstance(r.start_time, str) else r.start_time) if r.start_time else None
-            end   = (datetime.fromisoformat(r.end_time)   if isinstance(r.end_time,   str) else r.end_time)   if r.end_time   else None
+        for r in reservations:
+            jobs_submitted = 0
+            node_hours_used = 0.0
+            if r.queue:
+                agg = db.query(
+                    safunc.count(Job.job_id),
+                    safunc.sum(
+                        safunc.coalesce(
+                            Job.nodes * Job.actual_runtime_seconds / 3600.0,
+                            0.0
+                        )
+                    )
+                ).filter(Job.queue == r.queue).one()
+                jobs_submitted  = agg[0] or 0
+                node_hours_used = round(float(agg[1] or 0), 1)
+
             # Normalise state → a clean display label + CSS key
             # Map verbose/internal enum names to tidy display tokens
             _STATE_DISPLAY = {
@@ -952,12 +958,12 @@ def create_app(config=None) -> FastAPI:
                 'UN':               'UNKNOWN',
                 'UNKNOWN':          'UNKNOWN',
             }
-            display_state = _STATE_DISPLAY.get(r.state, r.state)
+            state_key = r.state.name if hasattr(r.state, 'name') else str(r.state)
+            display_state = _STATE_DISPLAY.get(state_key, state_key)
 
             node_hours_reserved = None
             utilization_pct = None
-            # Postgres SUM() returns Decimal; cast to float for arithmetic compatibility
-            node_hours_used = round(float(r.node_hours_used), 1) if r.node_hours_used else 0.0
+            # node_hours_used already computed above from job aggregation
             if r.nodes and r.duration_seconds:
                 node_hours_reserved = round(r.nodes * r.duration_seconds / 3600, 1)
                 if node_hours_reserved > 0:
@@ -976,7 +982,7 @@ def create_app(config=None) -> FastAPI:
                 "reservation_id":      r.reservation_id,
                 "reservation_name":    r.reservation_name or '',
                 "owner":               r.owner or '',
-                "state":               r.state,
+                "state":               state_key,
                 "display_state":       display_state,
                 "nodes":               r.nodes,
                 "ncpus":               r.ncpus,
@@ -985,7 +991,7 @@ def create_app(config=None) -> FastAPI:
                 "node_hours_reserved": node_hours_reserved,
                 "node_hours_used":     node_hours_used,
                 "utilization_pct":     utilization_pct,
-                "jobs_submitted":      r.jobs_submitted or 0,
+                "jobs_submitted":      jobs_submitted,
                 "start_time":          r.start_time,
                 "end_time":            r.end_time,
                 "authorized_users":    auth_users,
