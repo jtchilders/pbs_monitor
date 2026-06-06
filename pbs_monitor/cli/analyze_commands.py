@@ -8,7 +8,7 @@ import argparse
 import logging
 from typing import List, Dict, Any, Optional
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .commands import BaseCommand
 from ..analytics import RunScoreAnalyzer, WalltimeEfficiencyAnalyzer, ReservationUtilizationAnalyzer, ReservationTrendAnalyzer, LeaderboardAnalyzer, LeaderboardConfig
@@ -794,7 +794,7 @@ class AnalyzeCommand(BaseCommand):
          if start_date is None and end_date is None:
             from datetime import timedelta
             end_date = None  # No upper bound - include future reservations
-            start_date = datetime.now() - timedelta(days=days)
+            start_date = datetime.now(timezone.utc) - timedelta(days=days)
             self.console.print(f"[bold blue]Analyzing reservations from last {days} days and future reservations[/bold blue]")
          elif start_date is None or end_date is None:
             if start_date is None and end_date is not None:
@@ -1065,7 +1065,7 @@ class AnalyzeCommand(BaseCommand):
             return short_id
       
       # Fallback to timing logic for backward compatibility
-      now = datetime.now()
+      now = datetime.now(timezone.utc)
       
       # Check if currently running (start_time <= now < end_time)
       if start_time and end_time and start_time <= now < end_time:
@@ -1080,7 +1080,7 @@ class AnalyzeCommand(BaseCommand):
    def _filter_utilizations_by_status(self, utilizations: List, status_filter: str) -> List:
       """Filter utilizations by reservation status"""
       filtered = []
-      now = datetime.now()
+      now = datetime.now(timezone.utc)
       
       for util in utilizations:
          start_time = util.get('start_time')

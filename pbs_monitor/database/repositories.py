@@ -5,7 +5,7 @@ Provides data access layer for database operations.
 """
 
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import desc, func, and_, or_
 from sqlalchemy.orm import Session
 
@@ -118,7 +118,7 @@ class JobRepository(BaseRepository):
     
     def get_historical_jobs(self, user: Optional[str] = None, days: int = 30) -> List[Job]:
         """Get historical jobs from database"""
-        cutoff_date = datetime.now() - timedelta(days=days)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         with self.get_session() as session:
             query = session.query(Job).filter(Job.last_updated >= cutoff_date)
             if user:
@@ -253,7 +253,7 @@ class JobRepository(BaseRepository):
     
     def get_user_job_statistics(self, user: str, days: int = 30) -> Dict[str, Any]:
         """Get job statistics for a user"""
-        cutoff_date = datetime.now() - timedelta(days=days)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         with self.get_session() as session:
             # Get basic counts
             total_jobs = session.query(Job).filter(
@@ -418,7 +418,7 @@ class QueueRepository(BaseRepository):
     
     def get_queue_snapshots(self, queue_name: str, hours: int = 24) -> List[QueueSnapshot]:
         """Get recent queue snapshots"""
-        cutoff_time = datetime.now() - timedelta(hours=hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
         with self.get_session() as session:
             return session.query(QueueSnapshot).filter(
                 and_(QueueSnapshot.queue_name == queue_name, 
@@ -448,7 +448,7 @@ class QueueRepository(BaseRepository):
     
     def get_queue_utilization_history(self, queue_name: str, days: int = 7) -> List[Dict[str, Any]]:
         """Get queue utilization history"""
-        cutoff_time = datetime.now() - timedelta(days=days)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(days=days)
         with self.get_session() as session:
             snapshots = session.query(QueueSnapshot).filter(
                 and_(QueueSnapshot.queue_name == queue_name,
@@ -571,7 +571,7 @@ class NodeRepository(BaseRepository):
     
     def get_node_snapshots(self, hours: int = 24) -> List[NodeSnapshot]:
         """Get recent node snapshots"""
-        cutoff_time = datetime.now() - timedelta(hours=hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
         with self.get_session() as session:
             return session.query(NodeSnapshot).filter(
                 NodeSnapshot.timestamp >= cutoff_time
@@ -606,7 +606,7 @@ class SystemRepository(BaseRepository):
     
     def get_system_snapshots(self, hours: int = 24) -> List[SystemSnapshot]:
         """Get system snapshots from the last N hours"""
-        cutoff_time = datetime.now() - timedelta(hours=hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
         with self.get_session() as session:
             snapshots = session.query(SystemSnapshot).filter(
                 SystemSnapshot.timestamp >= cutoff_time
@@ -623,7 +623,7 @@ class SystemRepository(BaseRepository):
     
     def get_system_utilization_history(self, days: int = 7) -> List[Dict[str, Any]]:
         """Get system utilization history for analysis"""
-        cutoff_date = datetime.now() - timedelta(days=days)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         with self.get_session() as session:
             snapshots = session.query(SystemSnapshot).filter(
                 SystemSnapshot.timestamp >= cutoff_date
@@ -691,7 +691,7 @@ class ReservationRepository(BaseRepository):
     
     def get_historical_reservations(self, user: Optional[str] = None, days: int = 30) -> List[Reservation]:
         """Get historical reservations from database"""
-        cutoff_date = datetime.now() - timedelta(days=days)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         with self.get_session() as session:
             query = session.query(Reservation).filter(Reservation.last_updated >= cutoff_date)
             if user:
@@ -721,7 +721,7 @@ class ReservationRepository(BaseRepository):
                     for key, value in reservation.__dict__.items():
                         if not key.startswith('_'):
                             setattr(existing, key, value)
-                    existing.last_updated = datetime.now()
+                    existing.last_updated = datetime.now(timezone.utc)
                 else:
                     # Add new reservation
                     session.add(reservation)
@@ -788,7 +788,7 @@ class ReservationRepository(BaseRepository):
     
     def get_user_reservation_statistics(self, user: str, days: int = 30) -> Dict[str, Any]:
         """Get reservation statistics for a user"""
-        cutoff_date = datetime.now() - timedelta(days=days)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         with self.get_session() as session:
             # Get user's reservations
             reservations = session.query(Reservation).filter(
@@ -848,7 +848,7 @@ class ReservationRepository(BaseRepository):
         Returns:
             List of potentially missing reservations
         """
-        threshold_time = datetime.now() - timedelta(minutes=threshold_minutes)
+        threshold_time = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
         
         with self.get_session() as session:
             reservations = session.query(Reservation).filter(
@@ -886,7 +886,7 @@ class ReservationRepository(BaseRepository):
             if reservation:
                 reservation.state = final_state
                 reservation.final_state_recorded = True
-                reservation.last_updated = datetime.now()
+                reservation.last_updated = datetime.now(timezone.utc)
                 session.commit()
                 return True
             
@@ -930,7 +930,7 @@ class DataCollectionRepository(BaseRepository):
             log_entry = DataCollectionLog(
                 collection_type=collection_type,
                 status=DataCollectionStatus.SUCCESS,  # Will be updated on completion
-                timestamp=datetime.now()
+                timestamp=datetime.now(timezone.utc)
             )
             session.add(log_entry)
             session.commit()
@@ -956,7 +956,7 @@ class DataCollectionRepository(BaseRepository):
     
     def get_recent_collections(self, hours: int = 24) -> List[Dict[str, Any]]:
         """Get recent data collection logs"""
-        cutoff_time = datetime.now() - timedelta(hours=hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
         with self.get_session() as session:
             logs = session.query(DataCollectionLog).filter(
                 DataCollectionLog.timestamp >= cutoff_time
@@ -990,7 +990,7 @@ class DataCollectionRepository(BaseRepository):
             
             # Recent success rate
             recent_logs = session.query(DataCollectionLog).filter(
-                DataCollectionLog.timestamp >= datetime.now() - timedelta(hours=24)
+                DataCollectionLog.timestamp >= datetime.now(timezone.utc) - timedelta(hours=24)
             ).all()
             
             if recent_logs:

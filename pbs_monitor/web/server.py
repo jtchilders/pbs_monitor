@@ -1075,7 +1075,7 @@ def create_app(config=None) -> FastAPI:
         days: int = 30,
         db: Session = Depends(get_db),
     ):
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
         def _fetch():
             base = db.query(Job).filter(
@@ -1115,7 +1115,7 @@ def create_app(config=None) -> FastAPI:
         ]
 
         def _fetch():
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             q = db.query(Job).filter(
                 Job.state == JobState.QUEUED,
                 Job.submit_time.isnot(None),
@@ -1157,7 +1157,7 @@ def create_app(config=None) -> FastAPI:
         if group_by not in ('queue', 'allocation_type'):
             group_by = 'queue'
         eff_freq = freq if freq in ('h', 'd', 'w') else _auto_freq(days)
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         window_start  = _floor_bin(now - timedelta(days=days), eff_freq)
         last_complete = _floor_bin(now, eff_freq)
 
@@ -1257,7 +1257,7 @@ def create_app(config=None) -> FastAPI:
         if group_by not in ('queue', 'allocation_type'):
             group_by = 'queue'
         eff_freq = freq if freq in ('h', 'd', 'w') else _auto_freq(days)
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         window_start  = _floor_bin(now - timedelta(days=days), eff_freq)
         last_complete = _floor_bin(now, eff_freq)
 
@@ -1315,7 +1315,7 @@ def create_app(config=None) -> FastAPI:
 
             groups: dict[str, list[float]] = {}
 
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             for job in jobs:
                 grp = getattr(job, group_by, None) or 'unknown'
                 if grp not in groups:
@@ -1385,7 +1385,7 @@ def create_app(config=None) -> FastAPI:
     ):
         if x_axis not in ('queue_time', 'elapsed_time'):
             x_axis = 'queue_time'
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
         def _fetch():
             from pbs_monitor.database.models import JobHistory
@@ -1585,7 +1585,7 @@ def create_app(config=None) -> FastAPI:
         log = logging.getLogger(__name__)
 
         async def _warm(days_val: int, freq_val: str, group: str) -> None:
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             eff_freq = freq_val
             window_start  = _floor_bin(now - timedelta(days=days_val), eff_freq)
             last_complete = _floor_bin(now, eff_freq)
