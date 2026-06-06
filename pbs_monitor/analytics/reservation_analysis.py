@@ -5,7 +5,7 @@ Provides analytics features for analyzing PBS reservation utilization and effici
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -84,7 +84,7 @@ class ReservationUtilizationAnalyzer:
 
                 # Cap to now when analyzing an ongoing reservation unless user provided explicit end_date
                 # Only apply this capping for reservations that are actually ongoing
-                now_ts = datetime.now()
+                now_ts = datetime.now(timezone.utc)
                 if end_date is None and window_end and window_end > now_ts:
                     # Only cap to now if the reservation is actually still running
                     if reservation.state and reservation.state in [ReservationState.RUNNING, ReservationState.CONFIRMED]:
@@ -121,7 +121,7 @@ class ReservationUtilizationAnalyzer:
                     try:
                         utilization = ReservationUtilization(
                             reservation_id=reservation_id,
-                            analysis_timestamp=datetime.now(),
+                            analysis_timestamp=datetime.now(timezone.utc),
                             **metrics
                         )
                         session.add(utilization)
@@ -418,7 +418,7 @@ class ReservationUtilizationAnalyzer:
                 real_job_end = job.get('end_time')
                 if real_job_end is None:
                     # If no job end time and no effective end, use current time (for ongoing reservations)
-                    real_job_end = effective_end or datetime.now()
+                    real_job_end = effective_end or datetime.now(timezone.utc)
                 
                 overlap_start = max(job['start_time'], effective_start) if effective_start else job['start_time']
                 overlap_end = min(real_job_end, effective_end) if effective_end else real_job_end
@@ -498,7 +498,7 @@ class ReservationTrendAnalyzer:
         Returns:
             DataFrame with trend data
         """
-        end_date = datetime.now()
+        end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=days)
         
         with self.repo_factory.get_job_repository().get_session() as session:
@@ -560,7 +560,7 @@ class ReservationTrendAnalyzer:
         Returns:
             DataFrame with owner rankings
         """
-        end_date = datetime.now()
+        end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=days)
         
         with self.repo_factory.get_job_repository().get_session() as session:
