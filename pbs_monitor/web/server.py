@@ -1121,7 +1121,7 @@ def create_app(config=None) -> FastAPI:
         ]
 
         def _fetch():
-            now = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive for arithmetic against DB timestamps
             q = db.query(Job).filter(
                 Job.state == JobState.QUEUED,
                 Job.submit_time.isnot(None),
