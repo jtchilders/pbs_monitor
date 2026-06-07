@@ -5,8 +5,10 @@ Command implementations for PBS Monitor CLI
 import argparse
 import logging
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from abc import ABC, abstractmethod
+
+from sqlalchemy import and_, or_
 
 from tabulate import tabulate
 from rich.console import Console
@@ -1191,20 +1193,24 @@ class DatabaseCommand(BaseCommand):
          if subcommand is None:
             print("Error: No database action specified")
             print("\nAvailable database actions:")
-            print("  init      Initialize database schema")
-            print("  migrate   Migrate database to latest schema")
-            print("  status    Show database status and information")
-            print("  validate  Validate database schema and data")
-            print("  backup    Create database backup")
-            print("  restore   Restore database from backup")
-            print("  cleanup   Clean up old data from database")
-            print("  show      Show table data from database")
+            print("  init            Initialize database schema")
+            print("  migrate         Migrate database to latest schema")
+            print("  status          Show database status and information")
+            print("  validate        Validate database schema and data")
+            print("  backup          Create database backup")
+            print("  restore         Restore database from backup")
+            print("  cleanup         Clean up old data from database")
+            print("  show            Show table data from database")
+            print("  refresh-cache   Recalculate derived/analytical cache tables")
             print("\nExamples:")
-            print("  pbs-monitor database init                    # Initialize database")
-            print("  pbs-monitor database status                  # Show database status")
-            print("  pbs-monitor database backup                  # Create backup")
-            print("  pbs-monitor database cleanup --days 30       # Clean up old data")
-            print("  pbs-monitor database show -t jobs -a 10     # Show last 10 rows from jobs table")
+            print("  pbs-monitor database init                              # Initialize database")
+            print("  pbs-monitor database status                            # Show database status")
+            print("  pbs-monitor database backup                            # Create backup")
+            print("  pbs-monitor database cleanup --days 30                 # Clean up old data")
+            print("  pbs-monitor database show -t jobs -a 10               # Show last 10 rows from jobs table")
+            print("  pbs-monitor database refresh-cache                     # Refresh all cache tables")
+            print("  pbs-monitor database refresh-cache -t utilization      # Refresh reservation utilization only")
+            print("  pbs-monitor database refresh-cache -d 7 --dry-run     # Preview last 7 days without writing")
             print("\nUse 'pbs-monitor database <action> --help' for more information about each action")
             return 1
          elif subcommand == 'init':
@@ -1223,9 +1229,11 @@ class DatabaseCommand(BaseCommand):
             return self._cleanup_database(args)
          elif subcommand == 'show':
             return self._show_table_data(args)
+         elif subcommand == 'refresh-cache':
+            return self._refresh_cache(args)
          else:
             print(f"Unknown database subcommand: {subcommand}")
-            print("\nAvailable actions: init, migrate, status, validate, backup, restore, cleanup, show")
+            print("\nAvailable actions: init, migrate, status, validate, backup, restore, cleanup, show, refresh-cache")
             return 1
             
       except Exception as e:
@@ -1560,6 +1568,125 @@ class DatabaseCommand(BaseCommand):
       # Display table
       from tabulate import tabulate
       print(tabulate(table_data, headers=columns, tablefmt="grid"))
+
+
+   # ---- refresh-cache tables ----
+   # Maps user-facing --table names to the SQL tables they recalculate.
+   _CACHE_TABLE_MAP = {
+      "utilization": "reservation_utilization",
+   }
+
+   def _refresh_cache(self, args: argparse.Namespace) -> int:
+      """Recalculate derived/analytical cache tables used by the web dashboard."""
+
+      table_arg = getattr(args, 'table', 'all')
+      days = getattr(args, 'days', 14)
+      limit = getattr(args, 'limit', None)
+      dry_run = getattr(args, 'dry_run', False)
+      force = getattr(args, 'force', False)
+
+      # Determine which tables to refresh
+      if table_arg == 'all':
+         targets = list(self._CACHE_TABLE_MAP.keys())
+      else:
+         if table_arg not in self._CACHE_TABLE_MAP:
+            valid = ', '.join(list(self._CACHE_TABLE_MAP.keys()) + ['all'])
+            print(f"Error: Invalid table '{table_arg}'. Valid targets: {valid}")
+            return 1
+         targets = [table_arg]
+
+      total_errors = 0
+
+      for target in targets:
+         if target == 'utilization':
+            errors = self._refresh_utilization_cache(days, limit, dry_run, force)
+            total_errors += errors
+
+      return 1 if total_errors > 0 else 0
+
+   def _refresh_utilization_cache(self, days: int, limit: int | None,
+                                   dry_run: bool, force: bool) -> int:
+      """Refresh the reservation_utilization cache table.
+
+      Returns the number of errors encountered.
+      """
+      from ..analytics.reservation_analysis import ReservationUtilizationAnalyzer
+      from ..database.models import Reservation as ReservationModel
+      from ..database.repositories import RepositoryFactory
+
+      print(f"Refreshing reservation_utilization (last {days} days)...")
+      if dry_run:
+         print("  [dry-run] No database writes will be performed.")
+
+      repo_factory = RepositoryFactory()
+      analyzer = ReservationUtilizationAnalyzer(repository_factory=repo_factory)
+
+      if dry_run:
+         analyzer._readonly_mode = True
+      elif force:
+         analyzer._readonly_mode = False
+
+      # Identify target reservations
+      cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+      with repo_factory.get_job_repository().get_session() as session:
+         query = session.query(ReservationModel).filter(
+            or_(
+               ReservationModel.start_time >= cutoff,
+               and_(
+                  ReservationModel.end_time >= cutoff,
+                  ReservationModel.start_time < cutoff,
+               ),
+            )
+         ).order_by(ReservationModel.start_time.desc())
+
+         if limit is not None:
+            query = query.limit(limit)
+
+         reservations = query.all()
+         reservation_ids = [r.reservation_id for r in reservations]
+
+      if not reservation_ids:
+         print(f"  No reservations found in the last {days} days.")
+         return 0
+
+      print(f"  Found {len(reservation_ids)} reservation(s) to process.")
+
+      updated = 0
+      errors = 0
+
+      for res_id in reservation_ids:
+         try:
+            result = analyzer.analyze_reservation_utilization(res_id)
+
+            util_pct = result.get('utilization_percentage', 0)
+            nh_reserved = result.get('total_node_hours_reserved', 0)
+            nh_used = result.get('total_node_hours_used', 0)
+            jobs_sub = result.get('jobs_submitted', 0)
+
+            if dry_run:
+               name = result.get('reservation_name') or ''
+               print(f"  [dry-run] {res_id}: {util_pct:.1f}% "
+                     f"({nh_used:.1f}/{nh_reserved:.1f} node-hrs, "
+                     f"{jobs_sub} jobs) {name}")
+            else:
+               updated += 1
+
+         except Exception as e:
+            print(f"  Error processing {res_id}: {e}")
+            errors += 1
+
+      # Summary
+      if dry_run:
+         print(f"\n  [dry-run] Would update {len(reservation_ids) - errors} rows "
+               f"in reservation_utilization.")
+      else:
+         print(f"\n  ✓ Refreshed {updated} reservation(s) in reservation_utilization.")
+
+      if errors:
+         print(f"  ✗ {errors} error(s) encountered.")
+
+      return errors
 
 
 class HistoryCommand(BaseCommand):

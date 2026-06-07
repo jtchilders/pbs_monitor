@@ -1045,6 +1045,40 @@ Examples:
       help="Output format (default: table)"
    )
    
+   # Database refresh-cache
+   db_refresh_cache_parser = database_subparsers.add_parser(
+      "refresh-cache",
+      help="Recalculate derived/analytical cache tables used by the web dashboard"
+   )
+   db_refresh_cache_parser.add_argument(
+      "-t", "--table",
+      choices=["utilization", "all"],
+      default="all",
+      help="Which cache table to refresh (default: all)"
+   )
+   db_refresh_cache_parser.add_argument(
+      "-d", "--days",
+      type=int,
+      default=14,
+      help="Recalculate reservations whose start_time is within the last N days (default: 14)"
+   )
+   db_refresh_cache_parser.add_argument(
+      "--limit",
+      type=int,
+      default=None,
+      help="Only process the most recent N reservations"
+   )
+   db_refresh_cache_parser.add_argument(
+      "--dry-run",
+      action="store_true",
+      help="Calculate and print results without writing to the database"
+   )
+   db_refresh_cache_parser.add_argument(
+      "--force",
+      action="store_true",
+      help="Bypass read-only checks and attempt writes regardless"
+   )
+
    # Daemon command
    daemon_parser = subparsers.add_parser(
       "daemon",
