@@ -1357,7 +1357,7 @@ def create_app(config=None) -> FastAPI:
 
             groups: dict[str, list[float]] = {}
 
-            now = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive to match bins
             for job in jobs:
                 grp = getattr(job, group_by, None) or 'unknown'
                 if grp not in groups:
