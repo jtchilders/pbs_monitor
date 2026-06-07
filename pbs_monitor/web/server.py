@@ -25,7 +25,7 @@ import json as _json
 
 from pbs_monitor.database.models import (
     Job, JobState, Node, NodeSnapshot, SystemSnapshot,
-    DataCollectionLog, Reservation,
+    DataCollectionLog, Reservation, ReservationUtilization,
 )
 
 # State character → human-readable label
@@ -915,59 +915,95 @@ def create_app(config=None) -> FastAPI:
             )
         ).order_by(Reservation.start_time.desc()).all()
 
-        # Aggregate job stats per reservation using the stored queue name directly.
-        # reservation.queue is already the short queue name (e.g. 'R7176379'),
-        # so no string-splitting of reservation_id is needed.
+        # Build a lookup of the most recent utilization analysis per reservation.
+        # This uses the reservation_utilization cache table populated by
+        # `pbs-monitor database refresh-cache -t utilization`.
+        resv_ids = [r.reservation_id for r in reservations]
+        util_lookup: dict = {}  # reservation_id -> ReservationUtilization row
+        if resv_ids:
+            # Subquery: latest analysis_timestamp per reservation_id
+            latest_sq = (
+                db.query(
+                    ReservationUtilization.reservation_id,
+                    safunc.max(ReservationUtilization.analysis_timestamp).label('max_ts'),
+                )
+                .filter(ReservationUtilization.reservation_id.in_(resv_ids))
+                .group_by(ReservationUtilization.reservation_id)
+                .subquery()
+            )
+            latest_rows = (
+                db.query(ReservationUtilization)
+                .join(
+                    latest_sq,
+                    and_(
+                        ReservationUtilization.reservation_id == latest_sq.c.reservation_id,
+                        ReservationUtilization.analysis_timestamp == latest_sq.c.max_ts,
+                    ),
+                )
+                .all()
+            )
+            util_lookup = {u.reservation_id: u for u in latest_rows}
+
+        # Normalise state → a clean display label + CSS key
+        _STATE_DISPLAY = {
+            'RUNNING':          'RUNNING',
+            'RUNNING_SHORT':    'RUNNING',
+            'RN':               'RUNNING',
+            'CONFIRMED':        'CONFIRMED',
+            'CONFIRMED_SHORT':  'CONFIRMED',
+            'CO':               'CONFIRMED',
+            'DEGRADED':         'DEGRADED',
+            'DG':               'DEGRADED',
+            'FINISHED':         'COMPLETED',
+            'RESV_RUNNING':     'RUNNING',
+            'RESV_CONFIRMED':   'CONFIRMED',
+            'RESV_FINISHED':    'COMPLETED',
+            'RESV_DELETED':     'CANCELLED',
+            'RESV_DEGRADED':    'DEGRADED',
+            'EXPIRED':          'EXPIRED',
+            'DELETED':          'CANCELLED',
+            'BD':               'CANCELLED',
+            'UN':               'UNKNOWN',
+            'UNKNOWN':          'UNKNOWN',
+        }
+
         result = []
         for r in reservations:
-            jobs_submitted = 0
-            node_hours_used = 0.0
-            if r.queue:
-                agg = db.query(
-                    safunc.count(Job.job_id),
-                    safunc.sum(
-                        safunc.coalesce(
-                            Job.nodes * Job.actual_runtime_seconds / 3600.0,
-                            0.0
-                        )
-                    )
-                ).filter(Job.queue == r.queue).one()
-                jobs_submitted  = agg[0] or 0
-                node_hours_used = round(float(agg[1] or 0), 1)
-
-            # Normalise state → a clean display label + CSS key
-            # Map verbose/internal enum names to tidy display tokens
-            _STATE_DISPLAY = {
-                'RUNNING':          'RUNNING',
-                'RUNNING_SHORT':    'RUNNING',
-                'RN':               'RUNNING',
-                'CONFIRMED':        'CONFIRMED',
-                'CONFIRMED_SHORT':  'CONFIRMED',
-                'CO':               'CONFIRMED',
-                'DEGRADED':         'DEGRADED',
-                'DG':               'DEGRADED',
-                'FINISHED':         'COMPLETED',
-                'RESV_RUNNING':     'RUNNING',
-                'RESV_CONFIRMED':   'CONFIRMED',
-                'RESV_FINISHED':    'COMPLETED',
-                'RESV_DELETED':     'CANCELLED',
-                'RESV_DEGRADED':    'DEGRADED',
-                'EXPIRED':          'EXPIRED',
-                'DELETED':          'CANCELLED',
-                'BD':               'CANCELLED',
-                'UN':               'UNKNOWN',
-                'UNKNOWN':          'UNKNOWN',
-            }
             state_key = r.state.name if hasattr(r.state, 'name') else str(r.state)
             display_state = _STATE_DISPLAY.get(state_key, state_key)
 
-            node_hours_reserved = None
-            utilization_pct = None
-            # node_hours_used already computed above from job aggregation
-            if r.nodes and r.duration_seconds:
-                node_hours_reserved = round(r.nodes * r.duration_seconds / 3600, 1)
-                if node_hours_reserved > 0:
-                    utilization_pct = round(node_hours_used / node_hours_reserved * 100, 1)
+            # Pull metrics from the utilization cache when available.
+            # Fall back to simple reservation-level math when no cache entry exists
+            # (e.g. before the first refresh-cache run).
+            util = util_lookup.get(r.reservation_id)
+            if util:
+                node_hours_reserved = round(util.total_node_hours_reserved or 0, 1)
+                node_hours_used     = round(util.total_node_hours_used or 0, 1)
+                utilization_pct     = round(util.utilization_percentage or 0, 1)
+                jobs_submitted      = util.jobs_submitted or 0
+            else:
+                # Fallback: compute from reservation metadata + job table
+                jobs_submitted = 0
+                node_hours_used = 0.0
+                if r.queue:
+                    agg = db.query(
+                        safunc.count(Job.job_id),
+                        safunc.sum(
+                            safunc.coalesce(
+                                Job.nodes * Job.actual_runtime_seconds / 3600.0,
+                                0.0
+                            )
+                        )
+                    ).filter(Job.queue == r.queue).one()
+                    jobs_submitted  = agg[0] or 0
+                    node_hours_used = round(float(agg[1] or 0), 1)
+
+                node_hours_reserved = None
+                utilization_pct = None
+                if r.nodes and r.duration_seconds:
+                    node_hours_reserved = round(r.nodes * r.duration_seconds / 3600, 1)
+                    if node_hours_reserved > 0:
+                        utilization_pct = round(node_hours_used / node_hours_reserved * 100, 1)
 
             try:
                 auth_users  = _json.loads(r.authorized_users  or '[]')

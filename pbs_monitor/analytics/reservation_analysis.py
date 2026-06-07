@@ -119,6 +119,13 @@ class ReservationUtilizationAnalyzer:
                 # Try to store in database (if not read-only)
                 if not self._readonly_mode:
                     try:
+                        # Remove any previous analyses for this reservation
+                        # so the cache table stays compact (one latest row per
+                        # reservation rather than unbounded append).
+                        session.query(ReservationUtilization).filter(
+                            ReservationUtilization.reservation_id == reservation_id
+                        ).delete(synchronize_session=False)
+
                         utilization = ReservationUtilization(
                             reservation_id=reservation_id,
                             analysis_timestamp=datetime.now(timezone.utc),
