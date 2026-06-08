@@ -4,7 +4,7 @@ Data Collector for PBS Monitor - Orchestrates data gathering from PBS system
 
 import logging
 from typing import Dict, List, Optional, Set, Tuple, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import threading
 import time
 
@@ -617,7 +617,7 @@ class DataCollector:
                state=reservation.state,
                owner=reservation.owner,
                queue=reservation.queue,
-               last_updated=datetime.now()
+               last_updated=datetime.now(timezone.utc)
             )
       
       return history_entries
@@ -724,7 +724,7 @@ class DataCollector:
          active_db_jobs = job_repo.get_active_jobs()
          
          orphaned_job_ids = []
-         current_time = datetime.now()
+         current_time = datetime.now(timezone.utc)
          
          for db_job in active_db_jobs:
             # Check if job is missing from PBS
@@ -842,7 +842,7 @@ class DataCollector:
       """
       from .database.models import ReservationState
       
-      now = datetime.now()
+      now = datetime.now(timezone.utc)
       
       # If reservation has an end time
       if reservation.end_time:

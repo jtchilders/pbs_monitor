@@ -10,7 +10,7 @@ from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from sqlalchemy import create_engine, func, or_, and_
+from sqlalchemy import create_engine, event, func, or_, and_
 from sqlalchemy.orm import sessionmaker, Session
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -25,7 +25,7 @@ import json as _json
 
 from pbs_monitor.database.models import (
     Job, JobState, Node, NodeSnapshot, SystemSnapshot,
-    DataCollectionLog,
+    DataCollectionLog, Reservation, ReservationUtilization,
 )
 
 # State character → human-readable label
@@ -249,7 +249,20 @@ def create_app(config=None) -> FastAPI:
             connect_args=connect_args,
         )
     else:
-        engine = create_engine(db_url, connect_args=connect_args)
+        engine = create_engine(
+            db_url,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+        )
+        # Apply schema search_path for PostgreSQL multi-system deployments
+        schema = getattr(config.database, 'schema', 'public') or 'public'
+        if schema != 'public':
+            @event.listens_for(engine, 'connect')
+            def set_search_path(dbapi_conn, connection_record):
+                cursor = dbapi_conn.cursor()
+                cursor.execute(f'SET search_path TO "{schema}", public')
+                cursor.close()
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     app = FastAPI(title="PBS Monitor Dashboard")
@@ -883,70 +896,114 @@ def create_app(config=None) -> FastAPI:
     # ---- reservations endpoint ----
     @app.get("/api/reservations")
     async def get_reservations(db: Session = Depends(get_db)):
-        from sqlalchemy import text
+        import json as _json
+        from sqlalchemy import func as safunc
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=14)
-        rows = db.execute(text("""
-            SELECT r.reservation_id, r.reservation_name, r.owner, r.state,
-                   r.nodes, r.ncpus, r.ngpus, r.walltime,
-                   r.start_time, r.end_time, r.duration_seconds,
-                   r.authorized_users, r.authorized_groups,
-                   COUNT(j.job_id) as jobs_submitted,
-                   SUM(CASE WHEN j.actual_runtime_seconds IS NOT NULL
-                            THEN j.nodes * j.actual_runtime_seconds / 3600.0
-                            ELSE 0 END) as node_hours_used
-            FROM reservations r
-            LEFT JOIN jobs j ON j.queue = substr(r.reservation_id, 1, instr(r.reservation_id, '.') - 1)
-            WHERE instr(r.reservation_id, '.') > 0
-              AND (
-                -- currently active: already started, not yet ended (or end unknown)
-                (r.start_time <= :now AND (r.end_time IS NULL OR r.end_time >= :now))
-                -- upcoming: hasn't started yet
-                OR r.start_time > :now
-                -- recently completed/cancelled: ended within past 14 days
-                OR r.end_time >= :cutoff
-              )
-            GROUP BY r.reservation_id
-            ORDER BY r.start_time DESC
-        """), {"cutoff": cutoff.replace(tzinfo=None), "now": now.replace(tzinfo=None)}).fetchall()
 
-        import json as _json
+        # Fetch reservations via ORM (dialect-safe; avoids raw SQL string functions
+        # like strpos/substr which differ between SQLite and Postgres)
+        reservations = db.query(Reservation).filter(
+            or_(
+                # currently active: started, not yet ended
+                and_(Reservation.start_time <= now,
+                     or_(Reservation.end_time == None, Reservation.end_time >= now)),
+                # upcoming
+                Reservation.start_time > now,
+                # recently ended (within 14 days)
+                Reservation.end_time >= cutoff,
+            )
+        ).order_by(Reservation.start_time.desc()).all()
+
+        # Build a lookup of the most recent utilization analysis per reservation.
+        # This uses the reservation_utilization cache table populated by
+        # `pbs-monitor database refresh-cache -t utilization`.
+        resv_ids = [r.reservation_id for r in reservations]
+        util_lookup: dict = {}  # reservation_id -> ReservationUtilization row
+        if resv_ids:
+            # Subquery: latest analysis_timestamp per reservation_id
+            latest_sq = (
+                db.query(
+                    ReservationUtilization.reservation_id,
+                    safunc.max(ReservationUtilization.analysis_timestamp).label('max_ts'),
+                )
+                .filter(ReservationUtilization.reservation_id.in_(resv_ids))
+                .group_by(ReservationUtilization.reservation_id)
+                .subquery()
+            )
+            latest_rows = (
+                db.query(ReservationUtilization)
+                .join(
+                    latest_sq,
+                    and_(
+                        ReservationUtilization.reservation_id == latest_sq.c.reservation_id,
+                        ReservationUtilization.analysis_timestamp == latest_sq.c.max_ts,
+                    ),
+                )
+                .all()
+            )
+            util_lookup = {u.reservation_id: u for u in latest_rows}
+
+        # Normalise state → a clean display label + CSS key
+        _STATE_DISPLAY = {
+            'RUNNING':          'RUNNING',
+            'RUNNING_SHORT':    'RUNNING',
+            'RN':               'RUNNING',
+            'CONFIRMED':        'CONFIRMED',
+            'CONFIRMED_SHORT':  'CONFIRMED',
+            'CO':               'CONFIRMED',
+            'DEGRADED':         'DEGRADED',
+            'DG':               'DEGRADED',
+            'FINISHED':         'COMPLETED',
+            'RESV_RUNNING':     'RUNNING',
+            'RESV_CONFIRMED':   'CONFIRMED',
+            'RESV_FINISHED':    'COMPLETED',
+            'RESV_DELETED':     'CANCELLED',
+            'RESV_DEGRADED':    'DEGRADED',
+            'EXPIRED':          'EXPIRED',
+            'DELETED':          'CANCELLED',
+            'BD':               'CANCELLED',
+            'UN':               'UNKNOWN',
+            'UNKNOWN':          'UNKNOWN',
+        }
+
         result = []
-        for r in rows:
-            start = datetime.fromisoformat(r.start_time) if r.start_time else None
-            end   = datetime.fromisoformat(r.end_time)   if r.end_time   else None
-            # Normalise state → a clean display label + CSS key
-            # Map verbose/internal enum names to tidy display tokens
-            _STATE_DISPLAY = {
-                'RUNNING':          'RUNNING',
-                'RUNNING_SHORT':    'RUNNING',
-                'RN':               'RUNNING',
-                'CONFIRMED':        'CONFIRMED',
-                'CONFIRMED_SHORT':  'CONFIRMED',
-                'CO':               'CONFIRMED',
-                'DEGRADED':         'DEGRADED',
-                'DG':               'DEGRADED',
-                'FINISHED':         'COMPLETED',
-                'RESV_RUNNING':     'RUNNING',
-                'RESV_CONFIRMED':   'CONFIRMED',
-                'RESV_FINISHED':    'COMPLETED',
-                'RESV_DELETED':     'CANCELLED',
-                'RESV_DEGRADED':    'DEGRADED',
-                'EXPIRED':          'EXPIRED',
-                'DELETED':          'CANCELLED',
-                'BD':               'CANCELLED',
-                'UN':               'UNKNOWN',
-                'UNKNOWN':          'UNKNOWN',
-            }
-            display_state = _STATE_DISPLAY.get(r.state, r.state)
+        for r in reservations:
+            state_key = r.state.name if hasattr(r.state, 'name') else str(r.state)
+            display_state = _STATE_DISPLAY.get(state_key, state_key)
 
-            node_hours_reserved = None
-            utilization_pct = None
-            node_hours_used = round(r.node_hours_used, 1) if r.node_hours_used else 0.0
-            if r.nodes and r.duration_seconds:
-                node_hours_reserved = round(r.nodes * r.duration_seconds / 3600, 1)
-                if node_hours_reserved > 0:
-                    utilization_pct = round(node_hours_used / node_hours_reserved * 100, 1)
+            # Pull metrics from the utilization cache when available.
+            # Fall back to simple reservation-level math when no cache entry exists
+            # (e.g. before the first refresh-cache run).
+            util = util_lookup.get(r.reservation_id)
+            if util:
+                node_hours_reserved = round(util.total_node_hours_reserved or 0, 1)
+                node_hours_used     = round(util.total_node_hours_used or 0, 1)
+                utilization_pct     = round(util.utilization_percentage or 0, 1)
+                jobs_submitted      = util.jobs_submitted or 0
+            else:
+                # Fallback: compute from reservation metadata + job table
+                jobs_submitted = 0
+                node_hours_used = 0.0
+                if r.queue:
+                    agg = db.query(
+                        safunc.count(Job.job_id),
+                        safunc.sum(
+                            safunc.coalesce(
+                                Job.nodes * Job.actual_runtime_seconds / 3600.0,
+                                0.0
+                            )
+                        )
+                    ).filter(Job.queue == r.queue).one()
+                    jobs_submitted  = agg[0] or 0
+                    node_hours_used = round(float(agg[1] or 0), 1)
+
+                node_hours_reserved = None
+                utilization_pct = None
+                if r.nodes and r.duration_seconds:
+                    node_hours_reserved = round(r.nodes * r.duration_seconds / 3600, 1)
+                    if node_hours_reserved > 0:
+                        utilization_pct = round(node_hours_used / node_hours_reserved * 100, 1)
 
             try:
                 auth_users  = _json.loads(r.authorized_users  or '[]')
@@ -961,7 +1018,7 @@ def create_app(config=None) -> FastAPI:
                 "reservation_id":      r.reservation_id,
                 "reservation_name":    r.reservation_name or '',
                 "owner":               r.owner or '',
-                "state":               r.state,
+                "state":               state_key,
                 "display_state":       display_state,
                 "nodes":               r.nodes,
                 "ncpus":               r.ncpus,
@@ -970,7 +1027,7 @@ def create_app(config=None) -> FastAPI:
                 "node_hours_reserved": node_hours_reserved,
                 "node_hours_used":     node_hours_used,
                 "utilization_pct":     utilization_pct,
-                "jobs_submitted":      r.jobs_submitted or 0,
+                "jobs_submitted":      jobs_submitted,
                 "start_time":          r.start_time,
                 "end_time":            r.end_time,
                 "authorized_users":    auth_users,
@@ -981,7 +1038,7 @@ def create_app(config=None) -> FastAPI:
     # ---- analytics helpers ----
 
     from pbs_monitor.web.analytics_cache import make_cache
-    _analytics_cache = make_cache(db_url)
+    _analytics_cache = make_cache(db_url, engine=engine)
 
     # total-nodes module-level cache (refreshed every 5 min)
     _tnc: dict[str, Any] = {"value": None, "ts": 0.0}
@@ -1060,7 +1117,7 @@ def create_app(config=None) -> FastAPI:
         days: int = 30,
         db: Session = Depends(get_db),
     ):
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
         def _fetch():
             base = db.query(Job).filter(
@@ -1100,7 +1157,7 @@ def create_app(config=None) -> FastAPI:
         ]
 
         def _fetch():
-            now = datetime.now()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive for arithmetic against DB timestamps
             q = db.query(Job).filter(
                 Job.state == JobState.QUEUED,
                 Job.submit_time.isnot(None),
@@ -1142,7 +1199,7 @@ def create_app(config=None) -> FastAPI:
         if group_by not in ('queue', 'allocation_type'):
             group_by = 'queue'
         eff_freq = freq if freq in ('h', 'd', 'w') else _auto_freq(days)
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         window_start  = _floor_bin(now - timedelta(days=days), eff_freq)
         last_complete = _floor_bin(now, eff_freq)
 
@@ -1242,7 +1299,7 @@ def create_app(config=None) -> FastAPI:
         if group_by not in ('queue', 'allocation_type'):
             group_by = 'queue'
         eff_freq = freq if freq in ('h', 'd', 'w') else _auto_freq(days)
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         window_start  = _floor_bin(now - timedelta(days=days), eff_freq)
         last_complete = _floor_bin(now, eff_freq)
 
@@ -1300,7 +1357,7 @@ def create_app(config=None) -> FastAPI:
 
             groups: dict[str, list[float]] = {}
 
-            now = datetime.now()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive to match bins
             for job in jobs:
                 grp = getattr(job, group_by, None) or 'unknown'
                 if grp not in groups:
@@ -1370,7 +1427,7 @@ def create_app(config=None) -> FastAPI:
     ):
         if x_axis not in ('queue_time', 'elapsed_time'):
             x_axis = 'queue_time'
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
         def _fetch():
             from pbs_monitor.database.models import JobHistory
@@ -1570,7 +1627,7 @@ def create_app(config=None) -> FastAPI:
         log = logging.getLogger(__name__)
 
         async def _warm(days_val: int, freq_val: str, group: str) -> None:
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             eff_freq = freq_val
             window_start  = _floor_bin(now - timedelta(days=days_val), eff_freq)
             last_complete = _floor_bin(now, eff_freq)

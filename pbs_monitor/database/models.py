@@ -27,6 +27,9 @@ from ..models.reservation import ReservationState as PBSReservationState
 
 Base = declarative_base()
 
+# Dialect-aware JSON type: uses JSONB on PostgreSQL, plain JSON on SQLite
+FlexJSON = JSON().with_variant(JSONB(), "postgresql")
+
 # Database enums (converted from existing enums)
 class JobState(enum.Enum):
     QUEUED = "Q"
@@ -139,7 +142,7 @@ class Job(Base):
     # Job outcomes
     priority = Column(Integer, default=0)
     exit_status = Column(Integer)
-    execution_node = Column(String(500))
+    execution_node = Column(Text)  # Multi-node strings can exceed 10k chars
     
     # Calculated fields
     total_cores = Column(Integer)
@@ -152,7 +155,7 @@ class Job(Base):
     final_state_recorded = Column(Boolean, default=False)
     
     # Raw data
-    raw_pbs_data = Column(JSON)
+    raw_pbs_data = Column(FlexJSON)
     
     # Relationships
     history = relationship("JobHistory", back_populates="job", order_by="JobHistory.timestamp")
@@ -208,7 +211,7 @@ class JobHistory(Base):
     state = Column(SQLEnum(JobState))
     queue = Column(String(50))
     priority = Column(Integer)
-    execution_node = Column(String(500))
+    execution_node = Column(Text)  # Multi-node strings can exceed 10k chars
     
     # PBS score (if available)
     score = Column(Float)
@@ -256,7 +259,7 @@ class Queue(Base):
     is_active = Column(Boolean, default=True)
     
     # Raw data
-    raw_pbs_data = Column(JSON)
+    raw_pbs_data = Column(FlexJSON)
     
     # Relationships
     snapshots = relationship("QueueSnapshot", back_populates="queue")
@@ -329,7 +332,7 @@ class Node(Base):
     memory_gb = Column(Float)
     
     # Properties and features
-    properties = Column(JSON)
+    properties = Column(FlexJSON)
     
     # Tracking
     first_seen = Column(DateTime(timezone=True), default=func.now())
@@ -338,7 +341,7 @@ class Node(Base):
     snapshot_index = Column(Integer, unique=True)
     
     # Raw data
-    raw_pbs_data = Column(JSON)
+    raw_pbs_data = Column(FlexJSON)
     
     # Relationships (node snapshots now stored in compact form)
 
@@ -435,8 +438,8 @@ class Reservation(Base):
     modification_time = Column(DateTime(timezone=True))
     
     # Access control
-    authorized_users = Column(JSON)  # Array of usernames
-    authorized_groups = Column(JSON)  # Array of group names
+    authorized_users = Column(FlexJSON)  # Array of usernames
+    authorized_groups = Column(FlexJSON)  # Array of group names
     
     # Additional metadata
     server = Column(String(100))
@@ -449,7 +452,7 @@ class Reservation(Base):
     final_state_recorded = Column(Boolean, default=False)
     
     # Raw data
-    raw_pbs_data = Column(JSON)  # Store original PBS text output
+    raw_pbs_data = Column(FlexJSON)  # Store original PBS text output
     
     # Relationships
     history = relationship("ReservationHistory", back_populates="reservation", order_by="ReservationHistory.timestamp")
@@ -565,7 +568,7 @@ class DataCollectionLog(Base):
     
     # Error tracking
     error_message = Column(Text)
-    error_details = Column(JSON)
+    error_details = Column(FlexJSON)
     
     # Indexes
     __table_args__ = (

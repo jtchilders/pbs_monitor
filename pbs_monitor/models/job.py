@@ -2,7 +2,7 @@
 PBS Job data structure
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
@@ -229,7 +229,9 @@ class PBSJob:
       if not self.start_time:
          return None
       
-      end = self.end_time or datetime.now()
+      # Use timezone-aware now() if start_time is aware (e.g. from Postgres), naive otherwise
+      now = datetime.now(self.start_time.tzinfo) if self.start_time.tzinfo else datetime.now()
+      end = self.end_time or now
       duration = end - self.start_time
       
       total_seconds = int(duration.total_seconds())

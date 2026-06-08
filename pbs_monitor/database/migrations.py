@@ -3,6 +3,9 @@ Database Migration Utilities for PBS Monitor
 
 This module provides utilities for database initialization, schema updates,
 and data migrations for the PBS Monitor database.
+
+NOTE: Migration operations (ALTER TABLE, etc.) are dialect-neutral and should
+work on both SQLite and PostgreSQL. Tested against both backends.
 """
 
 import os

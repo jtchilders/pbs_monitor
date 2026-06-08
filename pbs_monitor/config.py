@@ -76,7 +76,11 @@ class DatabaseConfig:
    """Database configuration"""
    
    # Database URL
-   url: str = "sqlite:///~/.pbs_monitor.db"
+   url: str = f"sqlite:///{Path.home()}/.pbs_monitor.db"
+   
+   # Database schema (for multi-system Postgres deployments)
+   # Each monitored system should use its own schema (e.g. "polaris", "aurora")
+   schema: str = "public"
    
    # Connection settings
    pool_size: int = 5
@@ -272,7 +276,8 @@ class Config:
             'date_format': '%d-%m %H:%M'
          },
          'database': {
-            'url': 'sqlite:///~/.pbs_monitor.db',
+            'url': 'sqlite:///~/.pbs_monitor.db',  # or: postgresql://pbs_monitor:PASSWORD@localhost:5432/pbs_monitor
+            'schema': 'public',  # Change per system: 'polaris', 'aurora', etc.
             'pool_size': 5,
             'max_overflow': 10,
             'echo_sql': False,
