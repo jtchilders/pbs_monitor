@@ -303,17 +303,21 @@
                         <div class="bar-container">
                             <div class="bar-segment running"
                                  :style="{ width: q.runningPctScaled + '%', cursor: q.name !== 'other' ? 'pointer' : 'default' }"
-                                 :title="'Running: ' + q.running + (q.name !== 'other' ? ' — click to filter jobs' : '')"
+                                 :title="'Running: ' + fmtSysHours(q.running) + ' sys-hrs' + (q.name !== 'other' ? ' — click to filter jobs' : '')"
                                  @click="q.name !== 'other' && drillDownBar(depthGroupBy, 'running', q.name)"></div>
                             <div class="bar-segment queued"
                                  :style="{ width: q.queuedPctScaled + '%', cursor: q.name !== 'other' ? 'pointer' : 'default' }"
-                                 :title="'Queued: ' + q.queued + (q.name !== 'other' ? ' — click to filter jobs' : '')"
+                                 :title="'Queued: ' + fmtSysHours(q.queued) + ' sys-hrs' + (q.name !== 'other' ? ' — click to filter jobs' : '')"
                                  @click="q.name !== 'other' && drillDownBar(depthGroupBy, 'queued', q.name)"></div>
                             <div class="bar-segment held"
                                  v-if="depthShowHeld"
                                  :style="{ width: q.heldPctScaled + '%', cursor: q.name !== 'other' ? 'pointer' : 'default' }"
-                                 :title="'Held: ' + q.held + (q.name !== 'other' ? ' — click to filter jobs' : '')"
+                                 :title="'Held: ' + fmtSysHours(q.held) + ' sys-hrs' + (q.name !== 'other' ? ' — click to filter jobs' : '')"
                                  @click="q.name !== 'other' && drillDownBar(depthGroupBy, 'held', q.name)"></div>
+                            <!-- vertical grid lines -->
+                            <div v-for="t in depthAxisTicks" :key="'grid-' + t.pct"
+                                 class="depth-grid-line"
+                                 :style="{ left: t.pct + '%' }"></div>
                         </div>
                         <span class="queue-counts">
                             <span class="c-run">{{ fmtSysHours(q.running) }}</span> /
@@ -322,6 +326,18 @@
                         </span>
                     </div>
                     <div v-if="sortedDepthBuckets.length === 0" class="empty-row" style="padding:1rem">No active queues</div>
+                    <!-- System-hours axis -->
+                    <div v-if="depthAxisTicks.length > 0" class="depth-axis-row">
+                        <span class="queue-name depth-axis-spacer"></span>
+                        <div class="depth-axis">
+                            <span v-for="t in depthAxisTicks" :key="t.pct"
+                                  class="depth-axis-tick"
+                                  :style="{ left: t.pct + '%' }">
+                                {{ t.label }}
+                            </span>
+                        </div>
+                        <span class="queue-counts depth-axis-spacer"></span>
+                    </div>
                 </div>
             </div>
         </footer>

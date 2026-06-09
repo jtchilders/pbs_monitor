@@ -507,6 +507,17 @@ canvas {
     border-radius: 6px;
     overflow: hidden;
     display: flex;
+    position: relative;
+}
+
+.depth-grid-line {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: rgba(255, 255, 255, 0.12);
+    pointer-events: none;
+    transform: translateX(-50%);
 }
 
 .bar-segment {
@@ -533,6 +544,41 @@ canvas {
 .c-run { color: var(--accent-job-exclusive); font-weight: bold; }
 .c-que { color: var(--accent-busy); font-weight: bold; }
 .c-hel { color: #f97316; font-weight: bold; }
+
+/* Queue depth axis */
+.depth-axis-row {
+    display: grid;
+    grid-template-columns: 150px 1fr 120px;
+    gap: 1rem;
+    margin-top: 0.25rem;
+}
+.depth-axis-spacer {
+    /* aligns with queue-name and queue-counts columns */
+}
+.depth-axis {
+    position: relative;
+    height: 1.25rem;
+    border-top: 1px solid #334155;
+}
+.depth-axis-tick {
+    position: absolute;
+    transform: translateX(-50%);
+    top: 0.15rem;
+    font-size: 0.7rem;
+    font-family: monospace;
+    color: #64748b;
+    white-space: nowrap;
+    /* vertical grid line */
+}
+.depth-axis-tick::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    bottom: 100%;
+    width: 1px;
+    height: 4px;
+    background: #334155;
+}
 
 /* ─── Modal loading / error states ────────────────────────────────── */
 

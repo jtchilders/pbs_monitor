@@ -358,7 +358,8 @@ createApp({
                 ? Math.max(...buckets.map(b => b.running + b.queued + (showHeld ? b.held : 0)))
                 : 1;
             const denom = maxTotal || 1;
-            return buckets.map(b => ({
+            const maxSysHours = toSysHours(denom);
+            const scaled = buckets.map(b => ({
                 ...b,
                 running: toSysHours(b.running),
                 queued:  toSysHours(b.queued),
@@ -367,7 +368,28 @@ createApp({
                 queuedPctScaled:  (b.queued  / denom * 100).toFixed(1),
                 heldPctScaled:    (b.held    / denom * 100).toFixed(1),
             }));
+            scaled._maxSysHours = maxSysHours;
+            return scaled;
         }
+
+        // Generate nice axis tick values for the queue depth bars.
+        // Returns [{label, pct}] where pct is the left % position (0–100).
+        const depthAxisTicks = computed(() => {
+            const buckets = sortedDepthBuckets.value;
+            const maxSH = buckets._maxSysHours ?? 0;
+            if (!maxSH) return [];
+            // Pick a round step that gives 4–5 ticks
+            const rawStep = maxSH / 4;
+            const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)));
+            const candidates = [1, 2, 2.5, 5, 10].map(f => f * magnitude);
+            const step = candidates.find(s => maxSH / s <= 5) || rawStep;
+            const ticks = [];
+            for (let v = step; v <= maxSH * 1.001; v += step) {
+                const rounded = Math.round(v * 1000) / 1000;
+                ticks.push({ label: fmtSysHours(rounded), pct: (rounded / maxSH * 100).toFixed(2) });
+            }
+            return ticks;
+        });
 
         // Build bucket map from a jobs array keyed by a getter fn.
         function accumulateBuckets(map, jobs, keyFn, state) {
@@ -917,7 +939,7 @@ createApp({
             systemInfo, snapshot, loading, error,
             activeTab, sortKey, sortDesc, queuedSortKey, queuedSortDesc, selectedJobId, hoveredJobId, filterText,
             hideBlocked, blockedQueuedCount,
-            depthGroupBy, depthShowHeld,
+            depthGroupBy, depthShowHeld, depthAxisTicks,
             nodeCanvas, mapContainer, jobsSection, tooltip, tooltipStyle,
             jobDetail, jobDetailLoading,
             systemName, serverHost, utilization, busyNodes, totalComputeNodes, stateCounts, legendCounts, jobCounts, freshnessClass, timeSinceLastUpdate,
