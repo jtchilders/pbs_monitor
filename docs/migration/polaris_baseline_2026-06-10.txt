@@ -1,0 +1,139 @@
+# Polaris pbs_monitor_dev baseline
+# Captured: 2026-06-10T21:09:42Z UTC
+# Host: polaris-login-04
+# Postgres: 18.4 (server) / 18.4 (client)
+# Compiled by gcc (SUSE Linux) 14.3.0, 64-bit
+# Source: ran by Taylor (parton) on polaris-login-04, output forwarded
+# to Wesley via Discord 2026-06-10 ~16:10 CDT.
+
+## Table sizes (\dt+ output)
+
+| Schema | Name                    | Type  | Owner  | Size    |
+|--------|-------------------------|-------|--------|---------|
+| public | analytics_cache         | table | parton | 376 kB  |
+| public | data_collection_log     | table | parton | 4560 kB |
+| public | job_history             | table | parton | 92 MB   |
+| public | jobs                    | table | parton | 953 MB  |
+| public | node_snapshots          | table | parton | 4408 kB |
+| public | nodes                   | table | parton | 1176 kB |
+| public | queue_snapshots         | table | parton | 17 MB   |
+| public | queues                  | table | parton | 904 kB  |
+| public | reservation_history     | table | parton | 12 MB   |
+| public | reservation_utilization | table | parton | 432 kB  |
+| public | reservations            | table | parton | 1768 kB |
+| public | system_snapshots        | table | parton | 848 kB  |
+
+12 tables total. **One unexpected table: `analytics_cache`** — not in our schema review.
+See "Surprises" section below.
+
+## Row counts (validation target for post-migration)
+
+| Table                    | Rows    |
+|--------------------------|---------|
+| jobs                     | 241,412 |
+| job_history              | 474,166 |
+| queues                   | 490     |
+| queue_snapshots          | 166,530 |
+| nodes                    | 561     |
+| node_snapshots           | 7,094   |
+| system_snapshots         | 7,094   |
+| reservations             | 732     |
+| reservation_history      | 121,816 |
+| reservation_utilization  | 1,794   |
+| data_collection_log      | 42,450  |
+| **Total tracked rows**   | **1,064,139** |
+
+Note: `analytics_cache` not counted in the query (it's a runtime/derived
+cache, not historical data — almost certainly safe to skip on migration).
+
+## Timestamp coverage
+
+| Metric                            | Earliest                      | Latest                        |
+|-----------------------------------|-------------------------------|-------------------------------|
+| jobs.submit_time                  | 2024-06-27 15:58:01-05        | 2026-06-10 16:04:43-05        |
+| job_history.timestamp             | 2025-08-04 21:16:43.260817-05 | 2026-06-10 16:05:25.229673-05 |
+| data_collection_log.timestamp     | 2025-12-16 07:50:29.396571-06 | 2026-06-10 16:05:16.638244-05 |
+
+Roughly **2 years of jobs data**, **10 months of job_history**, and
+**~6 months of data_collection_log**.
+
+## DB size on disk
+
+**1,289 MB** (= 1.29 GB). Matches the earlier ~1.4 GB estimate.
+Combined with Aurora's ~4 GB → ~5.5 GB. 50 Gi PVC = ~9× headroom. Solid.
+
+## Surprises / Findings
+
+### 1. `analytics_cache` table (NEW — not in models.py)
+The baseline shows a `public.analytics_cache` table not declared in
+`pbs_monitor/database/models.py` (which only defines 11 tables; the
+baseline shows 12). This is likely created at runtime by
+`pbs_monitor/web/analytics_cache.py` (file exists in the repo, suggests
+on-the-fly DDL).
+
+**Implications for migration:**
+- `add_system_column.py` should **skip** `analytics_cache` — it's a
+  derived cache, will be repopulated on first web query
+- Confirm by inspecting `analytics_cache.py` before writing the migrator
+- If `analytics_cache` rows reference `(job_id, system)` after we add
+  multi-system support, that logic needs updating too — but cache can
+  be evicted/rebuilt safely, so worst case is performance, not
+  correctness
+
+### 2. Disproportionate `jobs` table size: 953 MB / 241k rows ≈ 4 kB/row
+That's heavy for what looks like ~30 columns. Likely cause: large
+TEXT/JSON columns (`comment`, `exec_host`, resources dict). Implications:
+- `pg_dump -Fc` will compress this well (gzip-equivalent), real dump
+  file probably 200-400 MB
+- `upload_to_hermes.py` per-row insert will be slower than I'd expect
+  for 241k rows — batch carefully, use `executemany`/`COPY`
+- **For the upload script, consider using `COPY` instead of `INSERT`
+  for the `jobs` table** — orders of magnitude faster
+
+### 3. `node_snapshots` and `system_snapshots` are identical row counts (7,094)
+Both at exactly 7,094. Either they're written together in the same
+collection cycle (most likely — `data_collection_log` says 42k cycles,
+but snapshot tables only have 7k... interesting), or there's a bug.
+Probably correct — node and system snapshots may have a longer interval
+than other collections. Worth noting; not blocking.
+
+### 4. `data_collection_log` 42,450 vs snapshot tables ~7k
+42k collection cycles but only 7k snapshots. Makes sense if snapshots
+are taken on a slower schedule than the main collection. Confirms
+nothing is broken, just establishes the relationship.
+
+### 5. No `analytics_cache` in the test query result
+The row-count SQL we ran doesn't include `analytics_cache`. Total
+declared rows from the 11 modeled tables = 1,064,139. After migration,
+exact match on these 11 tables is the success criterion (assuming
+prod collector keeps writing during migration — see below).
+
+## Post-Migration Validation Checklist
+
+After Phase D.3 (upload to Hermes) and **before** starting the dev
+daemon in Phase E:
+
+1. ☐ Run the same row-count SQL against Hermes with `WHERE system='polaris'`.
+2. ☐ Counts should match **exactly** for the snapshot-in-time of the
+   `pg_dump`. The prod collector will have added rows between dump and
+   validation; the *dump itself* is the validation reference.
+   - To pin this down: capture row counts immediately before `pg_dump`,
+     use those as the validation target.
+3. ☐ Check earliest/latest timestamps per table match the dump's
+   coverage.
+4. ☐ Spot-check 5 random `job_id`s with `SELECT * FROM jobs WHERE
+   job_id = '...' AND system='polaris'` — every field should match.
+5. ☐ Spot-check that FK relationships hold: pick a job_id, confirm its
+   `job_history` rows exist on Hermes with same count.
+
+## Operational Notes
+
+- Postgres 18.4 server confirmed → pinning `postgres:18.4` Docker image
+  on Hermes is correct (no version mismatch risk on dump/restore).
+- Local socket auth works (`peer` for user `parton`); no password
+  needed for `pg_dump` on Polaris.
+- TZ on Polaris Postgres is **`America/Chicago` (CDT, UTC-5)**, visible
+  in the timestamp output. Hermes Postgres will use UTC by default in
+  the container — `timestamptz` columns handle this transparently, but
+  worth a sanity check that nothing in the app code does naive
+  datetime comparisons assuming local TZ.
