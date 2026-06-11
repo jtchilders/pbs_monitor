@@ -178,30 +178,40 @@ def _migrate_table(
     rows_read = 0
     rows_written = 0
 
-    with target_engine.connect() as target_conn:
-        target_conn.execution_options(autocommit=False)
-
+    # In dry-run mode we don't open the target connection at all — a dry-run
+    # should be runnable without a target DB existing yet (it's a recon tool).
+    if dry_run:
         for batch in _row_stream(source_engine, table, batch_size):
             rows_read += len(batch)
+            # Can't filter FK orphans in dry-run (no target to compare against);
+            # report raw source counts only.
+            rows_written += len(batch)
+            if verbose:
+                print(f"  {table}: {rows_read:,} rows streamed (dry-run)", end="\r")
+    else:
+        with target_engine.connect() as target_conn:
+            target_conn.execution_options(autocommit=False)
 
-            # Filter out FK-orphaned rows (child has data_collection_id not in target)
-            if filter_col and valid_dcl_ids is not None:
-                batch = [r for r in batch if r.get(filter_col) in valid_dcl_ids]
+            for batch in _row_stream(source_engine, table, batch_size):
+                rows_read += len(batch)
 
-            # Stamp system on every row, overriding any existing system value
-            for row in batch:
-                row["system"] = system
-                # Strip source columns not present in target schema
-                # (target may have new columns the source doesn't; extra keys are fine)
+                # Filter out FK-orphaned rows (child has data_collection_id not in target)
+                if filter_col and valid_dcl_ids is not None:
+                    batch = [r for r in batch if r.get(filter_col) in valid_dcl_ids]
 
-            if not dry_run and batch:
+                # Stamp system on every row, overriding any existing system value
+                for row in batch:
+                    row["system"] = system
+                    # Strip source columns not present in target schema
+                    # (target may have new columns the source doesn't; extra keys are fine)
+
                 _insert_batch(target_conn, table, batch)
                 target_conn.commit()
 
-            rows_written += len(batch)
+                rows_written += len(batch)
 
-            if verbose:
-                print(f"  {table}: {rows_read:,} rows streamed, {rows_written:,} kept", end="\r")
+                if verbose:
+                    print(f"  {table}: {rows_read:,} rows streamed, {rows_written:,} kept", end="\r")
 
     if verbose:
         print()  # newline after \r progress
