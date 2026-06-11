@@ -21,30 +21,100 @@ from ..models.job import PBSJob
 
 
 class BaseRepository:
-    """Base repository class with common functionality"""
-    
+    """Base repository class with common functionality
+
+    Multi-system note (Option A, pragmatic):
+       The repository is constructed from a Config that names exactly
+       one PBS system (``config.pbs.system``). All write paths stamp
+       rows with that system automatically; the daemon by definition
+       collects from one cluster, so each call site re-stating the
+       system would just be noise.
+
+       Read paths take an explicit ``system: Optional[str] = None``
+       parameter. When the caller omits it the daemon's configured
+       system is used (convenient for collector self-queries); when
+       neither the caller nor the config supplies one we raise rather
+       than returning cross-system results by accident.
+    """
+
     def __init__(self, config: Optional[Config] = None):
         self.config = config or Config()
         self._db_manager = DatabaseManager(self.config)
-    
+
+    @property
+    def system(self) -> Optional[str]:
+        """The PBS system this repository's daemon collects from.
+
+        ``None`` if the config didn't supply one. Writers should call
+        :meth:`_require_system` to fail loudly in that case; readers
+        may treat ``None`` as 'caller must supply explicitly'.
+        """
+        return self.config.pbs.system
+
+    def _require_system(self) -> str:
+        """Return the configured system or raise.
+
+        Used by write paths that have no caller-supplied alternative.
+        Refusing to invent a default is intentional: a daemon writing
+        rows with system=None or system='unknown' would silently
+        corrupt the shared multi-cluster DB.
+        """
+        sys = self.system
+        if not sys:
+            raise ValueError(
+                "No PBS system configured. Set pbs.system in the config "
+                "file (e.g. 'system: polaris') before running the "
+                "collector or any write-path repository call."
+            )
+        return sys
+
+    def _resolve_system(self, system: Optional[str]) -> str:
+        """Resolve a read-side system: explicit arg wins, then config.
+
+        Used by read paths. Refuses to silently return cross-system
+        data — if neither caller nor config supplies a system, raises.
+        """
+        if system:
+            return system
+        return self._require_system()
+
     def get_session(self) -> Session:
         """Get database session"""
         return self._db_manager.get_session()
 
 
 class JobRepository(BaseRepository):
-    """Repository for job-related database operations"""
-    
+    """Repository for job-related database operations
+
+    Write methods stamp rows with ``self.system`` automatically. Read
+    methods accept an optional ``system`` argument that defaults to
+    ``self.system``; pass it explicitly from cross-system contexts
+    (e.g. the web layer).
+    """
+
     def create_or_update_job(self, job_data: Dict[str, Any]) -> Job:
-        """Create or update a Job from a dict and return the Job instance."""
+        """Create or update a Job from a dict and return the Job instance.
+
+        Always stamps the row with the configured ``system``; any
+        ``system`` key in ``job_data`` is ignored and replaced to
+        prevent the caller from accidentally writing for a different
+        cluster.
+        """
+        system = self._require_system()
         with self.get_session() as session:
-            job = session.query(Job).filter(Job.job_id == job_data.get('job_id')).first()
+            jid = job_data.get('job_id')
+            job = session.query(Job).filter(
+                Job.system == system, Job.job_id == jid
+            ).first()
             if not job:
-                job = Job(job_id=job_data.get('job_id'))
+                job = Job(system=system, job_id=jid)
                 session.add(job)
             for key, value in job_data.items():
+                if key == 'system':
+                    continue  # Daemon-owned; ignore caller override.
                 if hasattr(job, key):
                     setattr(job, key, value)
+            job.system = system  # Defensive overwrite.
             # Calculate derived fields where possible
             try:
                 job.calculate_derived_fields()
@@ -55,39 +125,53 @@ class JobRepository(BaseRepository):
             # Detach to avoid DetachedInstanceError on access
             session.expunge(job)
             return job
-    
-    def get_job_by_id(self, job_id: str) -> Optional[Job]:
-        """Get job by ID"""
+
+    def get_job_by_id(self, job_id: str, system: Optional[str] = None) -> Optional[Job]:
+        """Get job by ID within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            job = session.query(Job).filter(Job.job_id == job_id).first()
+            job = session.query(Job).filter(
+                Job.system == system, Job.job_id == job_id
+            ).first()
             if job:
                 # Force loading of all attributes to avoid detached instance issues
                 session.expunge(job)
             return job
-    
-    def get_active_jobs(self) -> List[Job]:
+
+    def get_active_jobs(self, system: Optional[str] = None) -> List[Job]:
         """Get all active jobs (running, queued, held, etc. - excluding completed states)"""
+        system = self._resolve_system(system)
         with self.get_session() as session:
             jobs = session.query(Job).filter(
-                Job.state.in_([JobState.RUNNING, JobState.QUEUED, JobState.HELD, 
+                Job.system == system,
+                Job.state.in_([JobState.RUNNING, JobState.QUEUED, JobState.HELD,
                               JobState.WAITING, JobState.TRANSITIONING, JobState.EXITING, JobState.SUSPENDED])
             ).all()
             # Force loading of all attributes to avoid detached instance issues
             session.expunge_all()
             return jobs
-    
-    def get_jobs_by_user(self, user: str) -> List[Job]:
-        """Get jobs for specific user"""
+
+    def get_jobs_by_user(self, user: str, system: Optional[str] = None) -> List[Job]:
+        """Get jobs for specific user within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            jobs = session.query(Job).filter(Job.owner == user).all()
+            jobs = session.query(Job).filter(
+                Job.system == system, Job.owner == user
+            ).all()
             # Force loading of all attributes to avoid detached instance issues
             session.expunge_all()
             return jobs
-    
+
     def mark_job_as_unknown_end(self, job_id: str) -> bool:
-        """Mark a job as UNKNOWN_END state with final_state_recorded=True"""
+        """Mark a job as UNKNOWN_END state with final_state_recorded=True
+
+        Write path: scoped to the daemon's configured ``system``.
+        """
+        system = self._require_system()
         with self.get_session() as session:
-            job = session.query(Job).filter(Job.job_id == job_id).first()
+            job = session.query(Job).filter(
+                Job.system == system, Job.job_id == job_id
+            ).first()
             if job:
                 job.state = JobState.UNKNOWN_END
                 job.final_state_recorded = True
@@ -99,127 +183,180 @@ class JobRepository(BaseRepository):
                 session.commit()
                 return True
             return False
-    
-    def get_jobs_by_queue(self, queue: str) -> List[Job]:
-        """Get jobs in specific queue"""
+
+    def get_jobs_by_queue(self, queue: str, system: Optional[str] = None) -> List[Job]:
+        """Get jobs in specific queue within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            jobs = session.query(Job).filter(Job.queue == queue).all()
+            jobs = session.query(Job).filter(
+                Job.system == system, Job.queue == queue
+            ).all()
             # Force loading of all attributes to avoid detached instance issues
             session.expunge_all()
             return jobs
-    
-    def get_jobs_by_state(self, state: JobState) -> List[Job]:
-        """Get jobs in specific state"""
+
+    def get_jobs_by_state(self, state: JobState, system: Optional[str] = None) -> List[Job]:
+        """Get jobs in specific state within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            jobs = session.query(Job).filter(Job.state == state).all()
+            jobs = session.query(Job).filter(
+                Job.system == system, Job.state == state
+            ).all()
             # Force loading of all attributes to avoid detached instance issues
             session.expunge_all()
             return jobs
-    
-    def get_historical_jobs(self, user: Optional[str] = None, days: int = 30) -> List[Job]:
-        """Get historical jobs from database"""
+
+    def get_historical_jobs(self, user: Optional[str] = None, days: int = 30,
+                            system: Optional[str] = None) -> List[Job]:
+        """Get historical jobs from database within the given system."""
+        system = self._resolve_system(system)
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         with self.get_session() as session:
-            query = session.query(Job).filter(Job.last_updated >= cutoff_date)
+            query = session.query(Job).filter(
+                Job.system == system, Job.last_updated >= cutoff_date
+            )
             if user:
                 query = query.filter(Job.owner == user)
             jobs = query.all()
             # Force loading of all attributes to avoid detached instance issues
             session.expunge_all()
             return jobs
-    
+
     def add_job(self, job: Job) -> Job:
-        """Add new job to database"""
+        """Add new job to database. Stamps ``system`` if not already set."""
+        system = self._require_system()
+        if not getattr(job, 'system', None):
+            job.system = system
         with self.get_session() as session:
             session.add(job)
             session.commit()
             return job
-    
+
     def upsert_jobs(self, jobs: List[Job]) -> None:
-        """Insert or update jobs in database"""
+        """Insert or update jobs in database. All rows stamped with daemon's system."""
+        system = self._require_system()
         with self.get_session() as session:
             for job in jobs:
-                existing = session.query(Job).filter(Job.job_id == job.job_id).first()
+                job.system = system
+                existing = session.query(Job).filter(
+                    Job.system == system, Job.job_id == job.job_id
+                ).first()
                 if existing:
                     # Update existing job
                     for attr, value in job.__dict__.items():
-                        if not attr.startswith('_'):
-                            setattr(existing, attr, value)
+                        if attr.startswith('_'):
+                            continue
+                        if attr == 'system':
+                            continue  # PK component; do not overwrite from candidate.
+                        setattr(existing, attr, value)
                 else:
                     # Add new job
                     session.add(job)
             session.commit()
-    
+
     def update_job(self, job: Job) -> Job:
-        """Update existing job"""
+        """Update existing job. Stamps daemon's ``system`` if not set."""
+        system = self._require_system()
+        if not getattr(job, 'system', None):
+            job.system = system
         with self.get_session() as session:
             session.merge(job)
             session.commit()
             return job
-    
+
     def delete_job(self, job_id: str) -> bool:
-        """Delete job by ID"""
+        """Delete job by ID within the daemon's system."""
+        system = self._require_system()
         with self.get_session() as session:
-            job = session.query(Job).filter(Job.job_id == job_id).first()
+            job = session.query(Job).filter(
+                Job.system == system, Job.job_id == job_id
+            ).first()
             if job:
                 session.delete(job)
                 session.commit()
                 return True
             return False
-    
-    def get_job_history(self, job_id: str) -> List[JobHistory]:
-        """Get history entries for a job"""
+
+    def get_job_history(self, job_id: str, system: Optional[str] = None) -> List[JobHistory]:
+        """Get history entries for a job within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
             records = session.query(JobHistory).filter(
-                JobHistory.job_id == job_id
+                JobHistory.system == system, JobHistory.job_id == job_id
             ).order_by(JobHistory.timestamp).all()
             # Detach records so attributes are accessible after session closes
             for rec in records:
                 session.expunge(rec)
             return records
-    
+
     def add_job_history(self, job_history: JobHistory | str, state: Optional[JobState] = None) -> JobHistory:
-        """Add job history entry. Accepts either a JobHistory or (job_id, state)."""
+        """Add job history entry. Accepts either a JobHistory or (job_id, state).
+
+        Stamps ``system`` from the daemon's config if not already set
+        on a provided JobHistory instance.
+        """
+        system = self._require_system()
         with self.get_session() as session:
             if isinstance(job_history, JobHistory):
                 hist = job_history
+                if not getattr(hist, 'system', None):
+                    hist.system = system
             else:
-                hist = JobHistory(job_id=job_history, state=state)
+                hist = JobHistory(system=system, job_id=job_history, state=state)
             session.add(hist)
             session.commit()
             session.refresh(hist)
             session.expunge(hist)
             return hist
 
-    def get_job_statistics(self) -> Dict[str, Any]:
-        """Return simple aggregate statistics across all jobs."""
+    def get_job_statistics(self, system: Optional[str] = None) -> Dict[str, Any]:
+        """Return simple aggregate statistics across all jobs in the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            total_jobs = session.query(func.count(Job.job_id)).scalar() or 0
+            base_filter = (Job.system == system,)
+            total_jobs = session.query(func.count(Job.job_id)).filter(*base_filter).scalar() or 0
             counts = {
-                f"{st.value}_count": session.query(func.count(Job.job_id)).filter(Job.state == st).scalar() or 0
+                f"{st.value}_count": session.query(func.count(Job.job_id)).filter(
+                    *base_filter, Job.state == st
+                ).scalar() or 0
                 for st in JobState
             }
-            active_jobs = session.query(func.count(Job.job_id)).filter(Job.state.in_([JobState.RUNNING, JobState.QUEUED, JobState.HELD])).scalar() or 0
+            active_jobs = session.query(func.count(Job.job_id)).filter(
+                *base_filter,
+                Job.state.in_([JobState.RUNNING, JobState.QUEUED, JobState.HELD]),
+            ).scalar() or 0
             return {
                 'total_jobs': total_jobs,
                 'active_jobs': active_jobs,
                 **counts,
             }
-    
+
     def add_job_history_batch(self, job_histories: List[JobHistory]) -> None:
-        """Add multiple job history entries"""
+        """Add multiple job history entries. Stamps daemon's system on each."""
+        system = self._require_system()
         with self.get_session() as session:
+            for hist in job_histories:
+                if not getattr(hist, 'system', None):
+                    hist.system = system
             session.add_all(job_histories)
             session.commit()
-    
-    def get_latest_job_states(self) -> Dict[str, 'JobStateInfo']:
-        """Get the latest state information for all jobs from job_history"""
+
+    def get_latest_job_states(self, system: Optional[str] = None) -> Dict[str, 'JobStateInfo']:
+        """Get the latest state information for all jobs from job_history
+
+        Scoped to ``system``. Note the dict is keyed on the bare
+        ``job_id`` string — callers that mix systems should not use
+        this method; they should iterate per-system instead.
+        """
+        system = self._resolve_system(system)
         from ..data_collector import JobStateInfo  # Import here to avoid circular import
-        
+
         with self.get_session() as session:
-            # Get the latest job_history entry for each job_id
-            # Use a window function to get the most recent entry per job
+            # Get the latest job_history entry for each (system, job_id).
+            # Window function partitions on the full composite key so
+            # we don't merge state across systems.
             subquery = session.query(
+                JobHistory.system,
                 JobHistory.job_id,
                 JobHistory.state,
                 JobHistory.priority,
@@ -227,57 +364,59 @@ class JobRepository(BaseRepository):
                 JobHistory.queue,
                 JobHistory.timestamp,
                 func.row_number().over(
-                    partition_by=JobHistory.job_id,
+                    partition_by=[JobHistory.system, JobHistory.job_id],
                     order_by=JobHistory.timestamp.desc()
                 ).label('rn')
-            ).subquery()
-            
+            ).filter(JobHistory.system == system).subquery()
+
             # Get only the most recent entries (rn = 1)
             latest_entries = session.query(subquery).filter(subquery.c.rn == 1).all()
-            
+
             # Convert to JobStateInfo objects
             result = {}
             for entry in latest_entries:
                 # Convert database JobState enum to PBSJob JobState enum
                 from ..models.job import JobState as PBSJobState
                 pbs_state = PBSJobState(entry.state.value)
-                
+
                 result[entry.job_id] = JobStateInfo(
                     state=pbs_state,
                     priority=entry.priority or 0,
                     execution_node=entry.execution_node,
                     queue=entry.queue or ''
                 )
-            
+
             return result
-    
-    def get_user_job_statistics(self, user: str, days: int = 30) -> Dict[str, Any]:
-        """Get job statistics for a user"""
+
+    def get_user_job_statistics(self, user: str, days: int = 30,
+                                system: Optional[str] = None) -> Dict[str, Any]:
+        """Get job statistics for a user within the given system."""
+        system = self._resolve_system(system)
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         with self.get_session() as session:
             # Get basic counts
             total_jobs = session.query(Job).filter(
-                and_(Job.owner == user, Job.submit_time >= cutoff_date)
+                and_(Job.system == system, Job.owner == user, Job.submit_time >= cutoff_date)
             ).count()
-            
+
             completed_jobs = session.query(Job).filter(
-                and_(Job.owner == user, Job.submit_time >= cutoff_date,
+                and_(Job.system == system, Job.owner == user, Job.submit_time >= cutoff_date,
                      Job.state.in_([JobState.COMPLETED, JobState.FINISHED]))
             ).count()
-            
+
             failed_jobs = session.query(Job).filter(
-                and_(Job.owner == user, Job.submit_time >= cutoff_date,
+                and_(Job.system == system, Job.owner == user, Job.submit_time >= cutoff_date,
                      Job.exit_status.isnot(None), Job.exit_status != 0)
             ).count()
-            
+
             # Get average runtimes
             avg_runtime = session.query(func.avg(
                 func.extract('epoch', Job.end_time - Job.start_time) / 60
             )).filter(
-                and_(Job.owner == user, Job.submit_time >= cutoff_date,
+                and_(Job.system == system, Job.owner == user, Job.submit_time >= cutoff_date,
                      Job.start_time.isnot(None), Job.end_time.isnot(None))
             ).scalar()
-            
+
             return {
                 'total_jobs': total_jobs,
                 'completed_jobs': completed_jobs,
@@ -286,11 +425,14 @@ class JobRepository(BaseRepository):
                 'avg_runtime_minutes': avg_runtime or 0,
                 'period_days': days
             }
-    
-    def get_recent_jobs(self, limit: int = 100) -> List[Job]:
-        """Get recent jobs"""
+
+    def get_recent_jobs(self, limit: int = 100, system: Optional[str] = None) -> List[Job]:
+        """Get recent jobs within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            jobs = session.query(Job).order_by(desc(Job.last_updated)).limit(limit).all()
+            jobs = session.query(Job).filter(
+                Job.system == system
+            ).order_by(desc(Job.last_updated)).limit(limit).all()
             session.expunge_all()
             return jobs
 
@@ -335,126 +477,178 @@ class JobStateInfo:
 
 
 class QueueRepository(BaseRepository):
-    """Repository for queue-related database operations"""
+    """Repository for queue-related database operations
+
+    Writes stamp the daemon's ``system``; reads accept an optional
+    ``system`` arg (defaults to the daemon's).
+    """
+
     def create_or_update_queue(self, queue_data: Dict[str, Any]) -> Queue:
+        system = self._require_system()
         with self.get_session() as session:
-            q = session.query(Queue).filter(Queue.name == queue_data.get('name')).first()
+            qname = queue_data.get('name')
+            q = session.query(Queue).filter(
+                Queue.system == system, Queue.name == qname
+            ).first()
             if not q:
-                q = Queue(name=queue_data.get('name'))
+                q = Queue(system=system, name=qname)
                 session.add(q)
             for key, value in queue_data.items():
+                if key == 'system':
+                    continue
                 if hasattr(q, key):
                     setattr(q, key, value)
+            q.system = system
             session.commit()
             session.refresh(q)
             session.expunge(q)
             return q
-    
-    def get_queue_by_name(self, name: str) -> Optional[Queue]:
-        """Get queue by name"""
+
+    def get_queue_by_name(self, name: str, system: Optional[str] = None) -> Optional[Queue]:
+        """Get queue by name within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            queue = session.query(Queue).filter(Queue.name == name).first()
+            queue = session.query(Queue).filter(
+                Queue.system == system, Queue.name == name
+            ).first()
             if queue:
-                # Force loading of all attributes to avoid detached instance issues
                 session.expunge(queue)
             return queue
-    
-    def get_all_queues(self) -> List[Queue]:
-        """Get all queues"""
+
+    def get_all_queues(self, system: Optional[str] = None) -> List[Queue]:
+        """Get all queues within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            queues = session.query(Queue).all()
-            # Force loading of all attributes to avoid detached instance issues
+            queues = session.query(Queue).filter(Queue.system == system).all()
             session.expunge_all()
             return queues
-    
-    def get_enabled_queues(self) -> List[Queue]:
-        """Get enabled queues"""
+
+    def get_enabled_queues(self, system: Optional[str] = None) -> List[Queue]:
+        """Get enabled queues within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
             queues = session.query(Queue).filter(
+                Queue.system == system,
                 Queue.state.in_([QueueState.ENABLED_STARTED, QueueState.ENABLED_STOPPED])
             ).all()
-            # Force loading of all attributes to avoid detached instance issues
             session.expunge_all()
             return queues
-    
+
     def add_queue(self, queue: Queue) -> Queue:
-        """Add new queue to database"""
+        """Add new queue. Stamps daemon's ``system`` if unset."""
+        system = self._require_system()
+        if not getattr(queue, 'system', None):
+            queue.system = system
         with self.get_session() as session:
             session.add(queue)
             session.commit()
             return queue
-    
+
     def upsert_queues(self, queues: List[Queue]) -> None:
-        """Insert or update queues in database"""
+        """Insert or update queues. All rows stamped with daemon's system."""
+        system = self._require_system()
         with self.get_session() as session:
             for queue in queues:
-                existing = session.query(Queue).filter(Queue.name == queue.name).first()
+                queue.system = system
+                existing = session.query(Queue).filter(
+                    Queue.system == system, Queue.name == queue.name
+                ).first()
                 if existing:
-                    # Update existing queue
                     for attr, value in queue.__dict__.items():
-                        if not attr.startswith('_'):
-                            setattr(existing, attr, value)
+                        if attr.startswith('_') or attr == 'system':
+                            continue
+                        setattr(existing, attr, value)
                 else:
-                    # Add new queue
                     session.add(queue)
             session.commit()
-    
+
     def update_queue(self, queue: Queue) -> Queue:
-        """Update existing queue"""
+        """Update existing queue. Stamps daemon's ``system`` if unset."""
+        system = self._require_system()
+        if not getattr(queue, 'system', None):
+            queue.system = system
         with self.get_session() as session:
             session.merge(queue)
             session.commit()
             return queue
-    
+
     def delete_queue(self, name: str) -> bool:
-        """Delete queue by name"""
+        """Delete queue by name within the daemon's system."""
+        system = self._require_system()
         with self.get_session() as session:
-            queue = session.query(Queue).filter(Queue.name == name).first()
+            queue = session.query(Queue).filter(
+                Queue.system == system, Queue.name == name
+            ).first()
             if queue:
                 session.delete(queue)
                 session.commit()
                 return True
             return False
-    
-    def get_queue_snapshots(self, queue_name: str, hours: int = 24) -> List[QueueSnapshot]:
-        """Get recent queue snapshots"""
+
+    def get_queue_snapshots(self, queue_name: str, hours: int = 24,
+                            system: Optional[str] = None) -> List[QueueSnapshot]:
+        """Get recent queue snapshots within the given system.
+
+        (Drive-by fix: ``expunge_all()`` so attribute access works
+        after the session closes; the original method returned
+        attached rows that raised DetachedInstanceError on access.)
+        """
+        system = self._resolve_system(system)
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
         with self.get_session() as session:
-            return session.query(QueueSnapshot).filter(
-                and_(QueueSnapshot.queue_name == queue_name, 
+            snapshots = session.query(QueueSnapshot).filter(
+                and_(QueueSnapshot.system == system,
+                     QueueSnapshot.queue_name == queue_name,
                      QueueSnapshot.timestamp >= cutoff_time)
             ).order_by(QueueSnapshot.timestamp).all()
-    
-    def add_queue_snapshot(self, queue_name: str | QueueSnapshot, snapshot_data: Optional[Dict[str, Any]] = None) -> QueueSnapshot:
-        """Add queue snapshot. Accepts either a QueueSnapshot or (queue_name, data)."""
+            session.expunge_all()
+            return snapshots
+
+    def add_queue_snapshot(self, queue_name: str | QueueSnapshot,
+                           snapshot_data: Optional[Dict[str, Any]] = None) -> QueueSnapshot:
+        """Add queue snapshot. Accepts either a QueueSnapshot or (queue_name, data).
+
+        Stamps daemon's ``system`` on both forms.
+        """
+        system = self._require_system()
         with self.get_session() as session:
             if isinstance(queue_name, QueueSnapshot):
                 snap = queue_name
+                if not getattr(snap, 'system', None):
+                    snap.system = system
             else:
                 data = snapshot_data or {}
-                filtered = {k: v for k, v in data.items() if hasattr(QueueSnapshot, k)}
-                snap = QueueSnapshot(queue_name=queue_name, **filtered)
+                filtered = {k: v for k, v in data.items()
+                            if hasattr(QueueSnapshot, k) and k != 'system'}
+                snap = QueueSnapshot(system=system, queue_name=queue_name, **filtered)
             session.add(snap)
             session.commit()
             session.refresh(snap)
             session.expunge(snap)
             return snap
-    
+
     def add_queue_snapshots(self, snapshots: List[QueueSnapshot]) -> None:
-        """Add multiple queue snapshots"""
+        """Add multiple queue snapshots. Stamps daemon's system on each."""
+        system = self._require_system()
         with self.get_session() as session:
+            for snap in snapshots:
+                if not getattr(snap, 'system', None):
+                    snap.system = system
             session.add_all(snapshots)
             session.commit()
-    
-    def get_queue_utilization_history(self, queue_name: str, days: int = 7) -> List[Dict[str, Any]]:
-        """Get queue utilization history"""
+
+    def get_queue_utilization_history(self, queue_name: str, days: int = 7,
+                                      system: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get queue utilization history within the given system."""
+        system = self._resolve_system(system)
         cutoff_time = datetime.now(timezone.utc) - timedelta(days=days)
         with self.get_session() as session:
             snapshots = session.query(QueueSnapshot).filter(
-                and_(QueueSnapshot.queue_name == queue_name,
+                and_(QueueSnapshot.system == system,
+                     QueueSnapshot.queue_name == queue_name,
                      QueueSnapshot.timestamp >= cutoff_time)
             ).order_by(QueueSnapshot.timestamp).all()
-            
+
             return [
                 {
                     'timestamp': snapshot.timestamp,
@@ -467,168 +661,224 @@ class QueueRepository(BaseRepository):
 
 
 class NodeRepository(BaseRepository):
-    """Repository for node-related database operations"""
-    def _get_next_snapshot_index(self, session: Session) -> int:
-        """Get the next available snapshot index for a node."""
-        max_index = session.query(func.max(Node.snapshot_index)).scalar()
+    """Repository for node-related database operations
+
+    Writes stamp the daemon's ``system``; reads accept an optional
+    ``system`` arg. ``snapshot_index`` is unique per-system so each
+    cluster maintains its own independent slot ordering.
+    """
+
+    def _get_next_snapshot_index(self, session: Session, system: str) -> int:
+        """Get the next available snapshot index for a node within ``system``."""
+        max_index = session.query(func.max(Node.snapshot_index)).filter(
+            Node.system == system
+        ).scalar()
         return 0 if max_index is None else max_index + 1
 
     def create_or_update_node(self, node_data: Dict[str, Any]) -> Node:
+        system = self._require_system()
         with self.get_session() as session:
-            n = session.query(Node).filter(Node.name == node_data.get('name')).first()
+            nname = node_data.get('name')
+            n = session.query(Node).filter(
+                Node.system == system, Node.name == nname
+            ).first()
             if not n:
-                n = Node(name=node_data.get('name'))
-                n.snapshot_index = self._get_next_snapshot_index(session)
+                n = Node(system=system, name=nname)
+                n.snapshot_index = self._get_next_snapshot_index(session, system)
                 session.add(n)
             for key, value in node_data.items():
+                if key == 'system':
+                    continue
                 if hasattr(n, key):
                     if key == 'snapshot_index' and value is None:
                         continue
                     setattr(n, key, value)
+            n.system = system
             session.commit()
             session.refresh(n)
             session.expunge(n)
             return n
-    
-    def get_node_by_name(self, name: str) -> Optional[Node]:
-        """Get node by name"""
+
+    def get_node_by_name(self, name: str, system: Optional[str] = None) -> Optional[Node]:
+        """Get node by name within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            node = session.query(Node).filter(Node.name == name).first()
+            node = session.query(Node).filter(
+                Node.system == system, Node.name == name
+            ).first()
             if node:
-                # Force loading of all attributes to avoid detached instance issues
                 session.expunge(node)
             return node
-    
-    def get_all_nodes(self) -> List[Node]:
-        """Get all nodes"""
+
+    def get_all_nodes(self, system: Optional[str] = None) -> List[Node]:
+        """Get all nodes within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            nodes = session.query(Node).all()
-            # Force loading of all attributes to avoid detached instance issues
+            nodes = session.query(Node).filter(Node.system == system).all()
             session.expunge_all()
             return nodes
-    
-    def get_available_nodes(self) -> List[Node]:
-        """Get available nodes"""
+
+    def get_available_nodes(self, system: Optional[str] = None) -> List[Node]:
+        """Get available nodes within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
             nodes = session.query(Node).filter(
+                Node.system == system,
                 Node.state.in_([NodeState.FREE, NodeState.JOB_SHARING])
             ).all()
-            # Force loading of all attributes to avoid detached instance issues
             session.expunge_all()
             return nodes
-    
-    def get_nodes_by_state(self, state: NodeState) -> List[Node]:
-        """Get nodes in specific state"""
+
+    def get_nodes_by_state(self, state: NodeState, system: Optional[str] = None) -> List[Node]:
+        """Get nodes in specific state within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            nodes = session.query(Node).filter(Node.state == state).all()
-            # Force loading of all attributes to avoid detached instance issues
+            nodes = session.query(Node).filter(
+                Node.system == system, Node.state == state
+            ).all()
             session.expunge_all()
             return nodes
-    
+
     def add_node(self, node: Node) -> Node:
-        """Add new node to database"""
+        """Add new node. Stamps daemon's ``system`` if unset."""
+        system = self._require_system()
+        if not getattr(node, 'system', None):
+            node.system = system
         with self.get_session() as session:
             session.add(node)
             session.commit()
             return node
-    
+
     def upsert_nodes(self, nodes: List[Node]) -> None:
-        """Insert or update nodes in database"""
+        """Insert or update nodes. All rows stamped with daemon's system."""
+        system = self._require_system()
         with self.get_session() as session:
             for node in sorted(nodes, key=lambda n: n.name):
-                existing = session.query(Node).filter(Node.name == node.name).first()
+                node.system = system
+                existing = session.query(Node).filter(
+                    Node.system == system, Node.name == node.name
+                ).first()
                 if existing:
-                    # Update existing node
                     for attr, value in node.__dict__.items():
-                        if attr.startswith('_'):
+                        if attr.startswith('_') or attr == 'system':
                             continue
                         if attr == 'snapshot_index':
                             continue
                         setattr(existing, attr, value)
                 else:
-                    # Add new node
                     if node.snapshot_index is None:
-                        node.snapshot_index = self._get_next_snapshot_index(session)
+                        node.snapshot_index = self._get_next_snapshot_index(session, system)
                     session.add(node)
             session.commit()
-    
+
     def update_node(self, node: Node) -> Node:
-        """Update existing node"""
+        """Update existing node. Stamps daemon's ``system`` if unset."""
+        system = self._require_system()
+        if not getattr(node, 'system', None):
+            node.system = system
         with self.get_session() as session:
             session.merge(node)
             session.commit()
             return node
-    
+
     def delete_node(self, name: str) -> bool:
-        """Delete node by name"""
+        """Delete node by name within the daemon's system."""
+        system = self._require_system()
         with self.get_session() as session:
-            node = session.query(Node).filter(Node.name == name).first()
+            node = session.query(Node).filter(
+                Node.system == system, Node.name == name
+            ).first()
             if node:
                 session.delete(node)
                 session.commit()
                 return True
             return False
-    
-    def get_node_snapshots(self, hours: int = 24) -> List[NodeSnapshot]:
-        """Get recent node snapshots"""
+
+    def get_node_snapshots(self, hours: int = 24,
+                           system: Optional[str] = None) -> List[NodeSnapshot]:
+        """Get recent node snapshots within the given system."""
+        system = self._resolve_system(system)
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
         with self.get_session() as session:
             return session.query(NodeSnapshot).filter(
+                NodeSnapshot.system == system,
                 NodeSnapshot.timestamp >= cutoff_time
             ).order_by(NodeSnapshot.timestamp).all()
-    
+
     def add_node_snapshot(self, snapshot: NodeSnapshot) -> NodeSnapshot:
-        """Add node snapshot entry."""
+        """Add node snapshot entry. Stamps daemon's ``system`` if unset."""
+        system = self._require_system()
+        if not getattr(snapshot, 'system', None):
+            snapshot.system = system
         with self.get_session() as session:
             session.add(snapshot)
             session.commit()
             session.refresh(snapshot)
             session.expunge(snapshot)
             return snapshot
-    
-    def get_node_index_map(self) -> Dict[str, int]:
-        """Return mapping of node name to snapshot index."""
+
+    def get_node_index_map(self, system: Optional[str] = None) -> Dict[str, int]:
+        """Return mapping of node name to snapshot index within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            nodes = session.query(Node.name, Node.snapshot_index).order_by(Node.snapshot_index).all()
+            nodes = session.query(Node.name, Node.snapshot_index).filter(
+                Node.system == system
+            ).order_by(Node.snapshot_index).all()
             return {name: index for name, index in nodes if index is not None}
 
 
 class SystemRepository(BaseRepository):
-    """Repository for system snapshot operations"""
-    
-    def get_latest_system_snapshot(self) -> Optional[SystemSnapshot]:
-        """Get the most recent system snapshot"""
+    """Repository for system snapshot operations
+
+    All snapshots are tagged with the daemon's ``system``. Reads accept
+    an optional ``system`` override.
+    """
+
+    def get_latest_system_snapshot(self, system: Optional[str] = None) -> Optional[SystemSnapshot]:
+        """Get the most recent system snapshot within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            snapshot = session.query(SystemSnapshot).order_by(desc(SystemSnapshot.timestamp)).first()
+            snapshot = session.query(SystemSnapshot).filter(
+                SystemSnapshot.system == system
+            ).order_by(desc(SystemSnapshot.timestamp)).first()
             if snapshot:
                 session.expunge(snapshot)
             return snapshot
-    
-    def get_system_snapshots(self, hours: int = 24) -> List[SystemSnapshot]:
-        """Get system snapshots from the last N hours"""
+
+    def get_system_snapshots(self, hours: int = 24,
+                             system: Optional[str] = None) -> List[SystemSnapshot]:
+        """Get system snapshots from the last N hours within the given system."""
+        system = self._resolve_system(system)
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
         with self.get_session() as session:
             snapshots = session.query(SystemSnapshot).filter(
+                SystemSnapshot.system == system,
                 SystemSnapshot.timestamp >= cutoff_time
             ).order_by(desc(SystemSnapshot.timestamp)).all()
             session.expunge_all()
             return snapshots
-    
+
     def add_system_snapshot(self, snapshot: SystemSnapshot) -> SystemSnapshot:
-        """Add system snapshot to database"""
+        """Add system snapshot. Stamps daemon's ``system`` if unset."""
+        system = self._require_system()
+        if not getattr(snapshot, 'system', None):
+            snapshot.system = system
         with self.get_session() as session:
             session.add(snapshot)
             session.commit()
             return snapshot
-    
-    def get_system_utilization_history(self, days: int = 7) -> List[Dict[str, Any]]:
-        """Get system utilization history for analysis"""
+
+    def get_system_utilization_history(self, days: int = 7,
+                                       system: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get system utilization history within the given system."""
+        system = self._resolve_system(system)
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         with self.get_session() as session:
             snapshots = session.query(SystemSnapshot).filter(
+                SystemSnapshot.system == system,
                 SystemSnapshot.timestamp >= cutoff_date
             ).order_by(SystemSnapshot.timestamp).all()
-            
+
             history = []
             for snapshot in snapshots:
                 history.append({
@@ -642,139 +892,190 @@ class SystemRepository(BaseRepository):
                     'avg_queue_time_minutes': snapshot.avg_queue_time_minutes,
                     'avg_runtime_minutes': snapshot.avg_runtime_minutes
                 })
-            
+
             session.expunge_all()
             return history
 
 
 class ReservationRepository(BaseRepository):
-    """Repository for reservation-related database operations"""
-    
-    def get_reservation_by_id(self, reservation_id: str) -> Optional[Reservation]:
-        """Get reservation by ID"""
+    """Repository for reservation-related database operations
+
+    Writes stamp the daemon's ``system``; reads accept an optional
+    ``system`` arg.
+    """
+
+    def get_reservation_by_id(self, reservation_id: str,
+                              system: Optional[str] = None) -> Optional[Reservation]:
+        """Get reservation by ID within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            reservation = session.query(Reservation).filter(Reservation.reservation_id == reservation_id).first()
+            reservation = session.query(Reservation).filter(
+                Reservation.system == system,
+                Reservation.reservation_id == reservation_id,
+            ).first()
             if reservation:
                 session.expunge(reservation)
             return reservation
-    
-    def get_active_reservations(self) -> List[Reservation]:
-        """Get all active reservations (confirmed or running)"""
+
+    def get_active_reservations(self, system: Optional[str] = None) -> List[Reservation]:
+        """Get all active reservations within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
             reservations = session.query(Reservation).filter(
-                Reservation.state.in_([ReservationState.CONFIRMED, ReservationState.RUNNING, 
+                Reservation.system == system,
+                Reservation.state.in_([ReservationState.CONFIRMED, ReservationState.RUNNING,
                                      ReservationState.CONFIRMED_SHORT, ReservationState.RUNNING_SHORT])
             ).all()
             session.expunge_all()
             return reservations
-    
-    def get_reservations_by_user(self, user: str) -> List[Reservation]:
-        """Get reservations for specific user"""
+
+    def get_reservations_by_user(self, user: str, system: Optional[str] = None) -> List[Reservation]:
+        """Get reservations for specific user within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            reservations = session.query(Reservation).filter(Reservation.owner == user).all()
+            reservations = session.query(Reservation).filter(
+                Reservation.system == system, Reservation.owner == user
+            ).all()
             session.expunge_all()
             return reservations
-    
-    def get_reservations_by_queue(self, queue: str) -> List[Reservation]:
-        """Get reservations in specific queue"""
+
+    def get_reservations_by_queue(self, queue: str, system: Optional[str] = None) -> List[Reservation]:
+        """Get reservations in specific queue within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            reservations = session.query(Reservation).filter(Reservation.queue == queue).all()
+            reservations = session.query(Reservation).filter(
+                Reservation.system == system, Reservation.queue == queue
+            ).all()
             session.expunge_all()
             return reservations
-    
-    def get_reservations_by_state(self, state: ReservationState) -> List[Reservation]:
-        """Get reservations in specific state"""
+
+    def get_reservations_by_state(self, state: ReservationState,
+                                  system: Optional[str] = None) -> List[Reservation]:
+        """Get reservations in specific state within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            reservations = session.query(Reservation).filter(Reservation.state == state).all()
+            reservations = session.query(Reservation).filter(
+                Reservation.system == system, Reservation.state == state
+            ).all()
             session.expunge_all()
             return reservations
-    
-    def get_historical_reservations(self, user: Optional[str] = None, days: int = 30) -> List[Reservation]:
-        """Get historical reservations from database"""
+
+    def get_historical_reservations(self, user: Optional[str] = None, days: int = 30,
+                                    system: Optional[str] = None) -> List[Reservation]:
+        """Get historical reservations within the given system."""
+        system = self._resolve_system(system)
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         with self.get_session() as session:
-            query = session.query(Reservation).filter(Reservation.last_updated >= cutoff_date)
+            query = session.query(Reservation).filter(
+                Reservation.system == system,
+                Reservation.last_updated >= cutoff_date,
+            )
             if user:
                 query = query.filter(Reservation.owner == user)
             reservations = query.all()
             session.expunge_all()
             return reservations
-    
+
     def add_reservation(self, reservation: Reservation) -> Reservation:
-        """Add new reservation to database"""
+        """Add new reservation. Stamps daemon's ``system`` if unset."""
+        system = self._require_system()
+        if not getattr(reservation, 'system', None):
+            reservation.system = system
         with self.get_session() as session:
             session.add(reservation)
             session.commit()
             return reservation
-    
+
     def upsert_reservations(self, reservations: List[Reservation]) -> None:
-        """Insert or update reservations in database"""
+        """Insert or update reservations. All rows stamped with daemon's system."""
+        system = self._require_system()
         with self.get_session() as session:
             for reservation in reservations:
-                # Check if reservation exists
+                reservation.system = system
                 existing = session.query(Reservation).filter(
-                    Reservation.reservation_id == reservation.reservation_id
+                    Reservation.system == system,
+                    Reservation.reservation_id == reservation.reservation_id,
                 ).first()
-                
+
                 if existing:
-                    # Update existing reservation
                     for key, value in reservation.__dict__.items():
-                        if not key.startswith('_'):
-                            setattr(existing, key, value)
+                        if key.startswith('_') or key == 'system':
+                            continue
+                        setattr(existing, key, value)
                     existing.last_updated = datetime.now(timezone.utc)
                 else:
-                    # Add new reservation
                     session.add(reservation)
-            
+
             session.commit()
-    
+
     def update_reservation(self, reservation: Reservation) -> Reservation:
-        """Update existing reservation"""
+        """Update existing reservation. Stamps daemon's ``system`` if unset."""
+        system = self._require_system()
+        if not getattr(reservation, 'system', None):
+            reservation.system = system
         with self.get_session() as session:
             session.merge(reservation)
             session.commit()
             return reservation
-    
+
     def delete_reservation(self, reservation_id: str) -> bool:
-        """Delete reservation by ID"""
+        """Delete reservation by ID within the daemon's system."""
+        system = self._require_system()
         with self.get_session() as session:
-            reservation = session.query(Reservation).filter(Reservation.reservation_id == reservation_id).first()
+            reservation = session.query(Reservation).filter(
+                Reservation.system == system,
+                Reservation.reservation_id == reservation_id,
+            ).first()
             if reservation:
                 session.delete(reservation)
                 session.commit()
                 return True
             return False
-    
-    def get_reservation_history(self, reservation_id: str) -> List[ReservationHistory]:
-        """Get history for a specific reservation"""
+
+    def get_reservation_history(self, reservation_id: str,
+                                system: Optional[str] = None) -> List[ReservationHistory]:
+        """Get history for a specific reservation within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
             history = session.query(ReservationHistory).filter(
-                ReservationHistory.reservation_id == reservation_id
+                ReservationHistory.system == system,
+                ReservationHistory.reservation_id == reservation_id,
             ).order_by(ReservationHistory.timestamp).all()
             session.expunge_all()
             return history
-    
+
     def add_reservation_history(self, history: ReservationHistory) -> ReservationHistory:
-        """Add reservation history entry"""
+        """Add reservation history entry. Stamps daemon's ``system`` if unset."""
+        system = self._require_system()
+        if not getattr(history, 'system', None):
+            history.system = system
         with self.get_session() as session:
             session.add(history)
             session.commit()
             return history
-    
+
     def add_reservation_history_batch(self, histories: List[ReservationHistory]) -> None:
-        """Add multiple reservation history entries"""
+        """Add multiple reservation history entries. Stamps daemon's system on each."""
+        system = self._require_system()
         with self.get_session() as session:
+            for h in histories:
+                if not getattr(h, 'system', None):
+                    h.system = system
             session.add_all(histories)
             session.commit()
-    
-    def get_latest_reservation_states(self) -> Dict[str, 'ReservationStateInfo']:
-        """Get latest state for each reservation"""
+
+    def get_latest_reservation_states(self, system: Optional[str] = None) -> Dict[str, 'ReservationStateInfo']:
+        """Get latest state for each reservation within the given system.
+
+        Dict keyed on the bare ``reservation_id`` string; do not mix
+        systems through this call (filter scopes to one system).
+        """
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            # Get the most recent history entry for each reservation
             latest_states = {}
-            
-            # Get all reservations with their current state
-            reservations = session.query(Reservation).all()
+            reservations = session.query(Reservation).filter(
+                Reservation.system == system
+            ).all()
             for reservation in reservations:
                 latest_states[reservation.reservation_id] = ReservationStateInfo(
                     state=reservation.state,
@@ -786,12 +1087,15 @@ class ReservationRepository(BaseRepository):
             session.expunge_all()
             return latest_states
     
-    def get_user_reservation_statistics(self, user: str, days: int = 30) -> Dict[str, Any]:
-        """Get reservation statistics for a user"""
+    def get_user_reservation_statistics(self, user: str, days: int = 30,
+                                        system: Optional[str] = None) -> Dict[str, Any]:
+        """Get reservation statistics for a user within the given system."""
+        system = self._resolve_system(system)
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         with self.get_session() as session:
             # Get user's reservations
             reservations = session.query(Reservation).filter(
+                Reservation.system == system,
                 Reservation.owner == user,
                 Reservation.last_updated >= cutoff_date
             ).all()
@@ -824,16 +1128,21 @@ class ReservationRepository(BaseRepository):
                 'period_days': days
             }
     
-    def get_recent_reservations(self, limit: int = 100) -> List[Reservation]:
-        """Get recent reservations"""
+    def get_recent_reservations(self, limit: int = 100,
+                                system: Optional[str] = None) -> List[Reservation]:
+        """Get recent reservations within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
-            reservations = session.query(Reservation).order_by(
+            reservations = session.query(Reservation).filter(
+                Reservation.system == system
+            ).order_by(
                 desc(Reservation.last_updated)
             ).limit(limit).all()
             session.expunge_all()
             return reservations
-    
-    def get_potentially_missing_reservations(self, threshold_minutes: int = 30) -> List[Reservation]:
+
+    def get_potentially_missing_reservations(self, threshold_minutes: int = 30,
+                                             system: Optional[str] = None) -> List[Reservation]:
         """
         Get reservations that might be missing from PBS output
         
@@ -848,10 +1157,12 @@ class ReservationRepository(BaseRepository):
         Returns:
             List of potentially missing reservations
         """
+        system = self._resolve_system(system)
         threshold_time = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
-        
+
         with self.get_session() as session:
             reservations = session.query(Reservation).filter(
+                Reservation.system == system,
                 # Active states only
                 Reservation.state.in_([
                     ReservationState.CONFIRMED, ReservationState.RUNNING,
@@ -870,19 +1181,23 @@ class ReservationRepository(BaseRepository):
     def mark_reservation_final_state(self, reservation_id: str, final_state: ReservationState) -> bool:
         """
         Mark a reservation as having reached its final state
-        
+
         Args:
             reservation_id: The reservation ID
             final_state: The final state to set
-            
+
         Returns:
             True if reservation was found and updated
+
+        Write path: scoped to the daemon's configured ``system``.
         """
+        system = self._require_system()
         with self.get_session() as session:
             reservation = session.query(Reservation).filter(
+                Reservation.system == system,
                 Reservation.reservation_id == reservation_id
             ).first()
-            
+
             if reservation:
                 reservation.state = final_state
                 reservation.final_state_recorded = True
@@ -922,12 +1237,17 @@ class ReservationStateInfo:
 
 
 class DataCollectionRepository(BaseRepository):
-    """Repository for data collection logging"""
-    
+    """Repository for data collection logging
+
+    Every log row is tagged with the daemon's ``system``.
+    """
+
     def log_collection_start(self, collection_type: str) -> int:
-        """Log start of data collection"""
+        """Log start of data collection."""
+        system = self._require_system()
         with self.get_session() as session:
             log_entry = DataCollectionLog(
+                system=system,
                 collection_type=collection_type,
                 status=DataCollectionStatus.SUCCESS,  # Will be updated on completion
                 timestamp=datetime.now(timezone.utc)
@@ -954,11 +1274,14 @@ class DataCollectionRepository(BaseRepository):
                 collection_log.error_message = error_message
                 session.commit()
     
-    def get_recent_collections(self, hours: int = 24) -> List[Dict[str, Any]]:
-        """Get recent data collection logs"""
+    def get_recent_collections(self, hours: int = 24,
+                               system: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get recent data collection logs within the given system."""
+        system = self._resolve_system(system)
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
         with self.get_session() as session:
             logs = session.query(DataCollectionLog).filter(
+                DataCollectionLog.system == system,
                 DataCollectionLog.timestamp >= cutoff_time
             ).order_by(desc(DataCollectionLog.timestamp)).all()
             
@@ -977,34 +1300,39 @@ class DataCollectionRepository(BaseRepository):
                 })
             return result
     
-    def get_collection_statistics(self) -> Dict[str, Any]:
-        """Get collection statistics"""
+    def get_collection_statistics(self, system: Optional[str] = None) -> Dict[str, Any]:
+        """Get collection statistics within the given system."""
+        system = self._resolve_system(system)
         with self.get_session() as session:
+            base_filter = (DataCollectionLog.system == system,)
+
             # Count collections by status
             stats = {}
             for status in DataCollectionStatus:
                 count = session.query(DataCollectionLog).filter(
-                    DataCollectionLog.status == status
+                    *base_filter, DataCollectionLog.status == status
                 ).count()
                 stats[f"{status.value}_count"] = count
-            
+
             # Recent success rate
             recent_logs = session.query(DataCollectionLog).filter(
+                *base_filter,
                 DataCollectionLog.timestamp >= datetime.now(timezone.utc) - timedelta(hours=24)
             ).all()
-            
+
             if recent_logs:
                 success_count = sum(1 for log in recent_logs if log.status == DataCollectionStatus.SUCCESS)
                 stats['recent_success_rate'] = success_count / len(recent_logs) * 100
             else:
                 stats['recent_success_rate'] = 0
-            
+
             # Average collection time
             avg_duration = session.query(func.avg(DataCollectionLog.duration_seconds)).filter(
+                *base_filter,
                 DataCollectionLog.duration_seconds.isnot(None)
             ).scalar()
             stats['avg_collection_time_seconds'] = avg_duration or 0
-            
+
             return stats
 
 # Repository factory for easy access
