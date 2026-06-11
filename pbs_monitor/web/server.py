@@ -170,8 +170,15 @@ def _extract_job_score(job, formula: str | None = None) -> float | None:
     return _compute_job_score(raw, formula)
 
 
-def _detect_system_name(db: Session) -> str:
-    """Infer the system name from job IDs in the database."""
+def _detect_system_name(db: Session, config_system: Optional[str] = None) -> str:
+    """Return the PBS system name.
+
+    Prefers the value from ``config.pbs.system`` when available so that
+    the web tier is consistent with the collector and repository layer.
+    Falls back to heuristic inference from job IDs in the DB.
+    """
+    if config_system:
+        return config_system
     sample = db.query(Job.job_id).filter(Job.job_id.isnot(None)).limit(10).all()
     for (jid,) in sample:
         # e.g. "7159563.polaris-pbs-01.hsn.cm.polaris.alcf.anl.gov"
