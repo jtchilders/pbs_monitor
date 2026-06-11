@@ -36,6 +36,7 @@ from contextlib import contextmanager
 from typing import Any, Generator, Iterator, List
 
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import sessionmaker, Session
 
 
@@ -145,18 +146,25 @@ def _valid_dcl_ids(target_engine) -> set[int]:
         return {row[0] for row in result}
 
 
-def _insert_batch(conn, table: str, rows: list[dict]) -> None:
-    """Insert a batch of row dicts into target table using ON CONFLICT DO NOTHING."""
+def _insert_batch(conn, table_obj, rows: list[dict]) -> None:
+    """Insert a batch of row dicts into target table using ON CONFLICT DO NOTHING.
+
+    Uses the PostgreSQL dialect's insert() construct with the SQLAlchemy Table
+    object (reflected from Base.metadata) so that column type adapters fire
+    properly. This matters for JSONB columns like jobs.raw_pbs_data, where
+    bypassing the ORM with raw text-INSERT causes psycopg2 to balk with
+    'can't adapt type dict'.
+
+    Also filters each row dict to only the columns the target Table actually
+    has, so any source-only columns (legacy or otherwise) are silently
+    dropped instead of causing a CompileError.
+    """
     if not rows:
         return
-    cols = list(rows[0].keys())
-    col_names = ", ".join(f'"{c}"' for c in cols)
-    placeholders = ", ".join(f":{c}" for c in cols)
-    stmt = text(
-        f'INSERT INTO "{table}" ({col_names}) VALUES ({placeholders}) '
-        f"ON CONFLICT DO NOTHING"
-    )
-    conn.execute(stmt, rows)
+    valid_cols = {c.name for c in table_obj.columns}
+    filtered = [{k: v for k, v in r.items() if k in valid_cols} for r in rows]
+    stmt = pg_insert(table_obj).on_conflict_do_nothing()
+    conn.execute(stmt, filtered)
 
 
 def _migrate_table(
@@ -189,6 +197,11 @@ def _migrate_table(
             if verbose:
                 print(f"  {table}: {rows_read:,} rows streamed (dry-run)", end="\r")
     else:
+        # Resolve the SQLAlchemy Table object once per table call so the
+        # pg_insert() construct can use it for type adaptation (JSONB etc.).
+        from pbs_monitor.database.models import Base
+        table_obj = Base.metadata.tables[table]
+
         with target_engine.connect() as target_conn:
             target_conn.execution_options(autocommit=False)
 
@@ -205,7 +218,7 @@ def _migrate_table(
                     # Strip source columns not present in target schema
                     # (target may have new columns the source doesn't; extra keys are fine)
 
-                _insert_batch(target_conn, table, batch)
+                _insert_batch(target_conn, table_obj, batch)
                 target_conn.commit()
 
                 rows_written += len(batch)

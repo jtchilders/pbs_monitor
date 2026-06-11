@@ -43,6 +43,7 @@ from contextlib import contextmanager
 from typing import Any, Generator, Iterator
 
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import sessionmaker, Session
 
 
@@ -113,18 +114,19 @@ def _row_stream(engine, table: str, system: str, batch_size: int) -> Iterator[li
             yield [{keys[i]: row[i] for i in range(len(keys))} for row in rows]
 
 
-def _insert_batch(conn, table: str, rows: list[dict]) -> None:
-    """Insert a batch using ON CONFLICT DO NOTHING."""
+def _insert_batch(conn, table_obj, rows: list[dict]) -> None:
+    """Insert a batch using ON CONFLICT DO NOTHING.
+
+    Uses pg_insert(Table) so the ORM's type adapters handle JSONB columns
+    (jobs.raw_pbs_data etc.) correctly. Also filters rows to columns the
+    target Table actually has, dropping any legacy/source-only keys.
+    """
     if not rows:
         return
-    cols = list(rows[0].keys())
-    col_names = ", ".join(f'"{c}"' for c in cols)
-    placeholders = ", ".join(f":{c}" for c in cols)
-    stmt = text(
-        f'INSERT INTO "{table}" ({col_names}) VALUES ({placeholders}) '
-        f"ON CONFLICT DO NOTHING"
-    )
-    conn.execute(stmt, rows)
+    valid_cols = {c.name for c in table_obj.columns}
+    filtered = [{k: v for k, v in r.items() if k in valid_cols} for r in rows]
+    stmt = pg_insert(table_obj).on_conflict_do_nothing()
+    conn.execute(stmt, filtered)
 
 
 def _migrate_table(
@@ -141,6 +143,10 @@ def _migrate_table(
     rows_read = 0
     rows_written = 0
 
+    # Resolve the SA Table object once for type-correct inserts.
+    from pbs_monitor.database.models import Base
+    table_obj = Base.metadata.tables[table]
+
     with target_engine.connect() as tgt:
         tgt.execution_options(autocommit=False)
 
@@ -148,7 +154,7 @@ def _migrate_table(
             rows_read += len(batch)
 
             if not dry_run and batch:
-                _insert_batch(tgt, table, batch)
+                _insert_batch(tgt, table_obj, batch)
                 tgt.commit()
 
             rows_written += len(batch)
