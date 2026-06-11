@@ -20,18 +20,20 @@ from pbs_monitor.database.migrations import DatabaseMigration
 
 
 @pytest.fixture
-def temp_db_config():
+def temp_db_config(tmp_path):
     """Create a temporary database configuration for testing"""
     # Create temporary database file
     temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
     temp_db.close()
-    
-    # Create config with temporary database
-    config = Config()
+
+    # Create config with temporary database. Point at a non-existent
+    # config path so the developer's real ~/.pbs_monitor.yaml is never
+    # picked up by accident.
+    config = Config(config_file=str(tmp_path / "none.yaml"))
     config.database.url = f"sqlite:///{temp_db.name}"
-    
+
     yield config
-    
+
     # Cleanup
     try:
         os.unlink(temp_db.name)
@@ -353,8 +355,10 @@ def test_basic_database_functionality():
     temp_db.close()
     
     try:
-        # Create config
-        config = Config()
+        # Create config; isolate from the developer's real config file.
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as _td:
+            config = Config(config_file=os.path.join(_td, "none.yaml"))
         config.database.url = f"sqlite:///{temp_db.name}"
         
         # Initialize database

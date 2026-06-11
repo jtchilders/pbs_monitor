@@ -171,20 +171,25 @@ class TestPBSNode:
 
 class TestConfig:
    """Test configuration management"""
-   
-   def test_config_creation(self):
+
+   # Use an explicit non-existent path so tests don't accidentally pick
+   # up the developer's real ~/.pbs_monitor.yaml.
+   def _isolated_config(self, tmp_path):
+      return Config(config_file=str(tmp_path / "none.yaml"))
+
+   def test_config_creation(self, tmp_path):
       """Test config creation"""
-      config = Config()
-      
+      config = self._isolated_config(tmp_path)
+
       assert config.pbs.command_timeout == 30
       assert config.display.use_colors == True
       assert config.logging.level == "INFO"
-   
-   def test_config_log_level(self):
+
+   def test_config_log_level(self, tmp_path):
       """Test log level conversion"""
-      config = Config()
+      config = self._isolated_config(tmp_path)
       config.logging.level = "DEBUG"
-      
+
       import logging
       assert config.get_log_level() == logging.DEBUG
 
@@ -229,14 +234,15 @@ class TestCLI:
    def test_cli_help(self, mock_collector):
       """Test CLI help output"""
       from pbs_monitor.cli.main import main
-      
+
       # Mock collector to avoid PBS connection
       mock_collector.return_value.test_connection.return_value = True
-      
-      # Test help output
-      result = main(['--help'])
-      # Should exit with code 0 for help
-      assert result == 0 or result is None  # argparse may not return exit code
+
+      # argparse raises SystemExit(0) on --help; that's the expected
+      # outcome, not a failure.
+      with pytest.raises(SystemExit) as exc_info:
+         main(['--help'])
+      assert exc_info.value.code == 0
 
 
 if __name__ == '__main__':

@@ -3,6 +3,8 @@ Configuration management for PBS Monitor
 """
 
 import os
+import re
+import stat
 import yaml
 import logging
 from typing import Dict, Any, Optional, List
@@ -10,10 +12,62 @@ from pathlib import Path
 from dataclasses import dataclass, field
 
 
+class InsecureConfigError(Exception):
+   """Raised when a config file containing credentials has overly
+   permissive filesystem permissions (group or other can read).
+
+   Bypass with ``allow_insecure=True`` only for debugging.
+   """
+
+
+# Matches a SQLAlchemy URL that embeds inline credentials, e.g.
+# postgresql://user:password@host/db. We treat any URL with a non-empty
+# password segment as credential-bearing.
+_CREDENTIAL_URL_RE = re.compile(
+   r"^[a-zA-Z][a-zA-Z0-9+.-]*://[^:/?#@]+:[^@/?#]+@",
+)
+
+
+def _config_contains_credentials(config_data: Optional[Dict[str, Any]]) -> bool:
+   """Return True if the loaded YAML contains a credential-bearing DB URL."""
+   if not config_data:
+      return False
+   db_section = config_data.get("database") or {}
+   url = db_section.get("url") if isinstance(db_section, dict) else None
+   if not isinstance(url, str):
+      return False
+   return bool(_CREDENTIAL_URL_RE.match(url))
+
+
+def _check_config_permissions(path: str) -> None:
+   """Refuse to load if ``path`` is readable by group or other.
+
+   Only invoked when the file contains inline credentials. Raises
+   :class:`InsecureConfigError` with a remediation hint.
+   """
+   try:
+      mode = os.stat(path).st_mode
+   except OSError:
+      return  # No file → nothing to check; caller handles absence.
+   # Reject ANY group/other permission bits.
+   if mode & (stat.S_IRWXG | stat.S_IRWXO):
+      perms = oct(mode & 0o777)
+      raise InsecureConfigError(
+         f"{path} contains database credentials but has permissions "
+         f"{perms} (group/other can read). Run: chmod 600 {path}"
+      )
+
+
 @dataclass
 class PBSConfig:
    """PBS system configuration"""
-   
+
+   # Logical name of the PBS system this daemon is collecting from.
+   # Used to tag every row written to the database so that a single
+   # multi-system database can host data from Polaris, Aurora, etc.
+   # without identifier collisions. Required; no sensible default.
+   system: Optional[str] = None
+
    # PBS command paths (if not in PATH)
    qstat_path: str = "qstat"
    qsub_path: str = "qsub"
@@ -131,23 +185,32 @@ class LoggingConfig:
 
 class Config:
    """Main configuration manager"""
-   
-   def __init__(self, config_file: Optional[str] = None):
+
+   def __init__(
+      self,
+      config_file: Optional[str] = None,
+      allow_insecure_config: bool = False,
+   ):
       """
       Initialize configuration
-      
+
       Args:
-         config_file: Path to configuration file
+         config_file: Path to configuration file.
+         allow_insecure_config: If True, skip the permission check that
+            normally refuses to load a credential-bearing config file
+            with group/other read permissions. Intended for debugging
+            only; production deployments should use ``chmod 600``.
       """
       self.config_file = config_file or self._get_default_config_path()
+      self.allow_insecure_config = allow_insecure_config
       self.logger = logging.getLogger(__name__)
-      
+
       # Initialize default configurations
       self.pbs = PBSConfig()
       self.display = DisplayConfig()
       self.logging = LoggingConfig()
       self.database = DatabaseConfig()
-      
+
       # Load configuration from file
       self._load_config()
    
@@ -169,18 +232,28 @@ class Config:
       return config_paths[0]
    
    def _load_config(self) -> None:
-      """Load configuration from file"""
+      """Load configuration from file
+
+      Raises:
+         InsecureConfigError: if the file embeds DB credentials and is
+            readable by group or other (and ``allow_insecure_config``
+            is False).
+      """
       if not os.path.exists(self.config_file):
          self.logger.debug(f"Configuration file not found: {self.config_file}")
          return
-      
+
       try:
          with open(self.config_file, 'r') as f:
             config_data = yaml.safe_load(f)
-         
+
          if not config_data:
             return
-         
+
+         # Refuse to use a credential-bearing config that's world/group readable.
+         if _config_contains_credentials(config_data) and not self.allow_insecure_config:
+            _check_config_permissions(self.config_file)
+
          # Update PBS configuration
          if 'pbs' in config_data:
             self._update_config_object(self.pbs, config_data['pbs'])
@@ -198,7 +271,11 @@ class Config:
             self._update_config_object(self.database, config_data['database'])
          
          self.logger.info(f"Configuration loaded from {self.config_file}")
-         
+
+      except InsecureConfigError:
+         # Surface the security failure to the caller instead of
+         # silently degrading to defaults. Logged at error level too.
+         raise
       except Exception as e:
          self.logger.error(f"Failed to load configuration: {str(e)}")
    
@@ -241,6 +318,10 @@ class Config:
       """Create a sample configuration file"""
       sample_config = {
          'pbs': {
+            # REQUIRED: logical name of the PBS system this daemon
+            # collects from (e.g. "polaris", "aurora"). Used to tag
+            # every row written to the database.
+            'system': 'polaris',
             'command_timeout': 30,
             'default_queue': 'default',
             'job_refresh_interval': 30,

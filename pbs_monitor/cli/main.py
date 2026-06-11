@@ -74,6 +74,13 @@ Examples:
       action="store_true",
       help="Use sample JSON data instead of actual PBS commands (for testing)"
    )
+
+   parser.add_argument(
+      "--allow-insecure-config",
+      action="store_true",
+      help="Skip the permission check that refuses to load a credential-bearing "
+           "config file with group/other read access. For debugging only."
+   )
    
    # Table width control options
    parser.add_argument(
@@ -1206,7 +1213,10 @@ def main(argv: Optional[List[str]] = None) -> int:
    
    # Load configuration
    try:
-      config = Config(config_file=args.config)
+      config = Config(
+         config_file=args.config,
+         allow_insecure_config=args.allow_insecure_config,
+      )
    except Exception as e:
       print(f"Error loading configuration: {str(e)}", file=sys.stderr)
       return 1
