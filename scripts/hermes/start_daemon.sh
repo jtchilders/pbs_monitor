@@ -75,8 +75,8 @@ if [[ ! -f "$BRIDGE_PID_FILE" ]]; then
     sleep 2  # give it a moment to establish
 fi
 
-# Quick connectivity check
-if ! nc -z localhost "$BRIDGE_PORT" 2>/dev/null; then
+# Quick connectivity check using bash /dev/tcp (Polaris login nodes have no nc).
+if ! (echo >"/dev/tcp/localhost/$BRIDGE_PORT") 2>/dev/null; then
     echo "WARNING: Cannot reach localhost:$BRIDGE_PORT — port-forward may not be ready yet."
     echo "If this is the first OIDC login, a browser window may open for authentication."
     echo "Wait a few seconds then re-run this script if the daemon fails to connect."

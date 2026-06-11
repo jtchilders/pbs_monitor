@@ -44,7 +44,9 @@ else
     echo "  Status : NOT STARTED (no PID file)"
 fi
 
-if nc -z localhost "$BRIDGE_PORT" 2>/dev/null; then
+# Use bash's /dev/tcp pseudo-device so we don't depend on 'nc' being installed
+# (it isn't on Polaris login nodes).
+if (echo >"/dev/tcp/localhost/$BRIDGE_PORT") 2>/dev/null; then
     echo "  Network: reachable"
 else
     echo "  Network: NOT REACHABLE on localhost:$BRIDGE_PORT"
