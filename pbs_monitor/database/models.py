@@ -9,8 +9,9 @@ for Phase 2 of the PBS Monitor project.
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Union
 from sqlalchemy import (
-    create_engine, Column, Integer, String, DateTime, Float, Boolean, 
-    Text, ForeignKey, Index, UniqueConstraint, JSON, Enum as SQLEnum
+    create_engine, Column, Integer, String, DateTime, Float, Boolean,
+    Text, ForeignKey, ForeignKeyConstraint, Index, PrimaryKeyConstraint,
+    UniqueConstraint, JSON, Enum as SQLEnum
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker, Session
@@ -111,14 +112,23 @@ class DataCollectionStatus(enum.Enum):
 class Job(Base):
     """
     Core job tracking table - represents the current/final state of jobs
-    
+
     This table maintains one record per job, updated as job progresses.
     Historical state changes are tracked in job_history table.
+
+    Multi-system: rows are keyed on (system, job_id). The natural PBS
+    job_id is already an FQDN that embeds the source cluster, but the
+    explicit ``system`` column lets the dashboard filter and aggregate
+    by cluster without parsing strings. See migration_plan.md §2.
     """
     __tablename__ = 'jobs'
-    
+
+    # Multi-system tag (e.g. 'polaris', 'aurora'). Part of the
+    # composite PK; required at insert time — no DB-level default.
+    system = Column(String(32), nullable=False)
+
     # Primary identifiers
-    job_id = Column(String(100), primary_key=True)
+    job_id = Column(String(100), nullable=False)
     job_name = Column(String(200))
     owner = Column(String(50), index=True)
     project = Column(String(100), index=True, nullable=True)  # From Account_Name
@@ -159,15 +169,17 @@ class Job(Base):
     
     # Relationships
     history = relationship("JobHistory", back_populates="job", order_by="JobHistory.timestamp")
-    
-    # Indexes
+
+    # Composite PK + indexes. All multi-column indexes lead with
+    # ``system`` so per-system filtered queries stay fast.
     __table_args__ = (
-        Index('ix_jobs_owner_state', 'owner', 'state'),
-        Index('ix_jobs_submit_time', 'submit_time'),
-        Index('ix_jobs_queue_state', 'queue', 'state'),
-        Index('ix_jobs_final_state', 'final_state_recorded'),
-        Index('ix_jobs_project_state', 'project', 'state'),
-        Index('ix_jobs_allocation_type_state', 'allocation_type', 'state'),
+        PrimaryKeyConstraint('system', 'job_id'),
+        Index('ix_jobs_system_owner_state', 'system', 'owner', 'state'),
+        Index('ix_jobs_system_submit_time', 'system', 'submit_time'),
+        Index('ix_jobs_system_queue_state', 'system', 'queue', 'state'),
+        Index('ix_jobs_system_final_state', 'system', 'final_state_recorded'),
+        Index('ix_jobs_system_project_state', 'system', 'project', 'state'),
+        Index('ix_jobs_system_allocation_type_state', 'system', 'allocation_type', 'state'),
     )
     
     def is_active(self) -> bool:
@@ -197,48 +209,62 @@ class Job(Base):
 class JobHistory(Base):
     """
     Historical job state changes - tracks job lifecycle
-    
+
     Every time we see a job in PBS, we record its state here.
     This allows us to track state transitions and calculate metrics.
+
+    Multi-system: surrogate ``id`` PK kept (it's just a row counter);
+    the meaningful FK to ``jobs`` is now composite ``(system, job_id)``.
     """
     __tablename__ = 'job_history'
-    
+
     id = Column(Integer, primary_key=True)
-    job_id = Column(String(100), ForeignKey('jobs.job_id'), index=True)
+    # Composite FK to jobs(system, job_id); both columns required.
+    system = Column(String(32), nullable=False, index=True)
+    job_id = Column(String(100), nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), default=func.now())
-    
+
     # State at this point in time
     state = Column(SQLEnum(JobState))
     queue = Column(String(50))
     priority = Column(Integer)
     execution_node = Column(Text)  # Multi-node strings can exceed 10k chars
-    
+
     # PBS score (if available)
     score = Column(Float)
-    
+
     # System info
     data_collection_id = Column(Integer, ForeignKey('data_collection_log.id'))
-    
+
     # Relationships
     job = relationship("Job", back_populates="history")
     collection_event = relationship("DataCollectionLog")
-    
-    # Indexes
+
+    # Composite FK + indexes leading with ``system``.
     __table_args__ = (
-        Index('ix_job_history_job_timestamp', 'job_id', 'timestamp'),
-        Index('ix_job_history_state_timestamp', 'state', 'timestamp'),
+        ForeignKeyConstraint(
+            ['system', 'job_id'],
+            ['jobs.system', 'jobs.job_id'],
+        ),
+        Index('ix_job_history_system_job_timestamp', 'system', 'job_id', 'timestamp'),
+        Index('ix_job_history_system_state_timestamp', 'system', 'state', 'timestamp'),
     )
 
 class Queue(Base):
     """
     Queue configuration and limits
-    
+
     Stores queue properties that change infrequently.
     Current utilization is tracked in queue_snapshots.
+
+    Multi-system: composite PK ``(system, name)`` so queue names can
+    repeat across clusters (e.g. both Polaris and Aurora have a
+    ``debug`` queue).
     """
     __tablename__ = 'queues'
-    
-    name = Column(String(100), primary_key=True)
+
+    system = Column(String(32), nullable=False)
+    name = Column(String(100), nullable=False)
     queue_type = Column(String(50), default="execution")
     
     # Limits (null means unlimited)
@@ -260,10 +286,14 @@ class Queue(Base):
     
     # Raw data
     raw_pbs_data = Column(FlexJSON)
-    
+
     # Relationships
     snapshots = relationship("QueueSnapshot", back_populates="queue")
-    
+
+    __table_args__ = (
+        PrimaryKeyConstraint('system', 'name'),
+    )
+
     def is_enabled(self) -> bool:
         """Check if queue is enabled (from latest snapshot)"""
         if not self.snapshots:
@@ -281,14 +311,17 @@ class Queue(Base):
 class QueueSnapshot(Base):
     """
     Point-in-time queue utilization snapshots
-    
+
     Captures queue state and job counts at regular intervals.
     Used for historical trend analysis and capacity planning.
+
+    Multi-system: FK to ``queues`` is now composite ``(system, queue_name)``.
     """
     __tablename__ = 'queue_snapshots'
-    
+
     id = Column(Integer, primary_key=True)
-    queue_name = Column(String(100), ForeignKey('queues.name'), index=True)
+    system = Column(String(32), nullable=False, index=True)
+    queue_name = Column(String(100), nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), default=func.now())
     
     # State
@@ -310,69 +343,100 @@ class QueueSnapshot(Base):
     # Relationships
     queue = relationship("Queue", back_populates="snapshots")
     collection_event = relationship("DataCollectionLog")
-    
-    # Indexes
+
     __table_args__ = (
-        Index('ix_queue_snapshots_name_timestamp', 'queue_name', 'timestamp'),
+        ForeignKeyConstraint(
+            ['system', 'queue_name'],
+            ['queues.system', 'queues.name'],
+        ),
+        Index('ix_queue_snapshots_system_name_timestamp', 'system', 'queue_name', 'timestamp'),
     )
 
 class Node(Base):
     """
     Compute node configuration and properties
-    
+
     Stores node hardware specs and properties that change infrequently.
     Current utilization is tracked in node_snapshots.
+
+    Multi-system: composite PK ``(system, name)``. ``snapshot_index``
+    becomes unique per-system rather than globally unique, since each
+    cluster has its own independent slot ordering inside its compact
+    NodeSnapshot encoding.
     """
     __tablename__ = 'nodes'
-    
-    name = Column(String(100), primary_key=True)
-    
+
+    system = Column(String(32), nullable=False)
+    name = Column(String(100), nullable=False)
+
     # Hardware specs
     ncpus = Column(Integer)
     memory_gb = Column(Float)
-    
+
     # Properties and features
     properties = Column(FlexJSON)
-    
+
     # Tracking
     first_seen = Column(DateTime(timezone=True), default=func.now())
     last_updated = Column(DateTime(timezone=True), default=func.now(), onupdate=func.now())
     is_active = Column(Boolean, default=True)
-    snapshot_index = Column(Integer, unique=True)
-    
+    # No longer ``unique=True`` — see UniqueConstraint below.
+    snapshot_index = Column(Integer)
+
     # Raw data
     raw_pbs_data = Column(FlexJSON)
-    
+
     # Relationships (node snapshots now stored in compact form)
+
+    __table_args__ = (
+        PrimaryKeyConstraint('system', 'name'),
+        # Slot ordering inside NodeSnapshot.snapshot_data is per-system.
+        UniqueConstraint('system', 'snapshot_index',
+                         name='uq_nodes_system_snapshot_index'),
+    )
 
 class NodeSnapshot(Base):
     """
     Point-in-time node utilization snapshots
-    
+
     Encodes the state of all nodes as a compact string, where each character
     represents the NodeState of the node assigned to that slot.
+
+    Multi-system: each snapshot belongs to exactly one cluster. The
+    slot ordering in ``snapshot_data`` is determined by
+    ``nodes.snapshot_index`` for that cluster, so a single snapshot row
+    cannot mix multiple systems. No FK to ``nodes`` (this table holds
+    one blob per cluster per timestamp, not row-per-node).
     """
     __tablename__ = 'node_snapshots'
-    
+
     id = Column(Integer, primary_key=True)
+    system = Column(String(32), nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), default=func.now(), index=True)
     snapshot_data = Column(Text, nullable=False)
     node_count = Column(Integer, default=0)
     data_collection_id = Column(Integer, ForeignKey('data_collection_log.id'))
-    
+
     # Relationships
     collection_event = relationship("DataCollectionLog")
+
+    __table_args__ = (
+        Index('ix_node_snapshots_system_timestamp', 'system', 'timestamp'),
+    )
     
 class SystemSnapshot(Base):
     """
     Overall system state snapshots
-    
+
     Captures high-level system metrics for trend analysis.
     Pre-computed aggregations for dashboard and ML features.
+
+    Multi-system: one row per (system, timestamp).
     """
     __tablename__ = 'system_snapshots'
-    
+
     id = Column(Integer, primary_key=True)
+    system = Column(String(32), nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), default=func.now())
     
     # Job statistics
@@ -400,10 +464,9 @@ class SystemSnapshot(Base):
     
     # Relationships
     collection_event = relationship("DataCollectionLog")
-    
-    # Indexes
+
     __table_args__ = (
-        Index('ix_system_snapshots_timestamp', 'timestamp'),
+        Index('ix_system_snapshots_system_timestamp', 'system', 'timestamp'),
     )
 
 class Reservation(Base):
@@ -414,9 +477,12 @@ class Reservation(Base):
     Historical state changes tracked in reservation_history table.
     """
     __tablename__ = 'reservations'
-    
+
+    # Multi-system tag; part of composite PK.
+    system = Column(String(32), nullable=False)
+
     # Primary identifiers
-    reservation_id = Column(String(200), primary_key=True)  # Full ID can be long
+    reservation_id = Column(String(200), nullable=False)  # Full ID can be long
     reservation_name = Column(String(200))
     owner = Column(String(50), index=True)
     
@@ -457,52 +523,57 @@ class Reservation(Base):
     # Relationships
     history = relationship("ReservationHistory", back_populates="reservation", order_by="ReservationHistory.timestamp")
     utilization_analyses = relationship("ReservationUtilization", back_populates="reservation")
-    
-    # Indexes
+
     __table_args__ = (
-        Index('ix_reservations_owner_state', 'owner', 'state'),
-        Index('ix_reservations_start_end', 'start_time', 'end_time'),
-        Index('ix_reservations_state_updated', 'state', 'last_updated'),
+        PrimaryKeyConstraint('system', 'reservation_id'),
+        Index('ix_reservations_system_owner_state', 'system', 'owner', 'state'),
+        Index('ix_reservations_system_start_end', 'system', 'start_time', 'end_time'),
+        Index('ix_reservations_system_state_updated', 'system', 'state', 'last_updated'),
     )
 
 class ReservationHistory(Base):
     """
     Historical reservation state changes - tracks reservation lifecycle
-    
+
     Similar to job_history but for reservations.
     """
     __tablename__ = 'reservation_history'
-    
+
     id = Column(Integer, primary_key=True)
-    reservation_id = Column(String(200), ForeignKey('reservations.reservation_id'), index=True)
+    system = Column(String(32), nullable=False, index=True)
+    reservation_id = Column(String(200), nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), default=func.now())
-    
+
     # State at this point in time
     state = Column(SQLEnum(ReservationState))
-    
+
     # System info
     data_collection_id = Column(Integer, ForeignKey('data_collection_log.id'))
-    
+
     # Relationships
     reservation = relationship("Reservation", back_populates="history")
     collection_event = relationship("DataCollectionLog")
-    
-    # Indexes
+
     __table_args__ = (
-        Index('ix_reservation_history_reservation_timestamp', 'reservation_id', 'timestamp'),
-        Index('ix_reservation_history_state_timestamp', 'state', 'timestamp'),
+        ForeignKeyConstraint(
+            ['system', 'reservation_id'],
+            ['reservations.system', 'reservations.reservation_id'],
+        ),
+        Index('ix_reservation_history_system_resv_timestamp', 'system', 'reservation_id', 'timestamp'),
+        Index('ix_reservation_history_system_state_timestamp', 'system', 'state', 'timestamp'),
     )
 
 class ReservationUtilization(Base):
     """
     Reservation utilization analysis results
-    
+
     Stores calculated metrics about how well reservations were used.
     """
     __tablename__ = 'reservation_utilization'
-    
+
     id = Column(Integer, primary_key=True)
-    reservation_id = Column(String(200), ForeignKey('reservations.reservation_id'), index=True)
+    system = Column(String(32), nullable=False, index=True)
+    reservation_id = Column(String(200), nullable=False, index=True)
     analysis_timestamp = Column(DateTime(timezone=True), default=func.now())
     
     # Utilization metrics
@@ -534,23 +605,29 @@ class ReservationUtilization(Base):
     
     # Relationships
     reservation = relationship("Reservation", back_populates="utilization_analyses")
-    
-    # Indexes
+
     __table_args__ = (
-        Index('ix_reservation_utilization_reservation_analysis', 'reservation_id', 'analysis_timestamp'),
-        Index('ix_reservation_utilization_utilization', 'utilization_percentage'),
+        ForeignKeyConstraint(
+            ['system', 'reservation_id'],
+            ['reservations.system', 'reservations.reservation_id'],
+        ),
+        Index('ix_reservation_util_system_resv_analysis', 'system', 'reservation_id', 'analysis_timestamp'),
+        Index('ix_reservation_util_system_utilization', 'system', 'utilization_percentage'),
     )
 
 class DataCollectionLog(Base):
     """
     Log of data collection events
-    
+
     Tracks when data was collected, what was collected, and any errors.
     Used for debugging and ensuring data quality.
+
+    Multi-system: each row records work done by one cluster's daemon.
     """
     __tablename__ = 'data_collection_log'
-    
+
     id = Column(Integer, primary_key=True)
+    system = Column(String(32), nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), default=func.now())
     
     # Collection details
@@ -570,12 +647,11 @@ class DataCollectionLog(Base):
     error_message = Column(Text)
     error_details = Column(FlexJSON)
     
-    # Indexes
     __table_args__ = (
-        Index('ix_data_collection_timestamp', 'timestamp'),
-        Index('ix_data_collection_status', 'status'),
+        Index('ix_data_collection_system_timestamp', 'system', 'timestamp'),
+        Index('ix_data_collection_system_status', 'system', 'status'),
     )
-    
+
     def is_successful(self) -> bool:
         """Check if collection was successful"""
         return self.status == DataCollectionStatus.SUCCESS
