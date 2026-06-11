@@ -24,7 +24,7 @@ import time as _time
 import json as _json
 
 from pbs_monitor.database.models import (
-    Job, JobState, Node, NodeSnapshot, SystemSnapshot,
+    Job, JobHistory, JobState, Node, NodeSnapshot, SystemSnapshot,
     DataCollectionLog, Reservation, ReservationUtilization,
 )
 
@@ -181,17 +181,15 @@ def _detect_system_name(db: Session) -> str:
     return "unknown"
 
 
-def _build_topology(db: Session) -> dict:
+def _build_topology(db: Session, system: Optional[str] = None) -> dict:
     """
     Build rack topology from Cray node naming conventions.
     Returns {rack_names: [...], nodes_per_rack: [...]}
     """
-    nodes = (
-        db.query(Node.name)
-        .filter(Node.name.like('x%'))
-        .order_by(Node.snapshot_index)
-        .all()
-    )
+    q = db.query(Node.name).filter(Node.name.like('x%'))
+    if system:
+        q = q.filter(Node.system == system)
+    nodes = q.order_by(Node.snapshot_index).all()
     rack_map: dict[str, list[str]] = {}
     for (name,) in nodes:
         rack_id = name[:5]  # e.g. 'x3001'
@@ -202,14 +200,12 @@ def _build_topology(db: Session) -> dict:
     return {"rack_names": rack_names, "nodes_per_rack": nodes_per_rack}
 
 
-def _build_node_index(db: Session) -> tuple[list[str], list[int]]:
+def _build_node_index(db: Session, system: Optional[str] = None) -> tuple[list[str], list[int]]:
     """Ordered compute node names and their snapshot_data indices."""
-    rows = (
-        db.query(Node.name, Node.snapshot_index)
-        .filter(Node.name.like('x%'))
-        .order_by(Node.snapshot_index)
-        .all()
-    )
+    q = db.query(Node.name, Node.snapshot_index).filter(Node.name.like('x%'))
+    if system:
+        q = q.filter(Node.system == system)
+    rows = q.order_by(Node.snapshot_index).all()
     names = [r.name for r in rows]
     indices = [r.snapshot_index for r in rows]
     return names, indices
@@ -226,6 +222,10 @@ def create_app(config=None) -> FastAPI:
     if config is None:
         from pbs_monitor.config import Config
         config = Config()
+
+    # System name captured once at app creation time; all closures below
+    # use this to scope their SA queries to the correct cluster.
+    _system: Optional[str] = getattr(getattr(config, 'pbs', None), 'system', None)
 
     db_url = config.database.url
     connect_args: dict[str, Any] = {}
@@ -343,16 +343,18 @@ def create_app(config=None) -> FastAPI:
         if _system_cache:
             return _system_cache
 
-        system_name = _detect_system_name(db)
-        total_nodes = db.query(func.count(Node.name)).filter(Node.name.like('x%')).scalar() or 0
-        topology = _build_topology(db)
-        node_names, snapshot_indices = _build_node_index(db)
+        system_name = _detect_system_name(db, _system)
+        q_nodes = db.query(func.count(Node.name)).filter(Node.name.like('x%'))
+        if _system:
+            q_nodes = q_nodes.filter(Node.system == _system)
+        total_nodes = q_nodes.scalar() or 0
+        topology = _build_topology(db, _system)
+        node_names, snapshot_indices = _build_node_index(db, _system)
 
-        last_log = (
-            db.query(DataCollectionLog.timestamp)
-            .order_by(DataCollectionLog.timestamp.desc())
-            .first()
-        )
+        dcl_q = db.query(DataCollectionLog.timestamp)
+        if _system:
+            dcl_q = dcl_q.filter(DataCollectionLog.system == _system)
+        last_log = dcl_q.order_by(DataCollectionLog.timestamp.desc()).first()
 
         # CPUs per node by system — used for job misconfiguration detection
         CPUS_PER_NODE_BY_SYSTEM = {
@@ -392,23 +394,22 @@ def create_app(config=None) -> FastAPI:
             _populate_system_cache(db)
 
         # --- freshest data timestamp ---
-        latest_collection = (
-            db.query(func.max(DataCollectionLog.timestamp)).scalar()
-        )
+        _dcl_q = db.query(func.max(DataCollectionLog.timestamp))
+        if _system:
+            _dcl_q = _dcl_q.filter(DataCollectionLog.system == _system)
+        latest_collection = _dcl_q.scalar()
 
         # --- system aggregate ---
-        sys_snap = (
-            db.query(SystemSnapshot)
-            .order_by(SystemSnapshot.timestamp.desc())
-            .first()
-        )
+        _ss_q = db.query(SystemSnapshot)
+        if _system:
+            _ss_q = _ss_q.filter(SystemSnapshot.system == _system)
+        sys_snap = _ss_q.order_by(SystemSnapshot.timestamp.desc()).first()
 
         # --- node state string ---
-        node_snap = (
-            db.query(NodeSnapshot)
-            .order_by(NodeSnapshot.timestamp.desc())
-            .first()
-        )
+        _ns_q = db.query(NodeSnapshot)
+        if _system:
+            _ns_q = _ns_q.filter(NodeSnapshot.system == _system)
+        node_snap = _ns_q.order_by(NodeSnapshot.timestamp.desc()).first()
         state_string = node_snap.snapshot_data if node_snap else ""
 
         # State counts — only for compute nodes (use their snapshot indices)
@@ -421,15 +422,19 @@ def create_app(config=None) -> FastAPI:
                 state_counts[label] = state_counts.get(label, 0) + 1
 
         # --- node name → snapshot_index lookup (compute nodes only) ---
+        _nm_q = db.query(Node.name, Node.snapshot_index).filter(Node.name.like('x%'))
+        if _system:
+            _nm_q = _nm_q.filter(Node.system == _system)
         node_map: dict[str, int] = {
             n.name: n.snapshot_index
-            for n in db.query(Node.name, Node.snapshot_index)
-            .filter(Node.name.like('x%'))
-            .all()
+            for n in _nm_q.all()
         }
 
         # --- running jobs ---
-        running_rows = db.query(Job).filter(Job.state == JobState.RUNNING).all()
+        _rj_q = db.query(Job).filter(Job.state == JobState.RUNNING)
+        if _system:
+            _rj_q = _rj_q.filter(Job.system == _system)
+        running_rows = _rj_q.all()
         running_jobs = []
         for job in running_rows:
             elapsed = 0
@@ -474,7 +479,10 @@ def create_app(config=None) -> FastAPI:
             })
 
         # --- queued jobs (full detail for table) ---
-        queued_rows = db.query(Job).filter(Job.state == JobState.QUEUED).all()
+        _qj_q = db.query(Job).filter(Job.state == JobState.QUEUED)
+        if _system:
+            _qj_q = _qj_q.filter(Job.system == _system)
+        queued_rows = _qj_q.all()
         queued_jobs = []
         for job in queued_rows:
             queue_time = 0
@@ -510,7 +518,10 @@ def create_app(config=None) -> FastAPI:
             })
 
         # --- held jobs count ---
-        held_count = db.query(func.count(Job.job_id)).filter(Job.state == JobState.HELD).scalar() or 0
+        _hc_q = db.query(func.count(Job.job_id)).filter(Job.state == JobState.HELD)
+        if _system:
+            _hc_q = _hc_q.filter(Job.system == _system)
+        held_count = _hc_q.scalar() or 0
 
         # --- queue node-hours for queue status bars ---
         def _job_node_hours(job) -> float:
@@ -532,7 +543,10 @@ def create_app(config=None) -> FastAPI:
             q = job.queue or ""
             nh_queued[q] = nh_queued.get(q, 0) + _job_node_hours(job)
 
-        held_rows = db.query(Job).filter(Job.state == JobState.HELD).all()
+        _hr_q = db.query(Job).filter(Job.state == JobState.HELD)
+        if _system:
+            _hr_q = _hr_q.filter(Job.system == _system)
+        held_rows = _hr_q.all()
         held_jobs = []
         for job in held_rows:
             q = job.queue or ""
@@ -605,10 +619,13 @@ def create_app(config=None) -> FastAPI:
 
     @app.get("/api/jobs/{job_id}")
     def api_job_detail(job_id: str, db: Session = Depends(get_db)):
-        # Try exact match first, then with short id
-        job = db.query(Job).filter(Job.job_id == job_id).first()
+        # Try exact match first, then with short id; scope to configured system.
+        _jd_base = db.query(Job)
+        if _system:
+            _jd_base = _jd_base.filter(Job.system == _system)
+        job = _jd_base.filter(Job.job_id == job_id).first()
         if not job:
-            job = db.query(Job).filter(Job.job_id.like(f"{job_id}.%")).first()
+            job = _jd_base.filter(Job.job_id.like(f"{job_id}.%")).first()
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
 
@@ -835,6 +852,8 @@ def create_app(config=None) -> FastAPI:
         """Shared job query for user/project endpoints."""
         since = _date_range(range_days)
         q = db.query(Job).filter(filter_col == filter_val).filter(Job.submit_time >= since)
+        if _system:
+            q = q.filter(Job.system == _system)
         if state_filter and state_filter.upper() != "ALL":
             # Map frontend state string to JobState enum value
             state_map = {
@@ -855,9 +874,10 @@ def create_app(config=None) -> FastAPI:
         range: int = Query(7, ge=1, le=90),
         db: Session = Depends(get_db),
     ):
-        jobs = db.query(Job).filter(Job.owner == username).filter(
-            Job.submit_time >= _date_range(range)
-        ).all()
+        _us_q = db.query(Job).filter(Job.owner == username).filter(Job.submit_time >= _date_range(range))
+        if _system:
+            _us_q = _us_q.filter(Job.system == _system)
+        jobs = _us_q.all()
         return _build_summary(jobs, username, "user", range)
 
     @app.get("/api/user/{username}/jobs")
@@ -877,9 +897,10 @@ def create_app(config=None) -> FastAPI:
         range: int = Query(7, ge=1, le=90),
         db: Session = Depends(get_db),
     ):
-        jobs = db.query(Job).filter(Job.project == project).filter(
-            Job.submit_time >= _date_range(range)
-        ).all()
+        _ps_q = db.query(Job).filter(Job.project == project).filter(Job.submit_time >= _date_range(range))
+        if _system:
+            _ps_q = _ps_q.filter(Job.system == _system)
+        jobs = _ps_q.all()
         return _build_summary(jobs, project, "project", range)
 
     @app.get("/api/project/{project}/jobs")
@@ -903,7 +924,7 @@ def create_app(config=None) -> FastAPI:
 
         # Fetch reservations via ORM (dialect-safe; avoids raw SQL string functions
         # like strpos/substr which differ between SQLite and Postgres)
-        reservations = db.query(Reservation).filter(
+        _resv_q = db.query(Reservation).filter(
             or_(
                 # currently active: started, not yet ended
                 and_(Reservation.start_time <= now,
@@ -913,7 +934,10 @@ def create_app(config=None) -> FastAPI:
                 # recently ended (within 14 days)
                 Reservation.end_time >= cutoff,
             )
-        ).order_by(Reservation.start_time.desc()).all()
+        )
+        if _system:
+            _resv_q = _resv_q.filter(Reservation.system == _system)
+        reservations = _resv_q.order_by(Reservation.start_time.desc()).all()
 
         # Build a lookup of the most recent utilization analysis per reservation.
         # This uses the reservation_utilization cache table populated by
@@ -986,7 +1010,7 @@ def create_app(config=None) -> FastAPI:
                 jobs_submitted = 0
                 node_hours_used = 0.0
                 if r.queue:
-                    agg = db.query(
+                    _agg_q = db.query(
                         safunc.count(Job.job_id),
                         safunc.sum(
                             safunc.coalesce(
@@ -994,7 +1018,10 @@ def create_app(config=None) -> FastAPI:
                                 0.0
                             )
                         )
-                    ).filter(Job.queue == r.queue).one()
+                    ).filter(Job.queue == r.queue)
+                    if _system:
+                        _agg_q = _agg_q.filter(Job.system == _system)
+                    agg = _agg_q.one()
                     jobs_submitted  = agg[0] or 0
                     node_hours_used = round(float(agg[1] or 0), 1)
 
@@ -1046,7 +1073,10 @@ def create_app(config=None) -> FastAPI:
     def _get_total_nodes(db: Session) -> int:
         if _time.time() - _tnc["ts"] < 300 and _tnc["value"] is not None:
             return _tnc["value"]
-        count = db.query(func.count(Node.name)).filter(Node.name.like('x%')).scalar() or 0
+        _tn_q = db.query(func.count(Node.name)).filter(Node.name.like('x%'))
+        if _system:
+            _tn_q = _tn_q.filter(Node.system == _system)
+        count = _tn_q.scalar() or 0
         _tnc["value"] = count
         _tnc["ts"] = _time.time()
         return count
@@ -1123,6 +1153,8 @@ def create_app(config=None) -> FastAPI:
             base = db.query(Job).filter(
                 or_(Job.start_time >= cutoff, Job.submit_time >= cutoff)
             )
+            if _system:
+                base = base.filter(Job.system == _system)
             queues  = sorted({r.queue for r in base.with_entities(Job.queue).distinct() if r.queue})
             owners  = sorted({r.owner for r in base.with_entities(Job.owner).distinct() if r.owner})
             projs   = sorted({r.project for r in base.with_entities(Job.project).distinct() if r.project})
@@ -1162,6 +1194,8 @@ def create_app(config=None) -> FastAPI:
                 Job.state == JobState.QUEUED,
                 Job.submit_time.isnot(None),
             )
+            if _system:
+                q = q.filter(Job.system == _system)
             q = _apply_job_filters(q, queue, queue_exclude, owner, owner_exclude,
                                    project, project_exclude, allocation_type, allocation_type_exclude)
             jobs = q.all()
@@ -1229,6 +1263,8 @@ def create_app(config=None) -> FastAPI:
                 Job.start_time.isnot(None),
                 Job.nodes > 0,
             )
+            if _system:
+                q = q.filter(Job.system == _system)
             q = _apply_job_filters(q, queue, queue_exclude, owner, owner_exclude,
                                    project, project_exclude, allocation_type, allocation_type_exclude)
             jobs = q.all()
@@ -1345,6 +1381,8 @@ def create_app(config=None) -> FastAPI:
                          Job.state.in_(_active_states)),
                 ),
             )
+            if _system:
+                q = q.filter(Job.system == _system)
             q = _apply_job_filters(q, queue, queue_exclude, owner, owner_exclude,
                                    project, project_exclude, allocation_type, allocation_type_exclude)
             jobs = q.all()
@@ -1430,7 +1468,6 @@ def create_app(config=None) -> FastAPI:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
         def _fetch():
-            from pbs_monitor.database.models import JobHistory
             # For each job that started in window, get the score from JobHistory
             # at the transition to RUNNING state (closest record to start_time)
             q = db.query(Job).filter(
@@ -1438,6 +1475,8 @@ def create_app(config=None) -> FastAPI:
                 Job.start_time.isnot(None),
                 Job.submit_time.isnot(None),
             )
+            if _system:
+                q = q.filter(Job.system == _system)
             q = _apply_job_filters(q, queue, queue_exclude, owner, owner_exclude,
                                    project, project_exclude, allocation_type, allocation_type_exclude)
             jobs = q.all()
@@ -1447,15 +1486,14 @@ def create_app(config=None) -> FastAPI:
             score_map: dict[str, float] = {}
             if job_ids:
                 # Get all history records for these jobs with a score
-                history_rows = (
-                    db.query(JobHistory)
-                    .filter(
-                        JobHistory.job_id.in_(job_ids),
-                        JobHistory.score.isnot(None),
-                        JobHistory.state == JobState.RUNNING,
-                    )
-                    .all()
+                _jh_q = db.query(JobHistory).filter(
+                    JobHistory.job_id.in_(job_ids),
+                    JobHistory.score.isnot(None),
+                    JobHistory.state == JobState.RUNNING,
                 )
+                if _system:
+                    _jh_q = _jh_q.filter(JobHistory.system == _system)
+                history_rows = _jh_q.all()
                 # Take the first RUNNING record per job (chronologically earliest)
                 for h in history_rows:
                     if h.job_id not in score_map:
@@ -1533,15 +1571,14 @@ def create_app(config=None) -> FastAPI:
             nh_map: dict[str, float] = {}
 
             # Running jobs – elapsed node-hours so far
-            running = (
-                db.query(Job)
-                .filter(
-                    Job.state == JobState.RUNNING,
-                    Job.start_time.isnot(None),
-                    Job.start_time >= cutoff,
-                )
-                .all()
+            _run_q = db.query(Job).filter(
+                Job.state == JobState.RUNNING,
+                Job.start_time.isnot(None),
+                Job.start_time >= cutoff,
             )
+            if _system:
+                _run_q = _run_q.filter(Job.system == _system)
+            running = _run_q.all()
             for job in running:
                 st = job.start_time
                 if st.tzinfo is None:
@@ -1554,15 +1591,14 @@ def create_app(config=None) -> FastAPI:
                 nh_map[key] = nh_map.get(key, 0.0) + elapsed * nodes / 3600.0
 
             # Finished jobs – actual_runtime_seconds, runtime > 30min
-            finished = (
-                db.query(Job)
-                .filter(
-                    Job.state == JobState.FINISHED,
-                    Job.end_time >= cutoff,
-                    Job.actual_runtime_seconds > MIN_RUNTIME_SEC,
-                )
-                .all()
+            _fin_q = db.query(Job).filter(
+                Job.state == JobState.FINISHED,
+                Job.end_time >= cutoff,
+                Job.actual_runtime_seconds > MIN_RUNTIME_SEC,
             )
+            if _system:
+                _fin_q = _fin_q.filter(Job.system == _system)
+            finished = _fin_q.all()
 
             # ── efficiency: finished jobs only ──
             # Weighted: sum(actual * nodes) / sum(walltime * nodes)
