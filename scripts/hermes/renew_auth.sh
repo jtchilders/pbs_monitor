@@ -27,7 +27,7 @@ mkdir -p "$LOG_DIR" "$RUN_DIR"
 
 echo "Renewing Hermes OIDC token..."
 echo "(A browser window may open if the token cannot be refreshed silently.)"
-hermes-kubectl oidc-login get-token \
+kubectl oidc-login get-token \
     --oidc-issuer-url="https://keycloak.alcf.anl.gov/realms/hermes" \
     --oidc-client-id=hermes \
     --grant-type=authcode \
@@ -52,7 +52,7 @@ fi
 # ── 3. Start new port-forward ─────────────────────────────────────────────────
 
 echo "Starting fresh port-forward on localhost:$BRIDGE_PORT..."
-hermes-kubectl port-forward -n pbs-monitor svc/pbs-postgres "$BRIDGE_PORT:5432" \
+kubectl port-forward -n pbs-monitor svc/pbs-postgres "$BRIDGE_PORT:5432" \
     >> "$BRIDGE_LOG" 2>&1 &
 BRIDGE_PID=$!
 disown "$BRIDGE_PID"

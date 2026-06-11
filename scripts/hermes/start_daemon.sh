@@ -2,14 +2,14 @@
 # start_daemon.sh — Start the pbs-monitor dev collector daemon on Polaris
 #
 # This script:
-#   1. Ensures a hermes-kubectl port-forward to Hermes Postgres is running
+#   1. Ensures a kubectl port-forward to Hermes Postgres is running
 #   2. Starts the pbs-monitor daemon in the background (logs to dev log dir)
 #
 # Usage:
 #   ~/pbs_monitor_dev/bin/start_daemon.sh
 #
 # Prerequisites:
-#   - hermes-kubectl and kubectl-oidc-login must be on PATH
+#   - kubectl and the kubectl-oidc_login plugin must be on PATH
 #   - ~/.pbs_monitor_dev.yaml must exist and be chmod 600
 #   - $PBS_MONITOR_DEV_DIR must be set, or defaults to ~/pbs_monitor_dev
 #   - pbs-monitor must be installed in the same venv as the prod daemon
@@ -52,7 +52,7 @@ fi
 
 mkdir -p "$LOG_DIR" "$RUN_DIR"
 
-# ── hermes-kubectl port-forward ───────────────────────────────────────────────
+# ── kubectl port-forward ───────────────────────────────────────────────
 
 if [[ -f "$BRIDGE_PID_FILE" ]]; then
     BRIDGE_PID=$(cat "$BRIDGE_PID_FILE")
@@ -65,8 +65,8 @@ if [[ -f "$BRIDGE_PID_FILE" ]]; then
 fi
 
 if [[ ! -f "$BRIDGE_PID_FILE" ]]; then
-    echo "Starting hermes-kubectl port-forward (localhost:$BRIDGE_PORT → Hermes Postgres)..."
-    hermes-kubectl port-forward -n pbs-monitor svc/pbs-postgres "$BRIDGE_PORT:5432" \
+    echo "Starting kubectl port-forward (localhost:$BRIDGE_PORT → Hermes Postgres)..."
+    kubectl port-forward -n pbs-monitor svc/pbs-postgres "$BRIDGE_PORT:5432" \
         >> "$BRIDGE_LOG" 2>&1 &
     BRIDGE_PID=$!
     disown "$BRIDGE_PID"
