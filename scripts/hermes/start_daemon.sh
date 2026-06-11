@@ -84,13 +84,26 @@ fi
 
 # ── pbs-monitor dev daemon ────────────────────────────────────────────────────
 
+# Read the daemon PID from its JSON-format PID file (the daemon writes JSON,
+# not a raw int). Returns empty string if the file is missing or unparseable.
+_read_daemon_pid() {
+    local pid_file="$1"
+    [[ -f "$pid_file" ]] || return 0
+    python3 -c "import json, sys
+try:
+    with open('$pid_file') as f:
+        print(json.load(f)['pid'])
+except Exception:
+    sys.exit(0)" 2>/dev/null
+}
+
 if [[ -f "$DAEMON_PID_FILE" ]]; then
-    DAEMON_PID=$(cat "$DAEMON_PID_FILE")
-    if kill -0 "$DAEMON_PID" 2>/dev/null; then
+    DAEMON_PID=$(_read_daemon_pid "$DAEMON_PID_FILE" || true)
+    if [[ -n "${DAEMON_PID:-}" ]] && kill -0 "$DAEMON_PID" 2>/dev/null; then
         echo "Dev daemon already running (PID $DAEMON_PID)"
         exit 0
     else
-        echo "Stale daemon PID ($DAEMON_PID); cleaning up..."
+        echo "Stale daemon PID file at $DAEMON_PID_FILE; cleaning up..."
         rm -f "$DAEMON_PID_FILE"
     fi
 fi
@@ -107,13 +120,27 @@ fi
 # shellcheck disable=SC1090
 source "$ACTIVATE"
 
+# The 'pbs-monitor daemon start' subcommand self-daemonizes (forks + sets
+# PPID=1) and writes its own JSON-format PID file. We point it at our dev
+# location so we don't collide with the prod daemon's ~/.pbs_monitor_daemon.pid.
+# Logs go to our dev log dir via stdout/stderr redirection — the daemon doesn't
+# manage its own log file. nohup/disown not needed since the daemon
+# self-detaches, but harmless if present.
 PBS_MONITOR_CONFIG="$DEV_CONFIG" \
-nohup pbs-monitor collect \
-    --config "$DEV_CONFIG" \
-    >> "$DAEMON_LOG" 2>&1 &
-DAEMON_PID=$!
-disown "$DAEMON_PID"
-echo "$DAEMON_PID" > "$DAEMON_PID_FILE"
+pbs-monitor --config "$DEV_CONFIG" daemon start \
+    --pid-file "$DAEMON_PID_FILE" \
+    >> "$DAEMON_LOG" 2>&1
+
+# Give the daemon a moment to fork and write its PID file
+sleep 2
+
+DAEMON_PID=$(_read_daemon_pid "$DAEMON_PID_FILE" || true)
+if [[ -z "${DAEMON_PID:-}" ]] || ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+    echo "ERROR: Daemon failed to start. Recent log:"
+    tail -20 "$DAEMON_LOG" 2>/dev/null | sed 's/^/  /'
+    exit 1
+fi
+
 echo "Dev daemon PID: $DAEMON_PID (log: $DAEMON_LOG)"
 echo ""
 echo "Tail the log with: tail -f $DAEMON_LOG"

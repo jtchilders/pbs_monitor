@@ -25,17 +25,33 @@ mkdir -p "$LOG_DIR" "$RUN_DIR"
 
 # ── 1. Renew the OIDC token ───────────────────────────────────────────────────
 
+# Token settings must match what's in ~/.kube/config under users[*].user.exec.args
+# (client.authentication.k8s.io/v1beta1 oidc-login). If those change, update here too.
+OIDC_ISSUER="https://keycloak.alcf.anl.gov/realms/hermes"
+OIDC_CLIENT_ID="hermes-kubectl"
+OIDC_LISTEN="localhost:18712"
+
 echo "Renewing Hermes OIDC token..."
-echo "(A browser window may open if the token cannot be refreshed silently.)"
+echo "  issuer    : $OIDC_ISSUER"
+echo "  client id : $OIDC_CLIENT_ID"
+echo "  listen    : $OIDC_LISTEN"
+echo ""
+echo "(A browser window may open if the token cannot be refreshed silently."
+echo " On a text-only terminal, copy the URL printed by oidc-login into a"
+echo " browser on a machine that can reach $OIDC_LISTEN via SSH port-forward.)"
+echo ""
 kubectl oidc-login get-token \
-    --oidc-issuer-url="https://keycloak.alcf.anl.gov/realms/hermes" \
-    --oidc-client-id=hermes \
+    --oidc-issuer-url="$OIDC_ISSUER" \
+    --oidc-client-id="$OIDC_CLIENT_ID" \
+    --oidc-pkce-method=S256 \
     --grant-type=authcode \
-    --listen-address=localhost:8000 || {
-    echo "ERROR: oidc-login failed. Check that the browser is accessible and retry."
+    --listen-address="$OIDC_LISTEN" >/dev/null || {
+    echo "ERROR: oidc-login failed. Common causes:"
+    echo "  - browser couldn't reach $OIDC_LISTEN (need SSH port-forward from your laptop)"
+    echo "  - issuer URL or client ID changed (check ~/.kube/config exec args)"
     exit 1
 }
-echo "Token renewed."
+echo "Token renewed (cached at ~/.kube/cache/oidc-login/)."
 
 # ── 2. Kill stale port-forward ────────────────────────────────────────────────
 

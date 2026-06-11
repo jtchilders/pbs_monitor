@@ -15,6 +15,18 @@ DAEMON_PID_FILE="$RUN_DIR/daemon.pid"
 DAEMON_LOG="$LOG_DIR/daemon.log"
 BRIDGE_LOG="$LOG_DIR/bridge.log"
 
+# Read daemon PID from JSON-format PID file. Empty if missing/unparseable.
+_read_daemon_pid() {
+    local pid_file="$1"
+    [[ -f "$pid_file" ]] || return 0
+    python3 -c "import json, sys
+try:
+    with open('$pid_file') as f:
+        print(json.load(f)['pid'])
+except Exception:
+    sys.exit(0)" 2>/dev/null
+}
+
 echo "=== pbs-monitor dev status ==="
 echo ""
 
@@ -44,14 +56,19 @@ echo ""
 
 echo "[ pbs-monitor dev daemon ]"
 if [[ -f "$DAEMON_PID_FILE" ]]; then
-    DAEMON_PID=$(cat "$DAEMON_PID_FILE")
-    if kill -0 "$DAEMON_PID" 2>/dev/null; then
+    DAEMON_PID=$(_read_daemon_pid "$DAEMON_PID_FILE" || true)
+    if [[ -n "${DAEMON_PID:-}" ]] && kill -0 "$DAEMON_PID" 2>/dev/null; then
         echo "  Status : RUNNING (PID $DAEMON_PID)"
-        # Show uptime if ps supports it
         ps_out=$(ps -p "$DAEMON_PID" -o etime= 2>/dev/null || true)
         [[ -n "$ps_out" ]] && echo "  Uptime : $ps_out"
+        # Daemon heartbeat from its PID file (JSON)
+        hb=$(python3 -c "import json
+try:
+    with open('$DAEMON_PID_FILE') as f: print(json.load(f).get('heartbeat', ''))
+except Exception: pass" 2>/dev/null)
+        [[ -n "$hb" ]] && echo "  Heartbeat: $hb"
     else
-        echo "  Status : DEAD (stale PID $DAEMON_PID — run start_daemon.sh to restart)"
+        echo "  Status : DEAD (stale PID file — run start_daemon.sh to restart)"
     fi
 else
     echo "  Status : NOT STARTED (no PID file)"
