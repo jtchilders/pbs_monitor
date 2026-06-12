@@ -2519,7 +2519,8 @@ class DaemonCommand(BaseCommand):
       print(f"\nConfiguration:")
       print(f"  Database enabled: {hasattr(self.config, 'database')}")
       if hasattr(self.config, 'database'):
-         print(f"  Database URL: {self.config.database.url}")
+         from pbs_monitor.utils.db_url import mask_db_url
+         print(f"  Database URL: {mask_db_url(self.config.database.url)}")
          print(f"  Auto-persist: {self.config.database.auto_persist}")
          print(f"  Daemon enabled: {self.config.database.daemon_enabled}")
          print(f"  Job collection interval: {self.config.database.job_collection_interval}s")

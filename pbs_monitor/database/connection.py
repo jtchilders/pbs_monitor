@@ -195,18 +195,9 @@ class DatabaseManager:
         return options
     
     def _mask_url(self, url: str) -> str:
-        """Mask password in database URL for logging"""
-        if '://' in url and '@' in url:
-            # Format: postgresql://user:password@host:port/database
-            parts = url.split('://', 1)
-            if len(parts) == 2:
-                scheme, rest = parts
-                if '@' in rest:
-                    auth_part, host_part = rest.split('@', 1)
-                    if ':' in auth_part:
-                        user, _ = auth_part.split(':', 1)
-                        return f"{scheme}://{user}:***@{host_part}"
-        return url
+        """Mask password in database URL for logging (delegates to shared util)."""
+        from pbs_monitor.utils.db_url import mask_db_url
+        return mask_db_url(url)
     
     @contextmanager
     def get_session(self) -> Generator[Session, None, None]:
