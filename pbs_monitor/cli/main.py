@@ -1257,8 +1257,20 @@ def main(argv: Optional[List[str]] = None) -> int:
            host = args.host
            port = args.port
            
+           # Mask the password in the printed URL — this string ends up in
+           # log files (uvicorn stdout) which may be world-readable.
+           def _mask_db_url(u: str) -> str:
+               if '://' in u and '@' in u:
+                   scheme, rest = u.split('://', 1)
+                   if '@' in rest:
+                       auth, host = rest.split('@', 1)
+                       if ':' in auth:
+                           user, _ = auth.split(':', 1)
+                           return f"{scheme}://{user}:***@{host}"
+               return u
+
            print(f"Starting PBS Monitor Dashboard on http://{host}:{port}")
-           print(f"Database: {config.database.url}")
+           print(f"Database: {_mask_db_url(config.database.url)}")
            print(f"")
            print(f"Access via SSH tunnel:")
            print(f"  ssh -L {port}:localhost:{port} $(hostname)")

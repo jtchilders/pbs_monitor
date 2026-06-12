@@ -216,8 +216,20 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    print(f"Source: {args.source_url}")
-    print(f"Target: {args.target_url}")
+    # Mask passwords in URLs for any logged output — these messages may end up
+    # in shared log files or chat transcripts.
+    def _mask(u: str) -> str:
+        if '://' in u and '@' in u:
+            scheme, rest = u.split('://', 1)
+            if '@' in rest:
+                auth, host = rest.split('@', 1)
+                if ':' in auth:
+                    user, _ = auth.split(':', 1)
+                    return f"{scheme}://{user}:***@{host}"
+        return u
+
+    print(f"Source: {_mask(args.source_url)}")
+    print(f"Target: {_mask(args.target_url)}")
     print(f"System: {args.system}")
     print(f"Dry run: {args.dry_run}")
     print()
