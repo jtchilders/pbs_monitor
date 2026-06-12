@@ -16,6 +16,7 @@ DEV_CONFIG="${PBS_MONITOR_DEV_CONFIG:-$HOME/.pbs_monitor_dev.yaml}"
 RUN_DIR="$DEV_DIR/run"
 BRIDGE_PID_FILE="$RUN_DIR/bridge.pid"
 DAEMON_PID_FILE="$RUN_DIR/daemon.pid"
+WEB_PID_FILE="$RUN_DIR/web.pid"
 
 # Read daemon PID from JSON-format PID file. Empty if missing/unparseable.
 _read_daemon_pid() {
@@ -93,6 +94,26 @@ else
     else
         echo "No bridge PID file found at $BRIDGE_PID_FILE"
     fi
+fi
+
+# ── stop web (always; not gated by --keep-bridge) ────────────────────────────────────
+if [[ -f "$WEB_PID_FILE" ]]; then
+    WEB_PID=$(cat "$WEB_PID_FILE")
+    if kill -0 "$WEB_PID" 2>/dev/null; then
+        echo "Stopping web server (PID $WEB_PID)..."
+        kill "$WEB_PID" 2>/dev/null || true
+        for i in $(seq 1 5); do
+            if ! kill -0 "$WEB_PID" 2>/dev/null; then
+                echo "Web server stopped."
+                break
+            fi
+            sleep 1
+        done
+        if kill -0 "$WEB_PID" 2>/dev/null; then
+            kill -9 "$WEB_PID" 2>/dev/null || true
+        fi
+    fi
+    rm -f "$WEB_PID_FILE"
 fi
 
 echo "Done."

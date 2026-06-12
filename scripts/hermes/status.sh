@@ -8,12 +8,16 @@ set -euo pipefail
 
 DEV_DIR="${PBS_MONITOR_DEV_DIR:-$HOME/pbs_monitor_dev}"
 BRIDGE_PORT="${PBS_MONITOR_BRIDGE_PORT:-15432}"
+WEB_PORT="${PBS_MONITOR_WEB_PORT:-8080}"
+WEB_HOST="${PBS_MONITOR_WEB_HOST:-127.0.0.1}"
 RUN_DIR="$DEV_DIR/run"
 LOG_DIR="$DEV_DIR/logs"
 BRIDGE_PID_FILE="$RUN_DIR/bridge.pid"
 DAEMON_PID_FILE="$RUN_DIR/daemon.pid"
+WEB_PID_FILE="$RUN_DIR/web.pid"
 DAEMON_LOG="$LOG_DIR/daemon.log"
 BRIDGE_LOG="$LOG_DIR/bridge.log"
+WEB_LOG="$LOG_DIR/web.log"
 
 # Read daemon PID from JSON-format PID file. Empty if missing/unparseable.
 _read_daemon_pid() {
@@ -76,6 +80,30 @@ else
     echo "  Status : NOT STARTED (no PID file)"
 fi
 echo "  Log    : $DAEMON_LOG"
+echo ""
+
+# ── web server ─────────────────────────────────────────────────────────────
+host=$(hostname -s 2>/dev/null || hostname)
+echo "[ pbs-monitor web dashboard ($WEB_HOST:$WEB_PORT) ]"
+if [[ -f "$WEB_PID_FILE" ]]; then
+    WEB_PID=$(cat "$WEB_PID_FILE")
+    if kill -0 "$WEB_PID" 2>/dev/null; then
+        echo "  Status : RUNNING (PID $WEB_PID)"
+        ps_out=$(ps -p "$WEB_PID" -o etime= 2>/dev/null || true)
+        [[ -n "$ps_out" ]] && echo "  Uptime : $ps_out"
+        if (echo >"/dev/tcp/$WEB_HOST/$WEB_PORT") 2>/dev/null; then
+            echo "  Network: listening on $WEB_HOST:$WEB_PORT"
+        else
+            echo "  Network: NOT LISTENING on $WEB_HOST:$WEB_PORT (warming up?)"
+        fi
+        echo "  Tunnel : ssh -L $WEB_PORT:localhost:$WEB_PORT $host  # then http://localhost:$WEB_PORT"
+    else
+        echo "  Status : DEAD (stale PID file — run start_web.sh to restart)"
+    fi
+else
+    echo "  Status : NOT STARTED (no PID file)"
+fi
+echo "  Log    : $WEB_LOG"
 
 if [[ -f "$DAEMON_LOG" ]]; then
     echo ""
