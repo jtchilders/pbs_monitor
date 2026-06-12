@@ -280,6 +280,35 @@ def main() -> int:
             "uploaded": rows_written,
         })
 
+    # Reset target sequences after bulk upload — see add_system_column.py for
+    # the full rationale. Without this, the live daemon (or any other writer)
+    # collides forever with our pre-loaded rows.
+    if not args.dry_run:
+        from sqlalchemy.sql import text as _text
+        from pbs_monitor.database.models import Base
+        print()
+        print("Resetting target sequences to match loaded row counts...")
+        with target_engine.connect() as conn:
+            for table_name, table_obj in Base.metadata.tables.items():
+                for col in table_obj.columns:
+                    default_obj = col.server_default
+                    if default_obj is None:
+                        continue
+                    default_text = str(default_obj.arg) if hasattr(default_obj, "arg") else str(default_obj)
+                    if "nextval" not in default_text:
+                        continue
+                    seq_name = f"{table_name}_{col.name}_seq"
+                    try:
+                        result = conn.execute(_text(
+                            f"SELECT setval('{seq_name}', "
+                            f"(SELECT coalesce(max({col.name}),1) FROM {table_name}))"
+                        ))
+                        new_val = result.scalar()
+                        print(f"  {seq_name:<48} -> {new_val:,}")
+                    except Exception as e:
+                        print(f"  {seq_name:<48} -> SKIPPED ({e.__class__.__name__})")
+            conn.commit()
+
     total_elapsed = time.time() - start_wall
     print(f"\nDone in {total_elapsed:.1f}s")
     print()

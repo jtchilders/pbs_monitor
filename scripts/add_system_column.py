@@ -345,6 +345,40 @@ def main() -> int:
             "migrated": rows_written,
         })
 
+    # Reset all SERIAL/identity sequences so the next nextval() call returns
+    # max(id)+1 instead of starting from 1. Without this, any application
+    # that later inserts into these tables will collide with our bulk-loaded
+    # rows until the sequence catches up — silently in production code paths
+    # whose error logging goes to /dev/null. This bit us hard during Phase E
+    # dev-daemon startup (~293 silent collisions before we found it).
+    if not args.dry_run:
+        from sqlalchemy.sql import text as _text
+        from pbs_monitor.database.models import Base
+        print()
+        print("Resetting sequences to match loaded row counts...")
+        with target_engine.connect() as conn:
+            for table_name, table_obj in Base.metadata.tables.items():
+                for col in table_obj.columns:
+                    # PK columns whose default is a sequence (server_default contains 'nextval')
+                    default_obj = col.server_default
+                    if default_obj is None:
+                        continue
+                    default_text = str(default_obj.arg) if hasattr(default_obj, "arg") else str(default_obj)
+                    if "nextval" not in default_text:
+                        continue
+                    # Sequence name is conventionally <table>_<col>_seq
+                    seq_name = f"{table_name}_{col.name}_seq"
+                    try:
+                        result = conn.execute(_text(
+                            f"SELECT setval('{seq_name}', "
+                            f"(SELECT coalesce(max({col.name}),1) FROM {table_name}))"
+                        ))
+                        new_val = result.scalar()
+                        print(f"  {seq_name:<48} -> {new_val:,}")
+                    except Exception as e:
+                        print(f"  {seq_name:<48} -> SKIPPED ({e.__class__.__name__})")
+            conn.commit()
+
     total_elapsed = time.time() - start_wall
     print(f"\nDone in {total_elapsed:.1f}s")
     print()
