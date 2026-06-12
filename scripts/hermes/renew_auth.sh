@@ -77,12 +77,25 @@ sleep 2
 
 # ── 4. Verify ─────────────────────────────────────────────────────────────────
 
-if nc -z localhost "$BRIDGE_PORT" 2>/dev/null; then
+# kubectl port-forward sometimes takes a few seconds to bind and accept
+# connections, especially right after an OIDC handshake. Poll for up to
+# 10s instead of checking once. Use bash's /dev/tcp builtin (no `nc` on
+# Polaris login nodes — confirmed 2026-06-11).
+ready=false
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if (echo >"/dev/tcp/localhost/$BRIDGE_PORT") 2>/dev/null; then
+        ready=true
+        break
+    fi
+    sleep 1
+done
+
+if $ready; then
     echo "Port-forward live on localhost:$BRIDGE_PORT (PID $BRIDGE_PID)"
     echo ""
     echo "Dev daemon will reconnect automatically on next collection cycle."
-    echo "Check daemon status with: $DEV_DIR/bin/status.sh"
+    echo "Check status with: $DEV_DIR/bin/status.sh"
 else
-    echo "WARNING: localhost:$BRIDGE_PORT not reachable yet. Check $BRIDGE_LOG"
+    echo "WARNING: localhost:$BRIDGE_PORT not reachable after 10s. Check $BRIDGE_LOG"
     exit 1
 fi
