@@ -59,6 +59,22 @@ const QUEUE_COLORS = [
     '#10b981','#f43f5e','#eab308','#14b8a6','#ec4899',
 ];
 
+// Wait-time bin definitions — MUST stay identical to server BINS in
+// pbs_monitor/web/server.py api_analytics_wait_current(). Update both together.
+// Each entry: { label, lo (hours, inclusive), hi (hours, exclusive) }.
+const WAIT_BINS = [
+    { label: '<1hr',   lo:   0, hi:    1 },
+    { label: '1-6hr',  lo:   1, hi:    6 },
+    { label: '6-12hr', lo:   6, hi:   12 },
+    { label: '12-24hr',lo:  12, hi:   24 },
+    { label: '1-2d',   lo:  24, hi:   48 },
+    { label: '2-7d',   lo:  48, hi:  168 },
+    { label: '7-14d',  lo: 168, hi:  336 },
+    { label: '2-3wk',  lo: 336, hi:  504 },
+    { label: '3-5wk',  lo: 504, hi:  840 },
+    { label: '>1mo',   lo: 840, hi: Infinity },
+];
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function hashStr(s) {
@@ -135,6 +151,7 @@ createApp({
         const jobsSection    = ref(null);   // scroll target for drill-down
         const depthGroupBy   = ref('queue');   // 'queue' | 'allocation' | 'project'
         const depthShowHeld  = ref(false);
+        const waitShowHeld   = ref(false);
 
         // ── reservations ──
         const reservations  = ref([]);
@@ -253,6 +270,13 @@ createApp({
                 case 'project':    return (j.project || '').toLowerCase() === value;
                 case 'owner':      return (j.owner || '').toLowerCase() === value;
                 case 'id':         return String(j.job_id) === value;
+                case 'wait': {
+                    // Match job's wait-time bin by recomputing from queue_time_seconds.
+                    // Uses WAIT_BINS (same edges as server BINS in server.py).
+                    const waitHours = (j.queue_time_seconds || 0) / 3600;
+                    const bin = WAIT_BINS.find(b => waitHours >= b.lo && waitHours < b.hi);
+                    return bin ? bin.label === value : false;
+                }
                 default:           return (
                     (j.owner || '').toLowerCase().includes(value) ||
                     (j.project || '').toLowerCase().includes(value) ||
@@ -329,6 +353,19 @@ createApp({
             filterText.value = `${field}:${name}`;
             activeTab.value = state;  // 'running' | 'queued' | 'held'
             // Scroll jobs panel into view
+            nextTick(() => {
+                if (jobsSection.value) {
+                    jobsSection.value.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            });
+        }
+
+        // Drill down into a wait-time bin: set wait:<binLabel> filter and switch to
+        // the queued tab (or queued, with held tab also filtered via filteredHeldJobs
+        // when waitShowHeld is on).
+        function drillDownWaitBin(binLabel) {
+            filterText.value = `wait:${binLabel}`;
+            activeTab.value = 'queued';
             nextTick(() => {
                 if (jobsSection.value) {
                     jobsSection.value.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -873,24 +910,52 @@ createApp({
                 type: 'bar',
                 data: {
                     labels: data.bins,
-                    datasets: [{
-                        label: 'Jobs waiting',
-                        data: data.counts,
-                        backgroundColor: '#3b82f6',
-                        borderRadius: 3,
-                    }]
+                    datasets: [
+                        {
+                            label: 'Queued',
+                            data: data.queued_counts,
+                            backgroundColor: '#f59e0b',  // --accent-busy / .bar-segment.queued
+                            borderRadius: 3,
+                            stack: 'wait',
+                        },
+                        {
+                            label: 'Held',
+                            // Held jobs only appear as orange segments when waitShowHeld is on.
+                            // NOTE: held_counts will be all-zeros (from the server) when
+                            // include_held was not requested — orange bars only show when present.
+                            data: data.held_counts,
+                            backgroundColor: '#f97316',  // .bar-segment.held (orange)
+                            borderRadius: 3,
+                            stack: 'wait',
+                        },
+                    ]
                 },
                 options: {
                     indexAxis: 'y',
                     responsive: true,
                     maintainAspectRatio: true,
+                    onClick: (evt, elements) => {
+                        if (!elements.length) return;
+                        // elements[0].index is the bin index regardless of which
+                        // stacked dataset segment was clicked.
+                        const idx = elements[0].index;
+                        const label = _waitChart.data.labels[idx];
+                        drillDownWaitBin(label);
+                    },
+                    onHover: (evt, elements) => {
+                        evt.native.target.style.cursor = elements.length ? 'pointer' : 'default';
+                    },
                     plugins: {
-                        legend: { display: false },
-                        tooltip: { callbacks: { label: ctx => ` ${ctx.parsed.x} jobs` } },
+                        legend: { display: true },
+                        tooltip: {
+                            callbacks: {
+                                label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.x} jobs`,
+                            },
+                        },
                     },
                     scales: {
-                        x: { ticks: { color: '#94a3b8' }, grid: { color: '#2d3748' } },
-                        y: { ticks: { color: '#94a3b8' }, grid: { color: '#2d3748' } },
+                        x: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#2d3748' } },
+                        y: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#2d3748' } },
                     },
                 },
             });
@@ -899,14 +964,16 @@ createApp({
         function _updateWaitChart(data) {
             if (!_waitChart) { _initWaitChart(data); return; }
             _waitChart.data.labels = data.bins;
-            _waitChart.data.datasets[0].data = data.counts;
+            _waitChart.data.datasets[0].data = data.queued_counts;
+            _waitChart.data.datasets[1].data = data.held_counts;
             _waitChart.update();
         }
 
         async function fetchWaitDist() {
             if (!_waitChart) waitDistLoading.value = true;
             try {
-                const r = await fetch('/api/analytics/wait-current');
+                const url = '/api/analytics/wait-current' + (waitShowHeld.value ? '?include_held=true' : '');
+                const r = await fetch(url);
                 if (!r.ok) return;
                 const data = await r.json();
                 const total = (data.counts || []).reduce((a, b) => a + b, 0);
@@ -919,6 +986,9 @@ createApp({
                 waitDistLoading.value = false;
             }
         }
+
+        // Re-fetch immediately when the held toggle changes.
+        watch(waitShowHeld, () => fetchWaitDist());
 
         onMounted(async () => {
             await fetchData();
@@ -946,11 +1016,11 @@ createApp({
             lockedLegend, resvFilter,
             sortedRunningJobs, sortedQueuedJobs, sortedHeldJobs, filteredRunningJobs, filteredQueuedJobs, filteredHeldJobs, sortedDepthBuckets,
             fetchData, sortJobs, sortQueuedJobs, selectJob, highlightJob, clearHighlight, hoverLegend, clearLegend, clickLegend, toggleResv, isOverdue,
-            openJobDetail, closeJobDetail, drillDownBar,
+            openJobDetail, closeJobDetail, drillDownBar, drillDownWaitBin,
             onCanvasMove, onCanvasLeave, onCanvasClick,
             fmtDuration, fmtScore, fmtSysHours, fmtIso, queueColor,
             reservations, resvLoading, resvOpen, sortedReservations, resvSortBy, resvSortArrow,
-            waitOpen, waitDistLoading, waitDistEmpty, waitCanvas, fetchWaitDist,
+            waitOpen, waitDistLoading, waitDistEmpty, waitCanvas, fetchWaitDist, waitShowHeld,
         };
     }
 }).mount('#app');

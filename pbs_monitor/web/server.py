@@ -1134,6 +1134,7 @@ def create_app(config=None) -> FastAPI:
     @app.get("/api/analytics/wait-current")
     async def api_analytics_wait_current(
         db: Session = Depends(get_db),
+        include_held: bool = False,
         queue: List[str] = Query(default=[]),
         queue_exclude: List[str] = Query(default=[]),
         owner: List[str] = Query(default=[]),
@@ -1143,6 +1144,28 @@ def create_app(config=None) -> FastAPI:
         allocation_type: List[str] = Query(default=[]),
         allocation_type_exclude: List[str] = Query(default=[]),
     ):
+        """Return the current wait-time distribution as per-state binned counts.
+
+        Bins are fixed 10-bucket ranges from <1hr to >1mo.
+        NOTE: bin edges here MUST stay identical to WAIT_BINS in
+        pbs_monitor/web/static/js/app.js — update both files together.
+
+        Args:
+            include_held: When True, count HELD jobs in addition to QUEUED jobs
+                          and return their per-bin breakdown in ``held_counts``.
+                          When False (default), count only QUEUED jobs and
+                          return all-zero ``held_counts``.
+
+        Returns a JSON object with:
+            bins         : list[str]  — bin labels (length N)
+            queued_counts: list[int]  — per-bin QUEUED job counts (length N)
+            held_counts  : list[int]  — per-bin HELD job counts (length N);
+                                        all zeros when include_held is False
+            counts       : list[int]  — element-wise sum of queued_counts +
+                                        held_counts (backward-compat field used
+                                        by the frontend empty-check)
+        """
+        # KEEP IN SYNC with WAIT_BINS constant in app.js
         BINS = [
             ('<1hr',   0,    1),
             ('1-6hr',  1,    6),
@@ -1156,28 +1179,65 @@ def create_app(config=None) -> FastAPI:
             ('>1mo',  840, float('inf')),
         ]
 
+        def _bin_index(wait_h: float) -> int:
+            """Return the bin index for a wait time given in hours, or -1."""
+            for i, (_, lo, hi) in enumerate(BINS):
+                if lo <= wait_h < hi:
+                    return i
+            return -1
+
         def _fetch():
             now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive for arithmetic against DB timestamps
-            q = db.query(Job).filter(
+
+            queued_counts: List[int] = [0] * len(BINS)
+            held_counts: List[int]   = [0] * len(BINS)
+
+            # Always query QUEUED jobs.
+            q_queued = db.query(Job).filter(
                 Job.state == JobState.QUEUED,
                 Job.submit_time.isnot(None),
             )
-            q = _apply_job_filters(q, queue, queue_exclude, owner, owner_exclude,
-                                   project, project_exclude, allocation_type, allocation_type_exclude)
-            jobs = q.all()
-            counts = [0] * len(BINS)
-            for job in jobs:
+            q_queued = _apply_job_filters(
+                q_queued, queue, queue_exclude, owner, owner_exclude,
+                project, project_exclude, allocation_type, allocation_type_exclude,
+            )
+            for job in q_queued.all():
                 st = job.submit_time
                 if st is None:
                     continue
                 if st.tzinfo is not None:
                     st = st.replace(tzinfo=None)
-                wait_h = (now - st).total_seconds() / 3600
-                for i, (_, lo, hi) in enumerate(BINS):
-                    if lo <= wait_h < hi:
-                        counts[i] += 1
-                        break
-            return {"bins": [b[0] for b in BINS], "counts": counts}
+                idx = _bin_index((now - st).total_seconds() / 3600)
+                if idx >= 0:
+                    queued_counts[idx] += 1
+
+            # Only query HELD jobs when explicitly requested.
+            if include_held:
+                q_held = db.query(Job).filter(
+                    Job.state == JobState.HELD,
+                    Job.submit_time.isnot(None),
+                )
+                q_held = _apply_job_filters(
+                    q_held, queue, queue_exclude, owner, owner_exclude,
+                    project, project_exclude, allocation_type, allocation_type_exclude,
+                )
+                for job in q_held.all():
+                    st = job.submit_time
+                    if st is None:
+                        continue
+                    if st.tzinfo is not None:
+                        st = st.replace(tzinfo=None)
+                    idx = _bin_index((now - st).total_seconds() / 3600)
+                    if idx >= 0:
+                        held_counts[idx] += 1
+
+            counts = [q + h for q, h in zip(queued_counts, held_counts)]
+            return {
+                "bins": [b[0] for b in BINS],
+                "queued_counts": queued_counts,
+                "held_counts": held_counts,
+                "counts": counts,  # backward-compat: element-wise sum for frontend empty-check
+            }
 
         return await asyncio.get_event_loop().run_in_executor(None, _fetch)
 
