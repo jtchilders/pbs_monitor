@@ -270,6 +270,9 @@
                             <tr v-if="sortedHeldJobs.length === 0">
                                 <td colspan="8" class="empty-row">No held jobs</td>
                             </tr>
+                            <tr v-else-if="filteredHeldJobs.length === 0">
+                                <td colspan="8" class="empty-row">No held jobs match the current filter</td>
+                            </tr>
                         </tbody>
                     </table>
                 </div>
@@ -347,6 +350,9 @@
     <div class="reservations-panel wait-dist-panel">
         <div class="panel-header" @click="waitOpen = !waitOpen">
             <h2>Current Wait Time Distribution</h2>
+            <label class="held-toggle" @click.stop>
+                <input type="checkbox" v-model="waitShowHeld"> Include Held
+            </label>
             <span class="resv-collapse-icon" :class="{ open: waitOpen }">▼</span>
         </div>
         <div v-show="waitOpen" style="padding: 0.75rem 1rem 1rem">

@@ -1134,6 +1134,7 @@ def create_app(config=None) -> FastAPI:
     @app.get("/api/analytics/wait-current")
     async def api_analytics_wait_current(
         db: Session = Depends(get_db),
+        include_held: bool = False,
         queue: List[str] = Query(default=[]),
         queue_exclude: List[str] = Query(default=[]),
         owner: List[str] = Query(default=[]),
@@ -1143,6 +1144,17 @@ def create_app(config=None) -> FastAPI:
         allocation_type: List[str] = Query(default=[]),
         allocation_type_exclude: List[str] = Query(default=[]),
     ):
+        """Return the current wait-time distribution as binned counts.
+
+        Bins are fixed 10-bucket ranges from <1hr to >1mo.
+        NOTE: bin edges here MUST stay identical to WAIT_BINS in
+        pbs_monitor/web/static/js/app.js — update both files together.
+
+        Args:
+            include_held: When True, count QUEUED + HELD jobs.
+                          When False (default), count only QUEUED jobs.
+        """
+        # KEEP IN SYNC with WAIT_BINS constant in app.js
         BINS = [
             ('<1hr',   0,    1),
             ('1-6hr',  1,    6),
@@ -1158,8 +1170,11 @@ def create_app(config=None) -> FastAPI:
 
         def _fetch():
             now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive for arithmetic against DB timestamps
+            states = [JobState.QUEUED]
+            if include_held:
+                states.append(JobState.HELD)
             q = db.query(Job).filter(
-                Job.state == JobState.QUEUED,
+                Job.state.in_(states),
                 Job.submit_time.isnot(None),
             )
             q = _apply_job_filters(q, queue, queue_exclude, owner, owner_exclude,
