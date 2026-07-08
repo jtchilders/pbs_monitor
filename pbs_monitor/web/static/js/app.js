@@ -910,12 +910,25 @@ createApp({
                 type: 'bar',
                 data: {
                     labels: data.bins,
-                    datasets: [{
-                        label: 'Jobs waiting',
-                        data: data.counts,
-                        backgroundColor: '#3b82f6',
-                        borderRadius: 3,
-                    }]
+                    datasets: [
+                        {
+                            label: 'Queued',
+                            data: data.queued_counts,
+                            backgroundColor: '#f59e0b',  // --accent-busy / .bar-segment.queued
+                            borderRadius: 3,
+                            stack: 'wait',
+                        },
+                        {
+                            label: 'Held',
+                            // Held jobs only appear as orange segments when waitShowHeld is on.
+                            // NOTE: held_counts will be all-zeros (from the server) when
+                            // include_held was not requested — orange bars only show when present.
+                            data: data.held_counts,
+                            backgroundColor: '#f97316',  // .bar-segment.held (orange)
+                            borderRadius: 3,
+                            stack: 'wait',
+                        },
+                    ]
                 },
                 options: {
                     indexAxis: 'y',
@@ -923,6 +936,8 @@ createApp({
                     maintainAspectRatio: true,
                     onClick: (evt, elements) => {
                         if (!elements.length) return;
+                        // elements[0].index is the bin index regardless of which
+                        // stacked dataset segment was clicked.
                         const idx = elements[0].index;
                         const label = _waitChart.data.labels[idx];
                         drillDownWaitBin(label);
@@ -931,12 +946,16 @@ createApp({
                         evt.native.target.style.cursor = elements.length ? 'pointer' : 'default';
                     },
                     plugins: {
-                        legend: { display: false },
-                        tooltip: { callbacks: { label: ctx => ` ${ctx.parsed.x} jobs` } },
+                        legend: { display: true },
+                        tooltip: {
+                            callbacks: {
+                                label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.x} jobs`,
+                            },
+                        },
                     },
                     scales: {
-                        x: { ticks: { color: '#94a3b8' }, grid: { color: '#2d3748' } },
-                        y: { ticks: { color: '#94a3b8' }, grid: { color: '#2d3748' } },
+                        x: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#2d3748' } },
+                        y: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#2d3748' } },
                     },
                 },
             });
@@ -945,7 +964,8 @@ createApp({
         function _updateWaitChart(data) {
             if (!_waitChart) { _initWaitChart(data); return; }
             _waitChart.data.labels = data.bins;
-            _waitChart.data.datasets[0].data = data.counts;
+            _waitChart.data.datasets[0].data = data.queued_counts;
+            _waitChart.data.datasets[1].data = data.held_counts;
             _waitChart.update();
         }
 
