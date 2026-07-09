@@ -1,5 +1,43 @@
 /* Analytics page — extends dashboard.css */
 
+/* ── Tab panel ───────────────────────────────────────────────────────────── */
+
+.analytics-tab-panel {
+    padding: 0;
+    overflow: visible;
+}
+
+.analytics-page-tabs {
+    padding: 0 0.5rem;
+    border-bottom: 1px solid var(--accent-border);
+}
+
+/* Completeness banner — appears on every tab when collector gaps are found */
+.analytics-banner-warn {
+    padding: 0.5rem 1rem;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    border-radius: 6px;
+    color: #fbbf24;
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+/* Placeholder panels for tabs A-E (filled by downstream tasks) */
+.tab-placeholder {
+    padding: 2rem 1.5rem;
+    color: var(--text-dim);
+    font-style: italic;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+.tab-placeholder-note {
+    font-size: 0.75rem;
+    color: #475569;
+}
+
 .analytics-main {
     display: flex;
     flex-direction: column;

@@ -1,27 +1,18 @@
 /**
  * PBS Monitor — Analytics page (Vue 3 + Chart.js)
+ *
+ * Shared color utilities come from js/colors.js (loaded before this file).
+ * Access via window.PBSColors.colorFor() and window.PBSColors.OUTCOME_COLORS.
  */
 
-const ANALYTICS_PALETTE = [
-    '#3b82f6','#f59e0b','#ef4444','#8b5cf6','#06b6d4',
-    '#10b981','#f43f5e','#eab308','#14b8a6','#ec4899',
-    '#a78bfa','#fb923c','#34d399','#f472b6','#60a5fa',
-    '#fbbf24','#22d3ee','#a3e635','#fda4af','#c084fc',
-];
+// ── Pull shared colors from the registry loaded by colors.js ──────────────
+// These are module-level aliases so the rest of the file reads cleanly.
+// Do NOT re-declare ANALYTICS_PALETTE or colorFor here — use the shared ones.
+const ANALYTICS_PALETTE = window.PBSColors.ANALYTICS_PALETTE;
+const colorFor          = (name) => window.PBSColors.colorFor(name);
+const OUTCOME_COLORS    = window.PBSColors.OUTCOME_COLORS;
 
-// Stable color assignment: the same queue name always gets the same
-// color regardless of which groups appear in each chart.  We build a
-// global registry so the first chart rendered claims palette slots in
-// sorted order, and later charts reuse those assignments.
-const _colorRegistry = {};
-let _nextSlot = 0;
-function colorFor(groupName, _sortedGroups) {
-    if (!(groupName in _colorRegistry)) {
-        _colorRegistry[groupName] = _nextSlot++;
-    }
-    return ANALYTICS_PALETTE[_colorRegistry[groupName] % ANALYTICS_PALETTE.length];
-}
-
+// ── Bin label formatter (unchanged from prior version) ────────────────────
 function fmtBin(iso, freq) {
     // 'h' → 'MM-DD HH:00'  'd' → 'YYYY-MM-DD'  'w' → 'YYYY-MM-DD' (week of)
     const d = new Date(iso);
@@ -31,7 +22,7 @@ function fmtBin(iso, freq) {
     return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
 }
 
-// Collapse reservation-like groups (R##### or M#####) into a single 'Reservations' key
+// ── Reservation-queue collapse (unchanged) ────────────────────────────────
 function collapseResvGroups(series, groups) {
     const resvRe = /^[RMrm]\d+$/;
     const collapsed = {};
@@ -47,7 +38,6 @@ function collapseResvGroups(series, groups) {
         }
     }
     if (hasResv) {
-        // Sum all reservation series element-wise
         const resvGroups = groups.filter(g => resvRe.test(g));
         const len = (series[resvGroups[0]] || []).length;
         const summed = new Array(len).fill(0);
@@ -61,26 +51,95 @@ function collapseResvGroups(series, groups) {
     return { series: collapsed, groups: newGroups.sort() };
 }
 
-// Filter out groups whose total node-hours across all bins is below a threshold
-const DEPTH_MIN_NODE_HOURS = 0;     // show all queues (no minimum threshold)
+// ── Small-group filter (unchanged) ────────────────────────────────────────
+const DEPTH_MIN_NODE_HOURS = 0;  // show all queues (no minimum threshold)
 
-const { createApp, ref, reactive, computed, onMounted } = Vue;
+function filterSmallGroups(series, groups, minTotal) {
+    const kept = groups.filter(g => {
+        const vals = series[g] || [];
+        return vals.reduce((a, b) => a + b, 0) >= minTotal;
+    });
+    const filtered = {};
+    for (const g of kept) filtered[g] = series[g];
+    return { series: filtered, groups: kept };
+}
+
+// ── Common Chart.js line options (unchanged) ──────────────────────────────
+function _commonLineOpts(yLabel, stacked) {
+    return {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+            legend: { labels: { color: '#e0e0e0', boxWidth: 12 }, position: 'bottom' },
+            tooltip: {
+                mode: 'index',
+                intersect: false,
+                itemSort: (a, b) => b.parsed.y - a.parsed.y,
+                callbacks: {
+                    beforeBody: () => [],
+                    afterBody: (items) => {
+                        const total = items.reduce((s, it) => s + (it.parsed.y || 0), 0);
+                        const hidden = Math.max(0, items.length - 5);
+                        return [
+                            `Total: ${total.toFixed(2)}`,
+                            ...(hidden > 0 ? [`(+${hidden} more not shown)`] : []),
+                        ];
+                    },
+                    label: (item) => {
+                        const sorted = item.chart.tooltip.dataPoints
+                            .slice()
+                            .sort((a, b) => b.parsed.y - a.parsed.y);
+                        const rank = sorted.findIndex(d => d.datasetIndex === item.datasetIndex);
+                        if (rank >= 5) return null;
+                        return ` ${item.dataset.label}: ${item.parsed.y.toFixed(2)}`;
+                    },
+                },
+            },
+        },
+        scales: {
+            x: { ticks: { color: '#94a3b8', maxRotation: 45, autoSkip: true, maxTicksLimit: 20 },
+                 grid: { color: '#2d3748' },
+                 stacked: stacked || false },
+            y: { ticks: { color: '#94a3b8' }, grid: { color: '#2d3748' },
+                 title: { display: true, text: yLabel, color: '#94a3b8' },
+                 stacked: stacked || false },
+        },
+    };
+}
+
+// ── Vue app ───────────────────────────────────────────────────────────────
+
+const { createApp, ref, reactive, computed, onMounted, nextTick } = Vue;
 
 createApp({
     setup() {
-        // ── state ──
-        const systemName     = ref('PBS Monitor');
-        const days           = ref(30);
-        const freqOverride   = ref('auto');     // 'auto' | 'h' | 'd' | 'w'
-        const groupBy        = ref('queue');    // 'queue' | 'allocation_type'
-        const xAxis          = ref('queue_time');
-        const loading        = ref(false);
-        const error          = ref(null);
-        const scatterNote    = ref(null);
-        const lastRefresh    = ref(null);
 
-        const utilMeta       = ref('');
-        const depthMeta      = ref('');
+        // ── Tab definitions (order = display order) ───────────────────────
+        // id values match the v-if conditions in analytics.html.
+        const tabDefs = [
+            { id: 'trends',           label: 'Trends' },
+            { id: 'job-outcomes',     label: 'Job Outcomes' },
+            { id: 'walltime-accuracy',label: 'Walltime Accuracy' },
+            { id: 'wait-times',       label: 'Wait Times' },
+            { id: 'reservations',     label: 'Reservations' },
+            { id: 'collector-health', label: 'Collector Health' },
+        ];
+
+        // ── Global state ──────────────────────────────────────────────────
+        const systemName   = ref('PBS Monitor');
+        const days         = ref(30);
+        const freqOverride = ref('auto');   // 'auto' | 'h' | 'd' | 'w'
+        const groupBy      = ref('queue');  // 'queue' | 'allocation_type' | 'project'
+        const loading      = ref(false);
+        const error        = ref(null);
+        const lastRefresh  = ref(null);
+        const collectBanner = ref(null);   // completeness banner text (null = no banner)
+
+        const utilMeta     = ref('');
+        const depthMeta    = ref('');
+
+        const activeTab    = ref('trends'); // starts on Trends
 
         const freqChoices = [
             { k: 'auto', l: 'Auto' },
@@ -91,24 +150,31 @@ createApp({
 
         const effectiveFreq = computed(() => {
             if (freqOverride.value !== 'auto') return freqOverride.value;
-            if (days.value <= 7) return 'h';
-            if (days.value < 90) return 'd';
+            if (days.value <= 7)  return 'h';
+            if (days.value < 90)  return 'd';
             return 'w';
         });
-        const effectiveFreqLabel = computed(() => ({ h:'Hour', d:'Day', w:'Week' })[effectiveFreq.value]);
+        const effectiveFreqLabel = computed(() =>
+            ({ h: 'Hour', d: 'Day', w: 'Week' })[effectiveFreq.value]);
 
-        // Filter state
+        // ── Lazy-loading cache (plan §4.2) ────────────────────────────────
+        // Keyed by `tabId + '|' + buildParams()`.  On tab switch: if key is in
+        // cache, re-render from memory; else fetch.  Any global control change
+        // clears the whole cache and reloads the current tab.
+        const tabData = reactive({});
+
+        // ── Filter state ──────────────────────────────────────────────────
         const filterDims = [
             { key: 'queue',           label: 'Queue' },
             { key: 'owner',           label: 'Owner' },
             { key: 'project',         label: 'Project' },
             { key: 'allocation_type', label: 'Alloc Type' },
         ];
-        const filterOptions   = reactive({ queue: [], owner: [], project: [], allocation_type: [] });
+        const filterOptions    = reactive({ queue: [], owner: [], project: [], allocation_type: [] });
         const filterSelections = reactive({ queue: [], owner: [], project: [], allocation_type: [] });
-        const filterMode      = reactive({ queue: 'include', owner: 'include', project: 'include', allocation_type: 'include' });
-        const filterSearch    = reactive({ queue: '', owner: '', project: '', allocation_type: '' });
-        const openFilterPanel = ref(null);
+        const filterMode       = reactive({ queue: 'include', owner: 'include', project: 'include', allocation_type: 'include' });
+        const filterSearch     = reactive({ queue: '', owner: '', project: '', allocation_type: '' });
+        const openFilterPanel  = ref(null);
 
         function toggleFilterPanel(key) {
             openFilterPanel.value = (openFilterPanel.value === key) ? null : key;
@@ -126,24 +192,32 @@ createApp({
         }
         function applyFilters() {
             openFilterPanel.value = null;
-            reload();
-            reloadScatter();
+            invalidateAndReload();
         }
 
-        // Close dropdown when clicking outside
         function _outsideClick(e) {
             if (!e.target.closest('.filter-dropdown')) openFilterPanel.value = null;
         }
 
-        // ── chart canvases & instances ──
-        const utilCanvas    = ref(null);
-        const depthCanvas   = ref(null);
-        const scatterCanvas = ref(null);
-        let _utilChart      = null;
-        let _depthChart     = null;
-        let _scatterChart   = null;
+        // ── Loading indicators ────────────────────────────────────────────
+        const loadingUtil  = ref(false);
+        const loadingDepth = ref(false);
+        const loadingAny   = computed(() => loadingUtil.value || loadingDepth.value);
 
-        // ── query string building ──
+        // ── Chart canvas refs & instances ─────────────────────────────────
+        const utilCanvas  = ref(null);
+        const depthCanvas = ref(null);
+        let _utilChart    = null;
+        let _depthChart   = null;
+
+        // Destroy both Trends chart instances (called on tab switch away from Trends
+        // to avoid canvas-leak warnings from Chart.js).
+        function _destroyTrendsCharts() {
+            if (_utilChart)  { _utilChart.destroy();  _utilChart  = null; }
+            if (_depthChart) { _depthChart.destroy(); _depthChart = null; }
+        }
+
+        // ── Query-string builder ──────────────────────────────────────────
         function buildParams(extra = {}) {
             const p = new URLSearchParams();
             p.set('days', days.value);
@@ -161,15 +235,20 @@ createApp({
             return p.toString();
         }
 
-        // ── fetchers ──
+        // Cache key = tabId + '|' + current params string
+        function cacheKey(tabId) {
+            return `${tabId}|${buildParams()}`;
+        }
+
+        // ── Fetchers ──────────────────────────────────────────────────────
         async function fetchFilters() {
             try {
                 const r = await fetch(`/api/analytics/filters?days=${days.value}`);
                 if (!r.ok) return;
                 const data = await r.json();
-                filterOptions.queue           = data.queues || [];
-                filterOptions.owner           = data.owners || [];
-                filterOptions.project         = data.projects || [];
+                filterOptions.queue           = data.queues           || [];
+                filterOptions.owner           = data.owners           || [];
+                filterOptions.project         = data.projects         || [];
                 filterOptions.allocation_type = data.allocation_types || [];
             } catch (e) { console.warn('filters fetch:', e); }
         }
@@ -184,16 +263,42 @@ createApp({
             } catch {}
         }
 
-        const loadingUtil  = ref(false);
-        const loadingDepth = ref(false);
-        const loadingScatter = ref(false);
-        const loadingAny = computed(() => loadingUtil.value || loadingDepth.value || loadingScatter.value);
+        // Completeness banner: lightweight summary call (plan §5.6 / §4.2).
+        // The endpoint does not exist yet (task E adds it); 404 is silently
+        // swallowed so the banner simply stays hidden.
+        async function fetchCollectorBanner() {
+            collectBanner.value = null;
+            try {
+                const r = await fetch(`/api/analytics/collector-health?days=${days.value}&summary=1`);
+                if (!r.ok) return; // 404 expected until task E — silently skip
+                const d = await r.json();
+                if (d.gap_count > 0 || d.failed_count > 0) {
+                    collectBanner.value =
+                        `${d.gap_count} collection gap(s) detected in this range` +
+                        (d.max_gap_min ? ` (max gap: ${d.max_gap_min} min)` : '') +
+                        '. Collector Health tab has details.';
+                }
+            } catch {
+                // collector-health endpoint not yet deployed — no banner
+            }
+        }
 
-        async function reload() {
+        // ── Trends-tab data fetch & render ────────────────────────────────
+        async function fetchTrends() {
+            const key = cacheKey('trends');
+
+            // Cache hit: re-render from stored data (no network needed)
+            if (tabData[key]) {
+                await nextTick();
+                _renderTrendsFromCache(tabData[key]);
+                return;
+            }
+
             loadingUtil.value  = true;
             loadingDepth.value = true;
-            loading.value = true;
-            error.value = null;
+            loading.value      = true;
+            error.value        = null;
+
             try {
                 const qs = buildParams();
                 const [uRes, dRes] = await Promise.all([
@@ -210,122 +315,102 @@ createApp({
                 const dCollapsed = collapseResvGroups(dData.series, dData.groups);
                 dData.series = dCollapsed.series; dData.groups = dCollapsed.groups;
 
-                // Filter depth: drop queues with negligible total
+                // Filter depth: drop negligible queues
                 const dFiltered = filterSmallGroups(dData.series, dData.groups, DEPTH_MIN_NODE_HOURS);
                 dData.series = dFiltered.series; dData.groups = dFiltered.groups;
 
-                // Pre-register all groups from both charts so colors
-                // are assigned in a single sorted pass and stay
-                // consistent across the utilization and depth plots.
+                // Pre-register all groups in a single sorted pass so colors
+                // are deterministic regardless of response order.
                 const allGroups = [...new Set([...uData.groups, ...dData.groups])].sort();
                 allGroups.forEach(g => colorFor(g));
 
-                renderLineChart('util',  uData, '%', '/ capacity', true);
-                renderLineChart('depth', dData, 'system-hours', 'queued backlog', true);
-                utilMeta.value  = `${uData.groups.length} group(s) · ${uData.bins.length} bins · ${uData.total_nodes} compute nodes`;
-                depthMeta.value = `${dData.groups.length} group(s) · ${dData.bins.length} bins · normalized to ${dData.total_nodes} nodes`;
+                // Store in cache before rendering (cache survives tab switches)
+                tabData[key] = { uData, dData };
+
+                await nextTick();
+                _renderTrendsFromCache(tabData[key]);
                 lastRefresh.value = new Date().toLocaleTimeString();
             } catch (e) {
                 console.error(e);
-                error.value = `Failed to load analytics: ${e.message}`;
+                error.value = `Failed to load Trends: ${e.message}`;
             } finally {
-                loading.value = false;
+                loading.value      = false;
                 loadingUtil.value  = false;
                 loadingDepth.value = false;
             }
         }
 
-        async function reloadScatter() {
-            loadingScatter.value = true;
-            try {
-                const qs = buildParams({ x_axis: xAxis.value });
-                const r = await fetch(`/api/analytics/wait-vs-score?${qs}`);
-                if (!r.ok) throw new Error('API error');
-                const data = await r.json();
-                scatterNote.value = data.note || null;
-                renderScatter(data);
-            } catch (e) {
-                console.error('scatter:', e);
-                scatterNote.value = `Failed: ${e.message}`;
-            } finally {
-                loadingScatter.value = false;
+        function _renderTrendsFromCache({ uData, dData }) {
+            renderLineChart('util',  uData, '%',            '/ capacity',    true);
+            renderLineChart('depth', dData, 'system-hours', 'queued backlog', true);
+            utilMeta.value  = `${uData.groups.length} group(s) · ${uData.bins.length} bins · ${uData.total_nodes} compute nodes`;
+            depthMeta.value = `${dData.groups.length} group(s) · ${dData.bins.length} bins · normalized to ${dData.total_nodes} nodes`;
+            lastRefresh.value = new Date().toLocaleTimeString();
+        }
+
+        // ── Tab switching ─────────────────────────────────────────────────
+        async function switchTab(tabId) {
+            if (activeTab.value === tabId) return;
+
+            // Destroy chart instances on the old tab to avoid canvas leaks
+            if (activeTab.value === 'trends') _destroyTrendsCharts();
+
+            activeTab.value = tabId;
+
+            // Fetch data for the newly active tab
+            if (tabId === 'trends') {
+                await nextTick();
+                await fetchTrends();
             }
+            // Tabs A-E: no fetch needed — placeholder renders immediately.
+            // When tasks A-E are implemented they will add their own fetch
+            // calls here (or wire them into this switch statement).
         }
 
-        // ── chart renderers ──
-        function filterSmallGroups(series, groups, minTotal) {
-            const kept = groups.filter(g => {
-                const vals = series[g] || [];
-                return vals.reduce((a, b) => a + b, 0) >= minTotal;
+        // ── Global control changes ────────────────────────────────────────
+        // Invalidate ALL cached tab data, then reload the currently active tab.
+        function invalidateAndReload() {
+            // Clear entire tabData cache
+            for (const k of Object.keys(tabData)) delete tabData[k];
+            // Reload active tab
+            if (activeTab.value === 'trends') fetchTrends();
+            // Other tabs are placeholders — nothing to reload yet.
+        }
+
+        function setDays(d) {
+            days.value = d;
+            // Refresh filter options for the new window, then invalidate + reload
+            fetchFilters().then(() => {
+                invalidateAndReload();
+                fetchCollectorBanner();
             });
-            const filtered = {};
-            for (const g of kept) filtered[g] = series[g];
-            return { series: filtered, groups: kept };
         }
 
-        function _commonLineOpts(yLabel, stacked) {
-            return {
-                responsive: true,
-                maintainAspectRatio: false,
-                interaction: { mode: 'index', intersect: false },
-                plugins: {
-                    legend: { labels: { color: '#e0e0e0', boxWidth: 12 }, position: 'bottom' },
-                    tooltip: {
-                        mode: 'index',
-                        intersect: false,
-                        itemSort: (a, b) => b.parsed.y - a.parsed.y,
-                        callbacks: {
-                            beforeBody: () => [],
-                            afterBody: (items) => {
-                                // items are already sorted largest-first by itemSort
-                                const total = items.reduce((s, it) => s + (it.parsed.y || 0), 0);
-                                const hidden = Math.max(0, items.length - 5);
-                                return [
-                                    `Total: ${total.toFixed(2)}`,
-                                    ...(hidden > 0 ? [`(+${hidden} more not shown)`] : []),
-                                ];
-                            },
-                            label: (item) => {
-                                // Only render top 5 items
-                                const sorted = item.chart.tooltip.dataPoints
-                                    .slice()
-                                    .sort((a, b) => b.parsed.y - a.parsed.y);
-                                const rank = sorted.findIndex(d => d.datasetIndex === item.datasetIndex);
-                                if (rank >= 5) return null;
-                                return ` ${item.dataset.label}: ${item.parsed.y.toFixed(2)}`;
-                            },
-                        },
-                    },
-                },
-                scales: {
-                    x: { ticks: { color: '#94a3b8', maxRotation: 45, autoSkip: true, maxTicksLimit: 20 },
-                         grid: { color: '#2d3748' },
-                         stacked: stacked || false },
-                    y: { ticks: { color: '#94a3b8' }, grid: { color: '#2d3748' },
-                         title: { display: true, text: yLabel, color: '#94a3b8' },
-                         stacked: stacked || false },
-                },
-            };
-        }
+        // ── Convenience alias (used by Bin/Group buttons) ─────────────────
+        // Note: analytics.html calls invalidateAndReload() directly via @click.
+        function reload() { invalidateAndReload(); }
 
+        // ── Chart renderers ───────────────────────────────────────────────
         function renderLineChart(which, data, yUnit, subtitle, stacked) {
-            const freq = data.freq;
-            const labels = (data.bins || []).map(b => fmtBin(b, freq));
-            const sorted = [...(data.groups || [])].sort();
+            const freq    = data.freq;
+            const labels  = (data.bins || []).map(b => fmtBin(b, freq));
+            const sorted  = [...(data.groups || [])].sort();
             const datasets = sorted.map(grp => ({
-                label: grp,
-                data: data.series[grp] || [],
-                borderColor: colorFor(grp, sorted),
-                backgroundColor: colorFor(grp, sorted) + '99',
-                borderWidth: 1.5,
-                pointRadius: 0,
+                label:           grp,
+                data:            data.series[grp] || [],
+                borderColor:     colorFor(grp),
+                backgroundColor: colorFor(grp) + '99',
+                borderWidth:     1.5,
+                pointRadius:     0,
                 pointHoverRadius: 4,
-                tension: 0.2,
-                fill: stacked ? 'origin' : false,
+                tension:         0.2,
+                fill:            stacked ? 'origin' : false,
             }));
 
             const canvas = which === 'util' ? utilCanvas.value : depthCanvas.value;
             if (!canvas) return;
+
+            // Destroy existing chart before creating a new one
             const existing = which === 'util' ? _utilChart : _depthChart;
             if (existing) existing.destroy();
 
@@ -338,90 +423,34 @@ createApp({
             else                   _depthChart = chart;
         }
 
-        function renderScatter(data) {
-            if (!scatterCanvas.value) return;
-            if (_scatterChart) { _scatterChart.destroy(); _scatterChart = null; }
-            const points = data.points || [];
-            if (points.length === 0) return;
-
-            // Group by queue
-            const byQueue = {};
-            for (const p of points) {
-                if (!byQueue[p.queue]) byQueue[p.queue] = [];
-                byQueue[p.queue].push({ x: p.x, y: p.y, job_id: p.job_id, owner: p.owner });
-            }
-            const sortedQ = Object.keys(byQueue).sort();
-            const datasets = sortedQ.map(q => ({
-                label: q,
-                data: byQueue[q],
-                backgroundColor: colorFor(q, sortedQ),
-                borderColor: colorFor(q, sortedQ),
-                pointRadius: 3,
-                pointHoverRadius: 5,
-            }));
-
-            const xLabel = data.x_axis === 'elapsed_time' ? 'Elapsed time (hours)' : 'Queue time (hours)';
-            _scatterChart = new Chart(scatterCanvas.value.getContext('2d'), {
-                type: 'scatter',
-                data: { datasets },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: { labels: { color: '#e0e0e0', boxWidth: 12 }, position: 'bottom' },
-                        tooltip: {
-                            callbacks: {
-                                label: (ctx) => {
-                                    const d = ctx.raw;
-                                    return `${ctx.dataset.label}: x=${d.x}h y=${d.y} (${d.job_id} ${d.owner})`;
-                                },
-                            },
-                        },
-                    },
-                    scales: {
-                        x: { type: 'linear', ticks: { color: '#94a3b8' }, grid: { color: '#2d3748' },
-                             title: { display: true, text: xLabel, color: '#94a3b8' } },
-                        y: { type: 'logarithmic',
-                             ticks: { color: '#94a3b8',
-                                      callback: (v) => Number.isInteger(Math.log10(v)) ? v.toLocaleString() : '' },
-                             grid: { color: '#2d3748' },
-                             title: { display: true, text: 'Score at run start (log scale)', color: '#94a3b8' } },
-                    },
-                },
-            });
-        }
-
-        function setDays(d) {
-            days.value = d;
-            // refresh filter options for new window, then reload
-            fetchFilters().then(() => {
-                reload();
-                reloadScatter();
-            });
-        }
-
+        // ── Lifecycle ─────────────────────────────────────────────────────
         onMounted(async () => {
             document.addEventListener('click', _outsideClick);
             await fetchSystemName();
             await fetchFilters();
-            await reload();
-            await reloadScatter();
+            // Fetch Trends (default tab) + completeness banner in parallel
+            await Promise.all([
+                fetchTrends(),
+                fetchCollectorBanner(),
+            ]);
         });
 
         return {
             // state
-            systemName, days, freqOverride, groupBy, xAxis,
-            loading, loadingAny, error, scatterNote, lastRefresh,
+            systemName, days, freqOverride, groupBy,
+            loading, loadingAny, error, lastRefresh, collectBanner,
             utilMeta, depthMeta,
             freqChoices, effectiveFreq, effectiveFreqLabel,
+            // tabs
+            tabDefs, activeTab, switchTab,
             // filters
             filterDims, filterOptions, filterSelections, filterMode, filterSearch,
             openFilterPanel,
             toggleFilterPanel, activeFilterCount, filteredOptions, clearFilter, applyFilters,
-            // canvases
-            utilCanvas, depthCanvas, scatterCanvas,
+            // canvas refs
+            utilCanvas, depthCanvas,
             // actions
-            setDays, reload, reloadScatter,
+            setDays, reload, invalidateAndReload,
         };
     }
 }).mount('#app');
