@@ -229,18 +229,20 @@
                             <tr>
                                 <th>{{ walltimeScorecard.group_by === 'project' ? 'Project' : 'User' }}</th>
                                 <th>Jobs</th>
-                                <th>Mean eff %</th>
-                                <th>Median eff %</th>
-                                <th>Node-hours</th>
+                                <th>Mean eff</th>
+                                <th>Std dev</th>
+                                <th>Min eff</th>
+                                <th>Max eff</th>
                             </tr>
                         </thead>
                         <tbody>
                             <tr v-for="row in walltimeScorecard.rows" :key="row.name">
                                 <td>{{ row.name }}</td>
-                                <td>{{ row.jobs.toLocaleString() }}</td>
-                                <td>{{ row.mean_efficiency.toFixed(1) }}%</td>
-                                <td>{{ row.median_efficiency.toFixed(1) }}%</td>
-                                <td>{{ (row.node_hours || 0).toFixed(1) }}</td>
+                                <td>{{ (row.jobs || 0).toLocaleString() }}</td>
+                                <td>{{ row.mean_efficiency }}</td>
+                                <td>{{ row.std_dev }}</td>
+                                <td>{{ row.min_efficiency }}</td>
+                                <td>{{ row.max_efficiency }}</td>
                             </tr>
                         </tbody>
                     </table>

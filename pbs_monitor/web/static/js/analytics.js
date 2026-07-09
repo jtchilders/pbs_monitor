@@ -1121,7 +1121,11 @@ createApp({
                 data: cells.map(c => ({ x: c.x, y: c.y, v: c.count })),
                 backgroundColor(ctx) {
                     const v = ctx.dataset.data[ctx.dataIndex]?.v ?? 0;
-                    const alpha = 0.08 + 0.88 * (v / maxCount);
+                    if (v <= 0) return 'rgba(0,0,0,0)';
+                    // sqrt (perceptual) ramp with a visible floor so sparse
+                    // cells don't vanish into the dark background — a linear
+                    // ramp makes low-count cells (alpha≈0.08) invisible.
+                    const alpha = 0.18 + 0.80 * Math.sqrt(v / maxCount);
                     return `rgba(${br},${bg},${bb},${alpha.toFixed(3)})`;
                 },
                 borderColor(ctx) {
@@ -1139,16 +1143,18 @@ createApp({
                     return (d.y === RISK_Y || d.x === d.y) ? 2 : 0.5;
                 },
                 width(ctx) {
-                    const chart = ctx.chart;
-                    const area  = chart.chartArea;
-                    if (!area) return 0;
-                    return (area.right - area.left) / xLabels.length - 2;
+                    // Derive cell width from the x-scale's pixel spacing, not
+                    // chart.chartArea (which is undefined on first paint and
+                    // yields 0-size, invisible cells). One category = 1 unit on
+                    // the linear axis.
+                    const x = ctx.chart.scales.x;
+                    if (!x) return 0;
+                    return Math.max(0, (x.getPixelForValue(1) - x.getPixelForValue(0)) - 2);
                 },
                 height(ctx) {
-                    const chart = ctx.chart;
-                    const area  = chart.chartArea;
-                    if (!area) return 0;
-                    return (area.bottom - area.top) / yLabels.length - 2;
+                    const y = ctx.chart.scales.y;
+                    if (!y) return 0;
+                    return Math.max(0, Math.abs(y.getPixelForValue(1) - y.getPixelForValue(0)) - 2);
                 },
             }];
 
