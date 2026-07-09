@@ -1079,6 +1079,24 @@ Examples:
       help="Bypass read-only checks and attempt writes regardless"
    )
 
+   # Database backfill
+   db_backfill_parser = database_subparsers.add_parser(
+      "backfill",
+      help="Backfill exit_status + outcome_class for existing job rows (T0 migration step)"
+   )
+   db_backfill_parser.add_argument(
+      "--batch-size",
+      type=int,
+      default=5000,
+      dest="batch_size",
+      help="Number of rows to update per transaction (default: 5000)"
+   )
+   db_backfill_parser.add_argument(
+      "--dry-run",
+      action="store_true",
+      help="Scan and classify without writing to the database"
+   )
+
    # Daemon command
    daemon_parser = subparsers.add_parser(
       "daemon",
