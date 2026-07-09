@@ -161,23 +161,52 @@
 
             </template>
 
-            <!-- ── Tab: Job Outcomes (PLACEHOLDER — task A plugs in here) ── -->
+            <!-- ── Tab: Job Outcomes — Task A ── -->
             <template v-if="activeTab === 'job-outcomes'">
                 <!--
-                  TASK A MOUNT POINT
+                  TASK A MOUNT POINT — IMPLEMENTED
                   Container id:  "tab-job-outcomes"
                   Chart refs:    jobOutcomesCanvas (stacked area), exitTaxonomyCanvas (bar)
                   Section ref:   jobOutcomesSection
                   Endpoints:     GET /api/analytics/job-outcomes, GET /api/analytics/exit-taxonomy
                   Colors:        window.PBSColors.OUTCOME_COLORS
                 -->
+
+                <!-- Chart 1: Stacked job count / rate over time -->
                 <section class="panel" id="tab-job-outcomes" ref="jobOutcomesSection">
-                    <div class="panel-header"><h2>Job Outcomes</h2></div>
-                    <div class="tab-placeholder">
-                        <p>Coming soon — stacked failure-rate chart + exit-status taxonomy bar.</p>
-                        <p class="tab-placeholder-note">Implements plan §5.1 &amp; §5.2. Depends on T0 (exit_status backfill).</p>
+                    <div class="panel-header">
+                        <h2>Job Outcomes over time</h2>
+                        <!-- Rate / Count toggle -->
+                        <div class="btn-group" style="margin-left:auto">
+                            <button :class="{ active: outcomeMode==='count' }"
+                                    @click="outcomeMode='count'; renderOutcomesFromCache()">Count</button>
+                            <button :class="{ active: outcomeMode==='rate' }"
+                                    @click="outcomeMode='rate'; renderOutcomesFromCache()">Rate %</button>
+                        </div>
+                        <span class="panel-meta" v-if="outcomesMeta">{{ outcomesMeta }}</span>
+                    </div>
+                    <!-- Legend note: visual grouping explained -->
+                    <div v-if="outcomesLegendNote" class="analytics-banner-info" style="margin-bottom:6px;font-size:0.78rem;color:#94a3b8;padding:4px 8px;border-left:3px solid #8b5cf6;">
+                        {{ outcomesLegendNote }}
+                    </div>
+                    <div v-if="loadingOutcomes" class="analytics-loading">Loading Job Outcomes…</div>
+                    <div class="chart-wrap" v-show="!loadingOutcomes">
+                        <canvas ref="jobOutcomesCanvas"></canvas>
                     </div>
                 </section>
+
+                <!-- Chart 2: Exit-status taxonomy bar -->
+                <section class="panel" id="tab-exit-taxonomy">
+                    <div class="panel-header">
+                        <h2>Exit-code taxonomy</h2>
+                        <span class="panel-meta" v-if="taxonomyMeta">{{ taxonomyMeta }}</span>
+                    </div>
+                    <div v-if="loadingTaxonomy" class="analytics-loading">Loading Exit Taxonomy…</div>
+                    <div class="chart-wrap" v-show="!loadingTaxonomy">
+                        <canvas ref="exitTaxonomyCanvas"></canvas>
+                    </div>
+                </section>
+
             </template>
 
             <!-- ── Tab: Walltime Accuracy (PLACEHOLDER — task B plugs in here) ── -->
@@ -235,7 +264,7 @@
                 </section>
             </template>
 
-            <!-- ── Tab: Collector Health (PLACEHOLDER — task E plugs in here) ── -->
+            <!-- ── Tab: Collector Health — Task E ── -->
             <template v-if="activeTab === 'collector-health'">
                 <!--
                   TASK E MOUNT POINT
@@ -244,13 +273,84 @@
                   Section ref:   collectorHealthSection
                   Endpoint:      GET /api/analytics/collector-health  (full, no ?summary=1)
                   Banner endpoint: GET /api/analytics/collector-health?summary=1
-                                   (already wired in fetchCollectorBanner() — just implement the endpoint)
+                                   (wired in fetchCollectorBanner())
                 -->
                 <section class="panel" id="tab-collector-health" ref="collectorHealthSection">
-                    <div class="panel-header"><h2>Collector Health</h2></div>
-                    <div class="tab-placeholder">
-                        <p>Coming soon — collection cadence/gap chart + completeness summary.</p>
-                        <p class="tab-placeholder-note">Implements plan §5.6. Also adds the banner shown on every tab.</p>
+                    <div class="panel-header">
+                        <h2>Collector Health</h2>
+                        <span class="panel-meta" v-if="collectorHealthMeta">{{ collectorHealthMeta }}</span>
+                    </div>
+
+                    <!-- Loading / error states -->
+                    <div v-if="loadingCollectorHealth" class="analytics-loading">Loading collector health…</div>
+                    <div v-if="collectorHealthError" class="analytics-error">{{ collectorHealthError }}</div>
+
+                    <!-- Summary stats row -->
+                    <div class="ch-summary-row" v-if="!loadingCollectorHealth && !collectorHealthError && collectorHealthData">
+                        <div class="ch-stat">
+                            <span class="ch-stat-value" :class="{ 'ch-bad': collectorHealthData.gap_count > 0 }">
+                                {{ collectorHealthData.gap_count }}
+                            </span>
+                            <span class="ch-stat-label">Gaps detected</span>
+                        </div>
+                        <div class="ch-stat">
+                            <span class="ch-stat-value" :class="{ 'ch-bad': collectorHealthData.max_gap_min > 120 }">
+                                {{ collectorHealthData.max_gap_min > 0 ? collectorHealthData.max_gap_min + ' min' : '—' }}
+                            </span>
+                            <span class="ch-stat-label">Max gap</span>
+                        </div>
+                        <div class="ch-stat">
+                            <span class="ch-stat-value">
+                                {{ collectorHealthData.median_gap_min != null ? collectorHealthData.median_gap_min + ' min' : '—' }}
+                            </span>
+                            <span class="ch-stat-label">Median cadence</span>
+                        </div>
+                        <div class="ch-stat">
+                            <span class="ch-stat-value" :class="{ 'ch-bad': collectorHealthData.failed_count > 0 }">
+                                {{ collectorHealthData.failed_count }}
+                            </span>
+                            <span class="ch-stat-label">Collection failures</span>
+                        </div>
+                        <div class="ch-stat">
+                            <span class="ch-stat-value"
+                                  :class="{ 'ch-bad': collectorHealthData.last_success_age_min != null && collectorHealthData.last_success_age_min > 120 }">
+                                {{ collectorHealthData.last_success_age_min != null
+                                    ? (collectorHealthData.last_success_age_min > 1440
+                                        ? (collectorHealthData.last_success_age_min / 1440).toFixed(1) + 'd'
+                                        : collectorHealthData.last_success_age_min + ' min')
+                                    : '—' }}
+                            </span>
+                            <span class="ch-stat-label">Since last success</span>
+                        </div>
+                    </div>
+
+                    <!-- Gap chart: step chart of gap_min over time, gaps >60min flagged red -->
+                    <div class="chart-wrap" v-if="!loadingCollectorHealth && !collectorHealthError && collectorHealthData">
+                        <canvas ref="collectorGapCanvas"></canvas>
+                    </div>
+
+                    <!-- Failures table (only shown when failures exist) -->
+                    <div v-if="collectorHealthData && collectorHealthData.failures && collectorHealthData.failures.length > 0"
+                         class="panel" style="margin-top:1rem;">
+                        <div class="panel-header"><h3>Collection Failures</h3></div>
+                        <table class="ch-failures-table">
+                            <thead>
+                                <tr><th>Timestamp</th><th>Type</th><th>Error</th></tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="f in collectorHealthData.failures" :key="f.timestamp">
+                                    <td>{{ f.timestamp }}</td>
+                                    <td>{{ f.collection_type }}</td>
+                                    <td class="ch-error-msg">{{ f.error_message || '(no message)' }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- No-data state -->
+                    <div v-if="!loadingCollectorHealth && !collectorHealthError && collectorHealthData && collectorHealthData.cadence && collectorHealthData.cadence.length === 0"
+                         class="tab-placeholder">
+                        <p>No snapshot data found in the selected range.</p>
                     </div>
                 </section>
             </template>
