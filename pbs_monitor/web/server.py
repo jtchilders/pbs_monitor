@@ -1562,7 +1562,9 @@ def create_app(config=None) -> FastAPI:
             )
             q = _apply_job_filters(q, queue, queue_exclude, owner, owner_exclude,
                                    project, project_exclude, allocation_type, allocation_type_exclude)
-            jobs = q.all()
+            # Pull only the two columns needed — avoid loading full Job ORM
+            # objects (incl. raw_pbs_data JSON) for hundreds of thousands of rows.
+            rows = q.with_entities(Job.outcome_class, Job.end_time).all()
 
             # Build bin list
             bins: list[datetime] = []
@@ -1579,9 +1581,8 @@ def create_app(config=None) -> FastAPI:
             counts: dict[str, list[int]] = {}
             totals: list[int] = [0] * n_bins
 
-            for job in jobs:
-                cls = job.outcome_class if job.outcome_class else 'unknown'
-                je = job.end_time
+            for cls_val, je in rows:
+                cls = cls_val if cls_val else 'unknown'
                 if je and je.tzinfo:
                     je = je.replace(tzinfo=None)
                 if je is None:
@@ -1803,7 +1804,10 @@ def create_app(config=None) -> FastAPI:
             )
             q = _apply_job_filters(q, queue, queue_exclude, owner, owner_exclude,
                                    project, project_exclude, allocation_type, allocation_type_exclude)
-            jobs = q.all()
+            # Only pull the two columns we need — loading full Job ORM objects
+            # (incl. the multi-KB raw_pbs_data JSON) for ~450k rows blows past
+            # the request timeout.  with_entities keeps this a lean 2-column scan.
+            rows = q.with_entities(Job.walltime, Job.actual_runtime_seconds).all()
 
             nx = len(x_labels)
             ny = len(y_labels)
@@ -1813,12 +1817,11 @@ def create_app(config=None) -> FastAPI:
             fractions = []
             excluded_unparseable = 0
 
-            for job in jobs:
-                req_sec = _parse_wt(job.walltime)
+            for wt_val, actual in rows:
+                req_sec = _parse_wt(wt_val)
                 if req_sec is None or req_sec <= 0:
                     excluded_unparseable += 1
                     continue
-                actual = job.actual_runtime_seconds
                 frac = actual / req_sec  # may exceed 1.0
                 frac_pct = frac * 100.0
                 fractions.append(frac)
@@ -1929,18 +1932,21 @@ def create_app(config=None) -> FastAPI:
                 Job.actual_runtime_seconds.isnot(None),
                 Job.actual_runtime_seconds > 0,
             )
-            jobs = q.all()
+            group_col_attr = Job.owner if group_by != "project" else Job.project
+            q = q.with_entities(
+                Job.walltime, Job.actual_runtime_seconds, group_col_attr
+            )
+            rows_raw = q.all()
 
             # Aggregate by group
-            group_col = "owner" if group_by != "project" else "project"
             stats: dict[str, dict] = {}
-            for job in jobs:
-                req_sec = _parse_wt_sec(job.walltime)
+            for wt_val, actual_val, grp_val in rows_raw:
+                req_sec = _parse_wt_sec(wt_val)
                 if req_sec <= 0:
                     continue
-                actual = job.actual_runtime_seconds or 0
+                actual = actual_val or 0
                 eff = min((actual / req_sec) * 100.0, 100.0)
-                name = getattr(job, group_col, None) or "unknown"
+                name = grp_val or "unknown"
                 if name not in stats:
                     stats[name] = {"effs": [], "jobs": 0}
                 stats[name]["effs"].append(eff)
