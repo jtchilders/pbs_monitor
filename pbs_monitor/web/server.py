@@ -2246,6 +2246,378 @@ def create_app(config=None) -> FastAPI:
             return _compute()
         return await asyncio.get_event_loop().run_in_executor(None, _compute)
 
+    # ---- Task C: Wait Times endpoints ----
+
+    @app.get("/api/analytics/wait-ecdf")
+    async def api_analytics_wait_ecdf(
+        days: int = 30,
+        group_by: str = 'queue',
+        db: Session = Depends(get_db),
+        queue: List[str] = Query(default=[]),
+        queue_exclude: List[str] = Query(default=[]),
+        owner: List[str] = Query(default=[]),
+        owner_exclude: List[str] = Query(default=[]),
+        project: List[str] = Query(default=[]),
+        project_exclude: List[str] = Query(default=[]),
+        allocation_type: List[str] = Query(default=[]),
+        allocation_type_exclude: List[str] = Query(default=[]),
+    ):
+        """ECDF of queue_time_seconds per group for FINISHED jobs in window.
+
+        Server-side downsampled to ≤200 points per group (quantile sampling).
+        Returns {groups, curves:{group:[[wait_hours, cum_fraction], ...]}}
+        Never returns raw per-job arrays (plan §4.3).
+        """
+        if group_by not in ('queue', 'allocation_type', 'project'):
+            group_by = 'queue'
+
+        now = datetime.now(timezone.utc)
+        window_start  = _floor_bin(now - timedelta(days=days), _auto_freq(days))
+        last_complete = _floor_bin(now, _auto_freq(days))
+
+        cache_key = _analytics_cache.make_key({
+            "endpoint": "wait-ecdf",
+            "days": days,
+            "window_start": window_start.isoformat(),
+            "last_complete": last_complete.isoformat(),
+            "group_by": group_by,
+            "queue": sorted(queue), "queue_exclude": sorted(queue_exclude),
+            "owner": sorted(owner), "owner_exclude": sorted(owner_exclude),
+            "project": sorted(project), "project_exclude": sorted(project_exclude),
+            "allocation_type": sorted(allocation_type),
+            "allocation_type_exclude": sorted(allocation_type_exclude),
+        })
+        cached = _analytics_cache.get(cache_key)
+        if cached:
+            return cached
+
+        DOWNSAMPLE_POINTS = 200  # max points per group curve
+
+        def _compute():
+            # Select only the two columns needed — avoid loading full ORM objects
+            group_col = getattr(Job, group_by)
+            q = db.query(Job).filter(
+                Job.state == JobState.FINISHED,
+                Job.start_time >= window_start,
+                Job.start_time < last_complete,
+                Job.start_time.isnot(None),
+                Job.queue_time_seconds.isnot(None),
+                Job.queue_time_seconds >= 0,
+            )
+            q = _apply_job_filters(q, queue, queue_exclude, owner, owner_exclude,
+                                   project, project_exclude, allocation_type, allocation_type_exclude)
+            rows = q.with_entities(Job.queue_time_seconds, group_col).all()
+
+            # Group wait times by group value
+            from collections import defaultdict
+            group_waits: dict = defaultdict(list)
+            for wait_sec, grp_val in rows:
+                grp = grp_val or 'unknown'
+                group_waits[grp].append(float(wait_sec))
+
+            groups_sorted = sorted(group_waits.keys())
+
+            # Build ECDF per group, downsampled to DOWNSAMPLE_POINTS
+            curves: dict = {}
+            for grp in groups_sorted:
+                waits = sorted(group_waits[grp])
+                n = len(waits)
+                if n == 0:
+                    continue
+                # Sample quantile indices for up to DOWNSAMPLE_POINTS points
+                if n <= DOWNSAMPLE_POINTS:
+                    indices = list(range(n))
+                else:
+                    step = n / DOWNSAMPLE_POINTS
+                    indices = [int(i * step) for i in range(DOWNSAMPLE_POINTS)]
+                    if indices[-1] != n - 1:
+                        indices.append(n - 1)
+
+                curve = []
+                for idx in indices:
+                    wait_hours = round(waits[idx] / 3600.0, 4)
+                    cum_fraction = round((idx + 1) / n, 4)
+                    curve.append([wait_hours, cum_fraction])
+                curves[grp] = curve
+
+            return {
+                "group_by": group_by,
+                "groups": groups_sorted,
+                "curves": curves,
+                "n_jobs": sum(len(v) for v in group_waits.values()),
+            }
+
+        result = await asyncio.get_event_loop().run_in_executor(None, _compute)
+        _analytics_cache.set(cache_key, result)
+        return result
+
+    @app.get("/api/analytics/wait-percentiles")
+    async def api_analytics_wait_percentiles(
+        days: int = 30,
+        freq: Optional[str] = None,
+        group_by: str = 'queue',
+        db: Session = Depends(get_db),
+        queue: List[str] = Query(default=[]),
+        queue_exclude: List[str] = Query(default=[]),
+        owner: List[str] = Query(default=[]),
+        owner_exclude: List[str] = Query(default=[]),
+        project: List[str] = Query(default=[]),
+        project_exclude: List[str] = Query(default=[]),
+        allocation_type: List[str] = Query(default=[]),
+        allocation_type_exclude: List[str] = Query(default=[]),
+    ):
+        """Per-bin p50/p90/p99 of queue_time_seconds for jobs that STARTED in that bin.
+
+        Returns {freq, bins, groups, series:{group:{p50:[...],p90:[...],p99:[...]}}}
+        Used for the 'queue degrading' early-warning view (plan §5.5).
+        """
+        if group_by not in ('queue', 'allocation_type', 'project'):
+            group_by = 'queue'
+
+        eff_freq = freq if freq in ('h', 'd', 'w') else _auto_freq(days)
+        now = datetime.now(timezone.utc)
+        window_start  = _floor_bin(now - timedelta(days=days), eff_freq)
+        last_complete = _floor_bin(now, eff_freq)
+
+        cache_key = _analytics_cache.make_key({
+            "endpoint": "wait-percentiles",
+            "freq": eff_freq,
+            "window_start": window_start.isoformat(),
+            "last_complete": last_complete.isoformat(),
+            "group_by": group_by,
+            "queue": sorted(queue), "queue_exclude": sorted(queue_exclude),
+            "owner": sorted(owner), "owner_exclude": sorted(owner_exclude),
+            "project": sorted(project), "project_exclude": sorted(project_exclude),
+            "allocation_type": sorted(allocation_type),
+            "allocation_type_exclude": sorted(allocation_type_exclude),
+        })
+        cached = _analytics_cache.get(cache_key)
+        if cached:
+            return cached
+
+        def _compute():
+            group_col = getattr(Job, group_by)
+            q = db.query(Job).filter(
+                Job.state == JobState.FINISHED,
+                Job.start_time >= window_start,
+                Job.start_time < last_complete,
+                Job.start_time.isnot(None),
+                Job.queue_time_seconds.isnot(None),
+                Job.queue_time_seconds >= 0,
+            )
+            q = _apply_job_filters(q, queue, queue_exclude, owner, owner_exclude,
+                                   project, project_exclude, allocation_type, allocation_type_exclude)
+            rows = q.with_entities(Job.queue_time_seconds, Job.start_time, group_col).all()
+
+            # Build bin list
+            bins: list = []
+            t = window_start
+            while t < last_complete:
+                bins.append(t)
+                t = _next_bin(t, eff_freq)
+            n_bins = len(bins)
+            bin_index: dict = {b: i for i, b in enumerate(bins)}
+
+            # Collect wait_sec lists per (group, bin_index)
+            from collections import defaultdict
+            bucket: dict = defaultdict(lambda: defaultdict(list))
+
+            for wait_sec, js, grp_val in rows:
+                grp = grp_val or 'unknown'
+                if js and js.tzinfo:
+                    js = js.replace(tzinfo=None)
+                if js is None:
+                    continue
+                # Find bin for start_time
+                bi = None
+                for i in range(n_bins - 1, -1, -1):
+                    if js >= bins[i]:
+                        bi = i
+                        break
+                if bi is None:
+                    continue
+                bucket[grp][bi].append(float(wait_sec))
+
+            groups_sorted = sorted(bucket.keys())
+            bin_labels = [b.isoformat() for b in bins]
+
+            def _percentile(vals: list, p: float) -> float:
+                """Return the p-th percentile (0–100) of sorted list."""
+                if not vals:
+                    return 0.0
+                sv = sorted(vals)
+                n = len(sv)
+                idx = (p / 100) * (n - 1)
+                lo = int(idx)
+                hi = min(lo + 1, n - 1)
+                frac = idx - lo
+                return round(sv[lo] * (1 - frac) + sv[hi] * frac, 1)
+
+            series: dict = {}
+            for grp in groups_sorted:
+                p50 = []
+                p90 = []
+                p99 = []
+                for bi in range(n_bins):
+                    vals = bucket[grp].get(bi, [])
+                    p50.append(_percentile(vals, 50))
+                    p90.append(_percentile(vals, 90))
+                    p99.append(_percentile(vals, 99))
+                series[grp] = {"p50": p50, "p90": p90, "p99": p99}
+
+            return {
+                "freq": eff_freq,
+                "group_by": group_by,
+                "bins": bin_labels,
+                "groups": groups_sorted,
+                "series": series,
+            }
+
+        result = await asyncio.get_event_loop().run_in_executor(None, _compute)
+        _analytics_cache.set(cache_key, result)
+        return result
+
+    # ---- Task D: Reservations endpoint ----
+
+    @app.get("/api/analytics/reservation-utilization-timeline")
+    async def api_analytics_reservation_utilization_timeline(
+        days: int = 365,
+        top_n: int = 20,
+        db: Session = Depends(get_db),
+    ):
+        """Per-reservation reserved-vs-used node-hours + wasted-hours ranking.
+
+        Reuses Reservation ORM directly against the injected db session
+        (ReservationUtilizationAnalyzer opens its own sessions via Config
+        and cannot share the FastAPI-injected db — see pitfalls).
+
+        Returns compact payload with top_n reservations by wasted_node_hours
+        plus summary stats. Cache by (days, top_n).
+        """
+        now = datetime.now(timezone.utc)
+        window_start = now - timedelta(days=days)
+
+        cache_key = _analytics_cache.make_key({
+            "endpoint": "reservation-utilization-timeline",
+            "days": days,
+            "top_n": top_n,
+            "window_start": window_start.isoformat(),
+        })
+        cached = _analytics_cache.get(cache_key)
+        if cached:
+            return cached
+
+        def _compute():
+            # Fetch reservations that overlap the window
+            # Strip tz from window_start for naive-datetime DBs (SQLite)
+            ws_naive = window_start.replace(tzinfo=None)
+            reservations = db.query(Reservation).filter(
+                Reservation.nodes.isnot(None),
+                Reservation.nodes > 0,
+                Reservation.start_time.isnot(None),
+                Reservation.end_time.isnot(None),
+                Reservation.end_time >= ws_naive,
+            ).with_entities(
+                Reservation.reservation_id,
+                Reservation.reservation_name,
+                Reservation.owner,
+                Reservation.nodes,
+                Reservation.start_time,
+                Reservation.end_time,
+                Reservation.queue,
+            ).all()
+
+            results = []
+            for res_id, res_name, owner, nodes, start_t, end_t, queue_name in reservations:
+                # Normalise timestamps (SQLite stores naive, Postgres stores tz-aware)
+                if start_t and hasattr(start_t, 'tzinfo') and start_t.tzinfo:
+                    start_t = start_t.replace(tzinfo=None)
+                if end_t and hasattr(end_t, 'tzinfo') and end_t.tzinfo:
+                    end_t = end_t.replace(tzinfo=None)
+
+                if not start_t or not end_t or end_t <= start_t:
+                    continue
+
+                duration_hours = (end_t - start_t).total_seconds() / 3600.0
+                reserved_node_hours = round(nodes * duration_hours, 2)
+
+                # Find jobs that ran in this reservation's queue during its window
+                job_rows = db.query(Job).filter(
+                    Job.queue == queue_name,
+                    Job.start_time.isnot(None),
+                    Job.start_time <= end_t,
+                    Job.nodes.isnot(None),
+                    Job.nodes > 0,
+                ).with_entities(
+                    Job.nodes, Job.start_time, Job.end_time
+                ).all()
+
+                used_node_hours = 0.0
+                for j_nodes, j_start, j_end in job_rows:
+                    if j_start is None:
+                        continue
+                    if j_start and hasattr(j_start, 'tzinfo') and j_start.tzinfo:
+                        j_start = j_start.replace(tzinfo=None)
+                    if j_end and hasattr(j_end, 'tzinfo') and j_end.tzinfo:
+                        j_end = j_end.replace(tzinfo=None)
+                    real_end = j_end if j_end else end_t
+                    ov_start = max(j_start, start_t)
+                    ov_end = min(real_end, end_t)
+                    if ov_end > ov_start:
+                        overlap_h = (ov_end - ov_start).total_seconds() / 3600.0
+                        used_node_hours += j_nodes * overlap_h
+
+                used_node_hours = round(used_node_hours, 2)
+                # Cap at reserved (jobs can't use more than reserved)
+                used_node_hours = min(used_node_hours, reserved_node_hours)
+                wasted_node_hours = round(reserved_node_hours - used_node_hours, 2)
+                utilization_pct = round(
+                    (used_node_hours / reserved_node_hours * 100) if reserved_node_hours > 0 else 0.0, 1
+                )
+
+                results.append({
+                    "reservation_id": res_id,
+                    "name": res_name or res_id,
+                    "owner": owner or "unknown",
+                    "nodes": nodes,
+                    "reserved_node_hours": reserved_node_hours,
+                    "used_node_hours": used_node_hours,
+                    "wasted_node_hours": wasted_node_hours,
+                    "utilization_pct": utilization_pct,
+                    "start": start_t.isoformat() if start_t else None,
+                    "end": end_t.isoformat() if end_t else None,
+                })
+
+            # Sort by wasted_node_hours descending for the ranking
+            results.sort(key=lambda r: r["wasted_node_hours"], reverse=True)
+
+            total = len(results)
+            total_reserved = round(sum(r["reserved_node_hours"] for r in results), 2)
+            total_used = round(sum(r["used_node_hours"] for r in results), 2)
+            total_wasted = round(total_reserved - total_used, 2)
+            avg_util = round(
+                sum(r["utilization_pct"] for r in results) / total if total > 0 else 0.0, 1
+            )
+            under_25_count = sum(1 for r in results if r["utilization_pct"] < 25)
+
+            # Return top_n + summary; discard tail to keep payload small
+            top_results = results[:top_n]
+
+            return {
+                "days": days,
+                "total_reservations": total,
+                "total_reserved_node_hours": total_reserved,
+                "total_used_node_hours": total_used,
+                "total_wasted_node_hours": total_wasted,
+                "avg_utilization_pct": avg_util,
+                "under_25_pct_count": under_25_count,
+                "reservations": top_results,
+            }
+
+        result = await asyncio.get_event_loop().run_in_executor(None, _compute)
+        _analytics_cache.set(cache_key, result)
+        return result
+
     app.mount("/css", StaticFiles(directory=str(STATIC_DIR / "css")), name="css")
     app.mount("/js", StaticFiles(directory=str(STATIC_DIR / "js")), name="js")
 
