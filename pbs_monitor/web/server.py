@@ -2153,11 +2153,15 @@ def create_app(config=None) -> FastAPI:
 
             timestamps_raw = [r[0] for r in rows]
 
-            # Parse timestamps (stored without tz in SQLite)
+            # Parse timestamps. SQLite returns naive datetimes / strings; Postgres
+            # returns tz-aware datetimes. Normalize everything to naive UTC so the
+            # arithmetic below never mixes offset-aware and offset-naive values.
             def _parse(ts):
                 if isinstance(ts, str):
-                    return datetime.fromisoformat(ts)
-                return ts  # already a datetime object
+                    ts = datetime.fromisoformat(ts)
+                if ts is not None and ts.tzinfo is not None:
+                    ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+                return ts
 
             timestamps = [_parse(t) for t in timestamps_raw]
 
@@ -2185,7 +2189,7 @@ def create_app(config=None) -> FastAPI:
                 text(
                     "SELECT timestamp, collection_type, error_message "
                     "FROM data_collection_log "
-                    "WHERE status NOT IN ('SUCCESS', 'success') "
+                    "WHERE UPPER(CAST(status AS VARCHAR)) != 'SUCCESS' "
                     "  AND timestamp >= :ws "
                     "ORDER BY timestamp DESC"
                 ),
@@ -2205,7 +2209,7 @@ def create_app(config=None) -> FastAPI:
             last_ok_row = db.execute(  # type: ignore[attr-defined]
                 text(
                     "SELECT timestamp FROM data_collection_log "
-                    "WHERE status IN ('SUCCESS', 'success') "
+                    "WHERE UPPER(CAST(status AS VARCHAR)) = 'SUCCESS' "
                     "ORDER BY timestamp DESC LIMIT 1"
                 )
             ).fetchone()
