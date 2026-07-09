@@ -684,6 +684,289 @@ createApp({
         }
         // ── End Task E ───────────────────────────────────────────────────────
 
+        // ── Task C: Wait Times ────────────────────────────────────────────
+        const loadingWaitTimes    = ref(false);
+        const waitTimesError      = ref('');
+        const waitEcdfCanvas      = ref(null);
+        const waitPercentilesCanvas = ref(null);
+        // Which percentile to show on the percentiles chart ('p50'|'p90'|'p99')
+        const waitPctView         = ref('p90');
+        let _waitEcdfChart        = null;
+        let _waitPercentilesChart = null;
+
+        function _destroyWaitTimesCharts() {
+            if (_waitEcdfChart)        { _waitEcdfChart.destroy();        _waitEcdfChart        = null; }
+            if (_waitPercentilesChart) { _waitPercentilesChart.destroy(); _waitPercentilesChart = null; }
+        }
+
+        async function fetchWaitTimes() {
+            const key = `wait-times|${buildParams()}`;
+            if (tabData[key]) {
+                await nextTick();
+                _renderWaitTimesFromCache(tabData[key]);
+                return;
+            }
+            loadingWaitTimes.value = true;
+            waitTimesError.value   = '';
+            _destroyWaitTimesCharts();
+
+            try {
+                const params = buildParams();
+                const [ecdfResp, pctResp] = await Promise.all([
+                    fetch(`/api/analytics/wait-ecdf?${params}`),
+                    fetch(`/api/analytics/wait-percentiles?${params}`),
+                ]);
+                if (!ecdfResp.ok)  throw new Error(`ECDF fetch failed: ${ecdfResp.status}`);
+                if (!pctResp.ok)   throw new Error(`Percentiles fetch failed: ${pctResp.status}`);
+                const ecdfData = await ecdfResp.json();
+                const pctData  = await pctResp.json();
+                tabData[key] = { ecdfData, pctData };
+                await nextTick();
+                _renderWaitTimesFromCache({ ecdfData, pctData });
+            } catch (err) {
+                waitTimesError.value = String(err);
+            } finally {
+                loadingWaitTimes.value = false;
+            }
+        }
+
+        function _renderWaitTimesFromCache({ ecdfData, pctData }) {
+            _renderWaitEcdf(ecdfData);
+            _renderWaitPercentiles(pctData, waitPctView.value);
+        }
+
+        function _renderWaitEcdf(data) {
+            const canvas = waitEcdfCanvas.value;
+            if (!canvas || !data) return;
+            if (_waitEcdfChart) { _waitEcdfChart.destroy(); _waitEcdfChart = null; }
+
+            const groups  = data.groups || [];
+            const curves  = data.curves || {};
+            const darkTick = '#94a3b8';
+            const darkGrid = '#2d3748';
+
+            const datasets = groups.map(grp => ({
+                label:           grp,
+                data:            (curves[grp] || []).map(([x, y]) => ({ x, y })),
+                borderColor:     colorFor(grp),
+                backgroundColor: 'transparent',
+                borderWidth:     1.5,
+                pointRadius:     0,
+                pointHoverRadius: 3,
+                tension:         0.2,
+            }));
+
+            _waitEcdfChart = new Chart(canvas.getContext('2d'), {
+                type: 'line',
+                data: { datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    parsing: false,
+                    plugins: {
+                        legend: { display: true, labels: { color: darkTick, boxWidth: 12 } },
+                        tooltip: {
+                            callbacks: {
+                                label: ctx => {
+                                    const d = ctx.parsed;
+                                    return `${ctx.dataset.label}: wait=${d.x.toFixed(2)}h, cdf=${(d.y * 100).toFixed(1)}%`;
+                                },
+                            },
+                        },
+                    },
+                    scales: {
+                        x: {
+                            type: 'linear',
+                            title: { display: true, text: 'Wait time (hours)', color: darkTick },
+                            ticks: { color: darkTick },
+                            grid:  { color: darkGrid },
+                        },
+                        y: {
+                            min: 0, max: 1,
+                            title: { display: true, text: 'Cumulative fraction', color: darkTick },
+                            ticks: { color: darkTick, callback: v => (v * 100).toFixed(0) + '%' },
+                            grid:  { color: darkGrid },
+                        },
+                    },
+                },
+            });
+        }
+
+        function _renderWaitPercentiles(data, view) {
+            const canvas = waitPercentilesCanvas.value;
+            if (!canvas || !data) return;
+            if (_waitPercentilesChart) { _waitPercentilesChart.destroy(); _waitPercentilesChart = null; }
+
+            const freq    = data.freq;
+            const labels  = (data.bins || []).map(b => fmtBin(b, freq));
+            const groups  = data.groups || [];
+            const series  = data.series || {};
+            const darkTick = '#94a3b8';
+            const darkGrid = '#2d3748';
+
+            const datasets = groups.map(grp => ({
+                label:           grp,
+                data:            (series[grp] || {})[view] || [],
+                borderColor:     colorFor(grp),
+                backgroundColor: 'transparent',
+                borderWidth:     1.5,
+                pointRadius:     0,
+                pointHoverRadius: 3,
+                tension:         0.2,
+            }));
+
+            _waitPercentilesChart = new Chart(canvas.getContext('2d'), {
+                type: 'line',
+                data: { labels, datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: true, labels: { color: darkTick, boxWidth: 12 } },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false,
+                            callbacks: {
+                                label: ctx => `${ctx.dataset.label}: ${(ctx.parsed.y / 3600).toFixed(2)}h`,
+                            },
+                        },
+                    },
+                    scales: {
+                        x: { ticks: { color: darkTick }, grid: { color: darkGrid } },
+                        y: {
+                            title: { display: true, text: 'Wait time (seconds)', color: darkTick },
+                            ticks: { color: darkTick },
+                            grid:  { color: darkGrid },
+                        },
+                    },
+                },
+            });
+        }
+
+        function switchWaitPctView(view) {
+            waitPctView.value = view;
+            // Re-render the percentiles chart from cached data only
+            const key = `wait-times|${buildParams()}`;
+            if (tabData[key]) {
+                _renderWaitPercentiles(tabData[key].pctData, view);
+            }
+        }
+        // ── End Task C ────────────────────────────────────────────────────
+
+        // ── Task D: Reservations ──────────────────────────────────────────
+        const loadingReservations = ref(false);
+        const reservationsError   = ref('');
+        const resvTimelineCanvas  = ref(null);
+        const resvRankingTable    = ref(null);
+        const reservationsSummary = ref(null);   // summary stats for header chips
+        const reservationsData    = ref(null);   // full response for the table
+        let _resvTimelineChart    = null;
+
+        function _destroyReservationsCharts() {
+            if (_resvTimelineChart) { _resvTimelineChart.destroy(); _resvTimelineChart = null; }
+            reservationsSummary.value = null;
+            reservationsData.value    = null;
+            reservationsError.value   = '';
+        }
+
+        async function fetchReservations() {
+            const key = `reservations|days=${days.value}`;
+            if (tabData[key]) {
+                await nextTick();
+                _renderReservationsFromCache(tabData[key]);
+                return;
+            }
+            loadingReservations.value = true;
+            reservationsError.value   = '';
+            _destroyReservationsCharts();
+
+            try {
+                const r = await fetch(`/api/analytics/reservation-utilization-timeline?days=${days.value}`);
+                if (!r.ok) throw new Error(`Reservations fetch failed: ${r.status}`);
+                const data = await r.json();
+                tabData[key] = data;
+                await nextTick();
+                _renderReservationsFromCache(data);
+            } catch (err) {
+                reservationsError.value = String(err);
+            } finally {
+                loadingReservations.value = false;
+            }
+        }
+
+        function _renderReservationsFromCache(data) {
+            reservationsSummary.value = data;
+            reservationsData.value    = data;
+            _renderResvTimeline(data);
+        }
+
+        function _renderResvTimeline(data) {
+            const canvas = resvTimelineCanvas.value;
+            if (!canvas || !data) return;
+            if (_resvTimelineChart) { _resvTimelineChart.destroy(); _resvTimelineChart = null; }
+
+            const reservations = data.reservations || [];
+            if (reservations.length === 0) return;
+
+            const darkTick = '#94a3b8';
+            const darkGrid = '#2d3748';
+
+            // Horizontal bar chart: reserved vs used node-hours per reservation
+            const labels = reservations.map(r => r.name || r.reservation_id);
+            const reserved = reservations.map(r => r.reserved_node_hours);
+            const used     = reservations.map(r => r.used_node_hours);
+
+            _resvTimelineChart = new Chart(canvas.getContext('2d'), {
+                type: 'bar',
+                data: {
+                    labels,
+                    datasets: [
+                        {
+                            label: 'Reserved node-hours',
+                            data:  reserved,
+                            backgroundColor: 'rgba(94,129,172,0.5)',
+                            borderColor:     '#5e81ac',
+                            borderWidth: 1,
+                        },
+                        {
+                            label: 'Used node-hours',
+                            data:  used,
+                            backgroundColor: 'rgba(16,185,129,0.6)',
+                            borderColor:     '#10b981',
+                            borderWidth: 1,
+                        },
+                    ],
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: true, labels: { color: darkTick, boxWidth: 12 } },
+                        tooltip: {
+                            callbacks: {
+                                afterBody: (ctxArr) => {
+                                    const idx = ctxArr[0]?.dataIndex;
+                                    if (idx == null) return '';
+                                    const r = reservations[idx];
+                                    return [`Utilization: ${r.utilization_pct}%`, `Owner: ${r.owner}`];
+                                },
+                            },
+                        },
+                    },
+                    scales: {
+                        x: {
+                            title: { display: true, text: 'Node-hours', color: darkTick },
+                            ticks: { color: darkTick },
+                            grid:  { color: darkGrid },
+                        },
+                        y: { ticks: { color: darkTick }, grid: { color: darkGrid } },
+                    },
+                },
+            });
+        }
+        // ── End Task D ────────────────────────────────────────────────────
+
         // ── Tab switching ─────────────────────────────────────────────────
         async function switchTab(tabId) {
             if (activeTab.value === tabId) return;
@@ -693,6 +976,8 @@ createApp({
             if (activeTab.value === 'job-outcomes') _destroyJobOutcomesCharts();
             if (activeTab.value === 'walltime-accuracy') _destroyWalltimeCharts();
             if (activeTab.value === 'collector-health') _destroyCollectorHealthChart();
+            if (activeTab.value === 'wait-times') _destroyWaitTimesCharts();
+            if (activeTab.value === 'reservations') _destroyReservationsCharts();
 
             activeTab.value = tabId;
 
@@ -713,6 +998,14 @@ createApp({
                 await nextTick();
                 await fetchCollectorHealth();
             }
+            if (tabId === 'wait-times') {
+                await nextTick();
+                await fetchWaitTimes();
+            }
+            if (tabId === 'reservations') {
+                await nextTick();
+                await fetchReservations();
+            }
             // Tabs C, D: no fetch needed — placeholder renders immediately.
         }
 
@@ -726,6 +1019,8 @@ createApp({
             if (activeTab.value === 'job-outcomes') fetchJobOutcomes();
             if (activeTab.value === 'walltime-accuracy') fetchWalltimeAccuracy();
             if (activeTab.value === 'collector-health') fetchCollectorHealth();
+            if (activeTab.value === 'wait-times') fetchWaitTimes();
+            if (activeTab.value === 'reservations') fetchReservations();
             // Other tabs are placeholders — nothing to reload yet.
         }
 
@@ -981,6 +1276,13 @@ createApp({
             // Task E: collector health
             collectorGapCanvas, loadingCollectorHealth, collectorHealthError,
             collectorHealthData, collectorHealthMeta,
+            // Task C: wait times
+            waitEcdfCanvas, waitPercentilesCanvas,
+            loadingWaitTimes, waitTimesError, waitPctView, switchWaitPctView,
+            // Task D: reservations
+            resvTimelineCanvas, resvRankingTable,
+            loadingReservations, reservationsError,
+            reservationsSummary, reservationsData,
             // actions
             setDays, reload, invalidateAndReload,
         };
