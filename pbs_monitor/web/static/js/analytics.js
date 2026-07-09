@@ -595,7 +595,7 @@ createApp({
             }
         }
 
-        function _renderCollectorHealth(data) {
+        async function _renderCollectorHealth(data) {
             collectorHealthData.value = data;
 
             const snapCount  = (data.cadence || []).length;
@@ -605,6 +605,8 @@ createApp({
                 `${gapCount} significant gap(s) · ` +
                 `median cadence ${data.median_gap_min ?? '—'} min`;
 
+            // Ensure the data-gated section/canvas is laid out before drawing.
+            await nextTick();
             const canvas = collectorGapCanvas.value;
             if (!canvas) return;
 
@@ -894,9 +896,13 @@ createApp({
             }
         }
 
-        function _renderReservationsFromCache(data) {
+        async function _renderReservationsFromCache(data) {
             reservationsSummary.value = data;
             reservationsData.value    = data;
+            // Wait for the summary-gated section (and its properly-sized canvas)
+            // to actually be in the DOM before building the chart — otherwise
+            // Chart.js grabs a 300x150 default-size canvas and draws nothing.
+            await nextTick();
             _renderResvTimeline(data);
         }
 

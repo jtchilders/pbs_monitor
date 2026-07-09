@@ -308,7 +308,7 @@
                 <div v-if="reservationsError" class="analytics-error">{{ reservationsError }}</div>
 
                 <!-- Summary stat chips -->
-                <section class="panel" id="tab-reservations" ref="reservationsSection" v-if="!loadingReservations && !reservationsError && reservationsSummary">
+                <section class="panel" id="tab-reservations" ref="reservationsSection" v-show="!loadingReservations && !reservationsError && reservationsSummary">
                     <div class="panel-header">
                         <h2>Reservation Utilization</h2>
                     </div>
@@ -442,7 +442,7 @@
                     </div>
 
                     <!-- Gap chart: step chart of gap_min over time, gaps >60min flagged red -->
-                    <div class="chart-wrap" v-if="!loadingCollectorHealth && !collectorHealthError && collectorHealthData">
+                    <div class="chart-wrap" v-show="!loadingCollectorHealth && !collectorHealthError && collectorHealthData">
                         <canvas ref="collectorGapCanvas"></canvas>
                     </div>
 
