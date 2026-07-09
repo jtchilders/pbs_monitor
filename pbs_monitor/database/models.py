@@ -142,6 +142,7 @@ class Job(Base):
     # Job outcomes
     priority = Column(Integer, default=0)
     exit_status = Column(Integer)
+    outcome_class = Column(String(20))  # T0: success|signal_killed|walltime_killed|requeued|could_not_run|error|unknown
     execution_node = Column(Text)  # Multi-node strings can exceed 10k chars
     
     # Calculated fields
@@ -168,6 +169,9 @@ class Job(Base):
         Index('ix_jobs_final_state', 'final_state_recorded'),
         Index('ix_jobs_project_state', 'project', 'state'),
         Index('ix_jobs_allocation_type_state', 'allocation_type', 'state'),
+        # T0: outcome-class indexes (added by migration migrate_to_v1_2_outcome_class)
+        Index('ix_jobs_outcome_class', 'outcome_class'),
+        Index('ix_jobs_end_time_outcome_class', 'end_time', 'outcome_class'),
     )
     
     def is_active(self) -> bool:
