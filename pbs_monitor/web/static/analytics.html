@@ -8,6 +8,8 @@
     <link rel="stylesheet" href="css/analytics.css">
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+    <!-- Shared color registry MUST load before analytics.js -->
+    <script src="js/colors.js"></script>
 </head>
 <body>
 <div id="app">
@@ -24,6 +26,25 @@
         </header>
 
         <main class="main-content analytics-main">
+
+            <!-- Tab bar — uses same .tab-bar / .tab-btn as front page (dashboard.css) -->
+            <div class="panel analytics-tab-panel">
+                <nav class="tab-bar analytics-page-tabs" aria-label="Analytics sections">
+                    <button v-for="tab in tabDefs" :key="tab.id"
+                            class="tab-btn"
+                            :class="{ active: activeTab === tab.id }"
+                            @click="switchTab(tab.id)">
+                        {{ tab.label }}
+                    </button>
+                </nav>
+            </div>
+
+            <!-- Completeness banner — shown on every tab when collector gaps detected.
+                 Populated by a lightweight GET /api/analytics/collector-health?summary=1
+                 call on range change (task E adds this endpoint; guarded with try/catch). -->
+            <div v-if="collectBanner" class="analytics-banner-warn">
+                ⚠ {{ collectBanner }}
+            </div>
 
             <!-- Controls -->
             <section class="panel analytics-controls-panel">
@@ -44,15 +65,19 @@
                         <div class="btn-group">
                             <button v-for="f in freqChoices" :key="f.k"
                                     :class="{ active: freqOverride===f.k }"
-                                    @click="freqOverride=f.k; reload()">{{ f.l }}</button>
+                                    @click="freqOverride=f.k; invalidateAndReload()">{{ f.l }}</button>
                         </div>
                         <span class="control-hint" v-if="freqOverride==='auto'">→ {{ effectiveFreqLabel }}</span>
                     </div>
                     <div class="control-group">
                         <label>Group by</label>
                         <div class="btn-group">
-                            <button :class="{ active: groupBy==='queue' }" @click="groupBy='queue'; reload()">Queue</button>
-                            <button :class="{ active: groupBy==='allocation_type' }" @click="groupBy='allocation_type'; reload()">Allocation</button>
+                            <button :class="{ active: groupBy==='queue' }"
+                                    @click="groupBy='queue'; invalidateAndReload()">Queue</button>
+                            <button :class="{ active: groupBy==='allocation_type' }"
+                                    @click="groupBy='allocation_type'; invalidateAndReload()">Allocation</button>
+                            <button :class="{ active: groupBy==='project' }"
+                                    @click="groupBy='project'; invalidateAndReload()">Project</button>
                         </div>
                     </div>
                     <div class="control-group filters-group">
@@ -93,50 +118,148 @@
                 </div>
             </section>
 
-            <!-- Status -->
-            <div v-if="loading && !loadingAny" class="analytics-loading">Computing… (may take 30–60s for large ranges on first load)</div>
+            <!-- Status messages -->
+            <div v-if="loading && !loadingAny" class="analytics-loading">
+                Computing… (may take 30–60s for large ranges on first load)
+            </div>
             <div v-if="error" class="analytics-error">{{ error }}</div>
 
-            <!-- Chart 1: Utilization -->
-            <section class="panel">
-                <div class="panel-header">
-                    <h2>Utilization % over time</h2>
-                    <span class="panel-meta" v-if="utilMeta">{{ utilMeta }}</span>
-                </div>
-                <div class="chart-wrap">
-                    <canvas ref="utilCanvas"></canvas>
-                </div>
-            </section>
+            <!-- ═══════════════════════════════════════════════════════════════
+                 TAB CONTENT AREAS
+                 Naming convention for downstream tasks (A-E):
+                   Container id:  "tab-<tabId>"          e.g. id="tab-job-outcomes"
+                   Ref prefix:    "<tabId>Canvas"         e.g. ref="jobOutcomesCanvas"
+                   Section refs:  "<tabId>Section"        e.g. ref="jobOutcomesSection"
+                 Each placeholder <div> below has both the stable id and a
+                 comment marking it as the mount point for that task.
+                 ═══════════════════════════════════════════════════════════════ -->
 
-            <!-- Chart 2: Queue Depth -->
-            <section class="panel">
-                <div class="panel-header">
-                    <h2>Queue Depth — system-hours backlog</h2>
-                    <span class="panel-meta" v-if="depthMeta">{{ depthMeta }}</span>
-                </div>
-                <div class="chart-wrap">
-                    <canvas ref="depthCanvas"></canvas>
-                </div>
-            </section>
+            <!-- ── Tab: Trends (default — migrated from the previous single-page layout) ── -->
+            <template v-if="activeTab === 'trends'">
 
-            <!-- Chart 3: Wait vs Score -->
-            <section class="panel">
-                <div class="panel-header">
-                    <h2>Wait Time vs Score at Run Start</h2>
-                    <div class="btn-group">
-                        <button :class="{ active: xAxis==='queue_time' }" @click="xAxis='queue_time'; reloadScatter()">Queue Time</button>
-                        <button :class="{ active: xAxis==='elapsed_time' }" @click="xAxis='elapsed_time'; reloadScatter()">Elapsed Time</button>
+                <!-- Chart 1: Utilization -->
+                <section class="panel" id="tab-trends-util">
+                    <div class="panel-header">
+                        <h2>Utilization % over time</h2>
+                        <span class="panel-meta" v-if="utilMeta">{{ utilMeta }}</span>
                     </div>
-                </div>
-                <div v-if="scatterNote" class="analytics-note">{{ scatterNote }}</div>
-                <div class="chart-wrap">
-                    <canvas ref="scatterCanvas"></canvas>
-                </div>
-            </section>
+                    <div class="chart-wrap">
+                        <canvas ref="utilCanvas"></canvas>
+                    </div>
+                </section>
+
+                <!-- Chart 2: Queue Depth -->
+                <section class="panel" id="tab-trends-depth">
+                    <div class="panel-header">
+                        <h2>Queue Depth — system-hours backlog</h2>
+                        <span class="panel-meta" v-if="depthMeta">{{ depthMeta }}</span>
+                    </div>
+                    <div class="chart-wrap">
+                        <canvas ref="depthCanvas"></canvas>
+                    </div>
+                </section>
+
+            </template>
+
+            <!-- ── Tab: Job Outcomes (PLACEHOLDER — task A plugs in here) ── -->
+            <template v-if="activeTab === 'job-outcomes'">
+                <!--
+                  TASK A MOUNT POINT
+                  Container id:  "tab-job-outcomes"
+                  Chart refs:    jobOutcomesCanvas (stacked area), exitTaxonomyCanvas (bar)
+                  Section ref:   jobOutcomesSection
+                  Endpoints:     GET /api/analytics/job-outcomes, GET /api/analytics/exit-taxonomy
+                  Colors:        window.PBSColors.OUTCOME_COLORS
+                -->
+                <section class="panel" id="tab-job-outcomes" ref="jobOutcomesSection">
+                    <div class="panel-header"><h2>Job Outcomes</h2></div>
+                    <div class="tab-placeholder">
+                        <p>Coming soon — stacked failure-rate chart + exit-status taxonomy bar.</p>
+                        <p class="tab-placeholder-note">Implements plan §5.1 &amp; §5.2. Depends on T0 (exit_status backfill).</p>
+                    </div>
+                </section>
+            </template>
+
+            <!-- ── Tab: Walltime Accuracy (PLACEHOLDER — task B plugs in here) ── -->
+            <template v-if="activeTab === 'walltime-accuracy'">
+                <!--
+                  TASK B MOUNT POINT
+                  Container id:  "tab-walltime-accuracy"
+                  Chart refs:    walltimeHistCanvas (matrix heatmap), walltimeScoreCard (table)
+                  Section ref:   walltimeSection
+                  Endpoint:      GET /api/analytics/walltime-histogram
+                  CDN plugin:    chartjs-chart-matrix (add <script> CDN in analytics.html head)
+                -->
+                <section class="panel" id="tab-walltime-accuracy" ref="walltimeSection">
+                    <div class="panel-header"><h2>Walltime Accuracy</h2></div>
+                    <div class="tab-placeholder">
+                        <p>Coming soon — requested-vs-used 2D histogram + efficiency scorecard.</p>
+                        <p class="tab-placeholder-note">Implements plan §5.3. Needs chartjs-chart-matrix CDN plugin.</p>
+                    </div>
+                </section>
+            </template>
+
+            <!-- ── Tab: Wait Times (PLACEHOLDER — task C plugs in here) ── -->
+            <template v-if="activeTab === 'wait-times'">
+                <!--
+                  TASK C MOUNT POINT
+                  Container id:  "tab-wait-times"
+                  Chart refs:    waitEcdfCanvas (ECDF lines), waitPercentilesCanvas (p50/p90/p99 lines)
+                  Section ref:   waitTimesSection
+                  Endpoints:     GET /api/analytics/wait-ecdf, GET /api/analytics/wait-percentiles
+                -->
+                <section class="panel" id="tab-wait-times" ref="waitTimesSection">
+                    <div class="panel-header"><h2>Wait Times</h2></div>
+                    <div class="tab-placeholder">
+                        <p>Coming soon — wait-time ECDF per queue + p50/p90/p99 trend.</p>
+                        <p class="tab-placeholder-note">Implements plan §5.4 &amp; §5.5.</p>
+                    </div>
+                </section>
+            </template>
+
+            <!-- ── Tab: Reservations (PLACEHOLDER — task D plugs in here) ── -->
+            <template v-if="activeTab === 'reservations'">
+                <!--
+                  TASK D MOUNT POINT
+                  Container id:  "tab-reservations"
+                  Chart refs:    resvTimelineCanvas (timeline), resvRankingTable (DOM table)
+                  Section ref:   reservationsSection
+                  Endpoint:      GET /api/analytics/reservation-utilization-timeline
+                -->
+                <section class="panel" id="tab-reservations" ref="reservationsSection">
+                    <div class="panel-header"><h2>Reservations</h2></div>
+                    <div class="tab-placeholder">
+                        <p>Coming soon — utilization timeline + wasted-node-hours ranking.</p>
+                        <p class="tab-placeholder-note">Implements plan §5.7. Reuses ReservationUtilizationAnalyzer.</p>
+                    </div>
+                </section>
+            </template>
+
+            <!-- ── Tab: Collector Health (PLACEHOLDER — task E plugs in here) ── -->
+            <template v-if="activeTab === 'collector-health'">
+                <!--
+                  TASK E MOUNT POINT
+                  Container id:  "tab-collector-health"
+                  Chart refs:    collectorGapCanvas (step/scatter of gap sizes)
+                  Section ref:   collectorHealthSection
+                  Endpoint:      GET /api/analytics/collector-health  (full, no ?summary=1)
+                  Banner endpoint: GET /api/analytics/collector-health?summary=1
+                                   (already wired in fetchCollectorBanner() — just implement the endpoint)
+                -->
+                <section class="panel" id="tab-collector-health" ref="collectorHealthSection">
+                    <div class="panel-header"><h2>Collector Health</h2></div>
+                    <div class="tab-placeholder">
+                        <p>Coming soon — collection cadence/gap chart + completeness summary.</p>
+                        <p class="tab-placeholder-note">Implements plan §5.6. Also adds the banner shown on every tab.</p>
+                    </div>
+                </section>
+            </template>
+
         </main>
     </div>
 </div>
 
+<!-- colors.js is already loaded in <head> — loads before analytics.js -->
 <script src="js/analytics.js"></script>
 </body>
 </html>

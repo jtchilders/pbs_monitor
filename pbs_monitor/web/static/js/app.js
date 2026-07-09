@@ -54,6 +54,9 @@ const JOB_PALETTE = [
     '#818cf8','#a78bfa','#c084fc','#38bdf8',
 ];
 
+// QUEUE_COLORS kept for reference but colorFor() is now the canonical entry
+// point — shared with analytics.js via window.PBSColors (colors.js).
+// This ensures a queue rendered here gets the SAME color on the analytics page.
 const QUEUE_COLORS = [
     '#3b82f6','#f59e0b','#ef4444','#8b5cf6','#06b6d4',
     '#10b981','#f43f5e','#eab308','#14b8a6','#ec4899',
@@ -83,7 +86,15 @@ function hashStr(s) {
     return Math.abs(h);
 }
 function jobColor(id) { return JOB_PALETTE[hashStr(String(id)) % JOB_PALETTE.length]; }
-function queueColor(name) { return QUEUE_COLORS[hashStr(String(name)) % QUEUE_COLORS.length]; }
+// queueColor uses the shared PBSColors registry (colors.js) so queue colors
+// are identical on the front page AND the analytics page.
+// Falls back to hash-based QUEUE_COLORS if colors.js failed to load (should not happen).
+function queueColor(name) {
+    if (window.PBSColors && window.PBSColors.colorFor) {
+        return window.PBSColors.colorFor(String(name));
+    }
+    return QUEUE_COLORS[hashStr(String(name)) % QUEUE_COLORS.length];
+}
 
 function fmtDuration(totalSec) {
     if (totalSec == null) return '--';

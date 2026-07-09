@@ -1471,90 +1471,9 @@ def create_app(config=None) -> FastAPI:
         _analytics_cache.set(cache_key, result)
         return result
 
-    @app.get("/api/analytics/wait-vs-score")
-    async def api_analytics_wait_vs_score(
-        days: int = 30,
-        x_axis: str = 'queue_time',
-        db: Session = Depends(get_db),
-        queue: List[str] = Query(default=[]),
-        queue_exclude: List[str] = Query(default=[]),
-        owner: List[str] = Query(default=[]),
-        owner_exclude: List[str] = Query(default=[]),
-        project: List[str] = Query(default=[]),
-        project_exclude: List[str] = Query(default=[]),
-        allocation_type: List[str] = Query(default=[]),
-        allocation_type_exclude: List[str] = Query(default=[]),
-    ):
-        if x_axis not in ('queue_time', 'elapsed_time'):
-            x_axis = 'queue_time'
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-
-        def _fetch():
-            from pbs_monitor.database.models import JobHistory
-            # For each job that started in window, get the score from JobHistory
-            # at the transition to RUNNING state (closest record to start_time)
-            q = db.query(Job).filter(
-                Job.start_time >= cutoff,
-                Job.start_time.isnot(None),
-                Job.submit_time.isnot(None),
-            )
-            q = _apply_job_filters(q, queue, queue_exclude, owner, owner_exclude,
-                                   project, project_exclude, allocation_type, allocation_type_exclude)
-            jobs = q.all()
-
-            # Build a lookup: job_id → score from JobHistory near start_time
-            job_ids = [j.job_id for j in jobs]
-            score_map: dict[str, float] = {}
-            if job_ids:
-                # Get all history records for these jobs with a score
-                history_rows = (
-                    db.query(JobHistory)
-                    .filter(
-                        JobHistory.job_id.in_(job_ids),
-                        JobHistory.score.isnot(None),
-                        JobHistory.state == JobState.RUNNING,
-                    )
-                    .all()
-                )
-                # Take the first RUNNING record per job (chronologically earliest)
-                for h in history_rows:
-                    if h.job_id not in score_map:
-                        score_map[h.job_id] = h.score
-
-            points = []
-            for job in jobs:
-                score = score_map.get(job.job_id)
-                if score is None:
-                    continue
-                js = job.start_time
-                sub = job.submit_time
-                if js and js.tzinfo: js = js.replace(tzinfo=None)
-                if sub and sub.tzinfo: sub = sub.replace(tzinfo=None)
-                queue_time_h = (js - sub).total_seconds() / 3600 if js and sub else None
-                if queue_time_h is None or queue_time_h < 0:
-                    continue
-
-                # elapsed_time: use queue_time_seconds vs actual queue_time
-                # The job has queue_time_seconds stored; for elapsed_time we use it directly
-                if x_axis == 'elapsed_time' and job.queue_time_seconds is not None:
-                    x_val = job.queue_time_seconds / 3600
-                else:
-                    x_val = queue_time_h
-
-                points.append({
-                    "x":      round(x_val, 4),
-                    "y":      round(score, 4),
-                    "queue":  job.queue or 'unknown',
-                    "job_id": job.job_id,
-                    "owner":  job.owner or '',
-                })
-
-            if len(points) < 10:
-                return {"x_axis": x_axis, "points": [],
-                        "note": f"Only {len(points)} scored jobs found in window — insufficient for scatter plot."}
-            return {"x_axis": x_axis, "points": points}
-
-        return await asyncio.get_event_loop().run_in_executor(None, _fetch)
+    # NOTE: GET /api/analytics/wait-vs-score was removed in task S
+    # (analytics-reorg-scaffold).  The scatter plot was cut per plan §5.8.
+    # If you need to restore it, see git history on branch feature/analytics-reorg-scaffold.
 
     # ---- static files ----
     # Serve index.html at root, everything else from /static
