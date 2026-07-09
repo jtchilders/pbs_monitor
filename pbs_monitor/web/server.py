@@ -10,7 +10,7 @@ from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from sqlalchemy import create_engine, event, func, or_, and_
+from sqlalchemy import create_engine, event, func, or_, and_, text
 from sqlalchemy.orm import sessionmaker, Session
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -1475,6 +1475,525 @@ def create_app(config=None) -> FastAPI:
     # (analytics-reorg-scaffold).  The scatter plot was cut per plan §5.8.
     # If you need to restore it, see git history on branch feature/analytics-reorg-scaffold.
 
+    # ── Task A: Job Outcomes endpoints (plan §5.1, §5.2) ──────────────────────
+
+    # Signal name table for exit codes 128+n (POSIX signals 1–63)
+    _SIGNAL_NAMES: dict[int, str] = {
+        1: 'SIGHUP',   2: 'SIGINT',   3: 'SIGQUIT',  4: 'SIGILL',
+        5: 'SIGTRAP',  6: 'SIGABRT',  7: 'SIGBUS',   8: 'SIGFPE',
+        9: 'SIGKILL', 10: 'SIGUSR1', 11: 'SIGSEGV', 12: 'SIGUSR2',
+        13: 'SIGPIPE', 14: 'SIGALRM', 15: 'SIGTERM', 16: 'SIGURG',
+        17: 'SIGCHLD', 18: 'SIGCONT', 19: 'SIGSTOP', 20: 'SIGTSTP',
+        21: 'SIGTTIN', 22: 'SIGTTOU', 24: 'SIGXCPU', 25: 'SIGXFSZ',
+        26: 'SIGVTALRM',27: 'SIGPROF', 28: 'SIGWINCH',29: 'SIGIO',
+        30: 'SIGPWR',  31: 'SIGSYS',
+    }
+
+    def _exit_code_label(code: int) -> str:
+        """Return a human-readable label for a raw PBS exit_status code."""
+        if code == 0:
+            return 'success'
+        if code == 271:
+            return 'requeued (PBS 271)'
+        if code < 0:
+            return f'PBS special ({code})'
+        if 128 < code < 192:
+            sig = code - 128
+            sig_name = _SIGNAL_NAMES.get(sig, f'SIG{sig}')
+            return f'killed by {sig_name} (exit {code})'
+        return f'exit code {code}'
+
+    @app.get("/api/analytics/job-outcomes")
+    async def api_analytics_job_outcomes(
+        days: int = 30,
+        freq: Optional[str] = None,
+        group_by: str = 'queue',
+        db: Session = Depends(get_db),
+        queue: List[str] = Query(default=[]),
+        queue_exclude: List[str] = Query(default=[]),
+        owner: List[str] = Query(default=[]),
+        owner_exclude: List[str] = Query(default=[]),
+        project: List[str] = Query(default=[]),
+        project_exclude: List[str] = Query(default=[]),
+        allocation_type: List[str] = Query(default=[]),
+        allocation_type_exclude: List[str] = Query(default=[]),
+    ):
+        """Stacked job-count (and rate) by outcome_class over time.
+
+        Bins FINISHED jobs by end_time into the standard bin grid.
+        Per bin, counts jobs per outcome_class (the T0-backfilled column).
+        NULL outcome_class rows are counted as 'unknown'.
+
+        Returns:
+            freq: effective bin frequency
+            bins: ISO-format bin start times
+            classes: sorted list of outcome classes present
+            series: {class_name: [count_per_bin, ...]}
+            series_rate: {class_name: [pct_of_bin_total, ...]}  (0.0 when empty bin)
+            totals: [total_jobs_per_bin, ...]
+            total: grand total job count
+        """
+        eff_freq = freq if freq in ('h', 'd', 'w') else _auto_freq(days)
+        now = datetime.now(timezone.utc)
+        window_start  = _floor_bin(now - timedelta(days=days), eff_freq)
+        last_complete = _floor_bin(now, eff_freq)
+
+        cache_key = _analytics_cache.make_key({
+            "endpoint": "job-outcomes",
+            "freq": eff_freq,
+            "window_start": window_start.isoformat(),
+            "last_complete": last_complete.isoformat(),
+            "queue": sorted(queue), "queue_exclude": sorted(queue_exclude),
+            "owner": sorted(owner), "owner_exclude": sorted(owner_exclude),
+            "project": sorted(project), "project_exclude": sorted(project_exclude),
+            "allocation_type": sorted(allocation_type),
+            "allocation_type_exclude": sorted(allocation_type_exclude),
+        })
+        cached = _analytics_cache.get(cache_key)
+        if cached:
+            return cached
+
+        def _compute():
+            q = db.query(Job).filter(
+                Job.state == JobState.FINISHED,
+                Job.end_time >= window_start,
+                Job.end_time < last_complete,
+                Job.end_time.isnot(None),
+            )
+            q = _apply_job_filters(q, queue, queue_exclude, owner, owner_exclude,
+                                   project, project_exclude, allocation_type, allocation_type_exclude)
+            # Pull only the two columns needed — avoid loading full Job ORM
+            # objects (incl. raw_pbs_data JSON) for hundreds of thousands of rows.
+            rows = q.with_entities(Job.outcome_class, Job.end_time).all()
+
+            # Build bin list
+            bins: list[datetime] = []
+            t = window_start
+            while t < last_complete:
+                bins.append(t)
+                t = _next_bin(t, eff_freq)
+
+            n_bins = len(bins)
+            # Map bin start → index for O(1) lookup
+            bin_index: dict[datetime, int] = {b: i for i, b in enumerate(bins)}
+
+            # outcome_class → per-bin counts
+            counts: dict[str, list[int]] = {}
+            totals: list[int] = [0] * n_bins
+
+            for cls_val, je in rows:
+                cls = cls_val if cls_val else 'unknown'
+                if je and je.tzinfo:
+                    je = je.replace(tzinfo=None)
+                if je is None:
+                    continue
+                # Find the bin this job falls into
+                bin_start = _floor_bin(je, eff_freq)
+                idx = bin_index.get(bin_start)
+                if idx is None:
+                    continue
+                if cls not in counts:
+                    counts[cls] = [0] * n_bins
+                counts[cls][idx] += 1
+                totals[idx] += 1
+
+            sorted_classes = sorted(counts.keys())
+            bin_labels = [b.isoformat() for b in bins]
+
+            # Compute rate (% of bin total)
+            series_rate: dict[str, list[float]] = {}
+            for cls in sorted_classes:
+                series_rate[cls] = [
+                    round(counts[cls][i] / totals[i] * 100, 2) if totals[i] > 0 else 0.0
+                    for i in range(n_bins)
+                ]
+
+            return {
+                "freq": eff_freq,
+                "bins": bin_labels,
+                "classes": sorted_classes,
+                "series": {cls: counts[cls] for cls in sorted_classes},
+                "series_rate": series_rate,
+                "totals": totals,
+                "total": sum(totals),
+            }
+
+        result = await asyncio.get_event_loop().run_in_executor(None, _compute)
+        _analytics_cache.set(cache_key, result)
+        return result
+
+    @app.get("/api/analytics/exit-taxonomy")
+    async def api_analytics_exit_taxonomy(
+        days: int = 30,
+        db: Session = Depends(get_db),
+        queue: List[str] = Query(default=[]),
+        queue_exclude: List[str] = Query(default=[]),
+        owner: List[str] = Query(default=[]),
+        owner_exclude: List[str] = Query(default=[]),
+        project: List[str] = Query(default=[]),
+        project_exclude: List[str] = Query(default=[]),
+        allocation_type: List[str] = Query(default=[]),
+        allocation_type_exclude: List[str] = Query(default=[]),
+    ):
+        """Distribution of jobs per outcome_class and per raw exit_status code.
+
+        No time binning — counts over the entire window.
+        NULL outcome_class counted as 'unknown'.
+        Returns top 20 exit codes + 'other' bucket.
+
+        Returns:
+            classes: {class_name: count}
+            codes: [{code, count, label, outcome_class}, ...]  top-20 + other
+            total: total finished jobs in window
+        """
+        now = datetime.now(timezone.utc)
+        window_start = now - timedelta(days=days)
+
+        cache_key = _analytics_cache.make_key({
+            "endpoint": "exit-taxonomy",
+            "days": days,
+            "window_start": window_start.isoformat(),
+            "queue": sorted(queue), "queue_exclude": sorted(queue_exclude),
+            "owner": sorted(owner), "owner_exclude": sorted(owner_exclude),
+            "project": sorted(project), "project_exclude": sorted(project_exclude),
+            "allocation_type": sorted(allocation_type),
+            "allocation_type_exclude": sorted(allocation_type_exclude),
+        })
+        cached = _analytics_cache.get(cache_key)
+        if cached:
+            return cached
+
+        def _compute():
+            q = db.query(Job).filter(
+                Job.state == JobState.FINISHED,
+                Job.end_time >= window_start,
+                Job.end_time.isnot(None),
+            )
+            q = _apply_job_filters(q, queue, queue_exclude, owner, owner_exclude,
+                                   project, project_exclude, allocation_type, allocation_type_exclude)
+
+            # Fetch only the columns we need
+            rows = q.with_entities(Job.outcome_class, Job.exit_status).all()
+
+            class_counts: dict[str, int] = {}
+            code_counts: dict[int | str, int] = {}
+
+            for row in rows:
+                cls = row.outcome_class if row.outcome_class else 'unknown'
+                class_counts[cls] = class_counts.get(cls, 0) + 1
+
+                code = row.exit_status
+                if code is None:
+                    code_key: int | str = 'null'
+                else:
+                    code_key = int(code)
+                code_counts[code_key] = code_counts.get(code_key, 0) + 1
+
+            # Sort codes by count desc, take top 20 + aggregate rest
+            sorted_codes = sorted(code_counts.items(), key=lambda x: -x[1])
+            top_codes = sorted_codes[:20]
+            other_count = sum(v for _, v in sorted_codes[20:])
+
+            codes_out = []
+            for code, cnt in top_codes:
+                if code == 'null':
+                    label = 'no exit code (NULL)'
+                    oc = 'unknown'
+                else:
+                    code_int = int(code)
+                    label = _exit_code_label(code_int)
+                    # Infer outcome_class for this code
+                    if code_int == 0:
+                        oc = 'success'
+                    elif code_int == 271:
+                        oc = 'requeued'
+                    elif code_int < 0:
+                        oc = 'could_not_run'
+                    elif 128 < code_int < 192:
+                        oc = 'signal_killed'
+                    else:
+                        oc = 'error'
+                codes_out.append({"code": code, "count": cnt, "label": label, "outcome_class": oc})
+
+            if other_count > 0:
+                codes_out.append({
+                    "code": "other",
+                    "count": other_count,
+                    "label": f"other ({len(sorted_codes) - 20} codes)",
+                    "outcome_class": "other",
+                })
+
+            return {
+                "classes": dict(sorted(class_counts.items(), key=lambda x: -x[1])),
+                "codes": codes_out,
+                "total": sum(class_counts.values()),
+            }
+
+        result = await asyncio.get_event_loop().run_in_executor(None, _compute)
+        _analytics_cache.set(cache_key, result)
+        return result
+
+    # ---- Task B: Walltime Accuracy endpoints ----
+
+    @app.get("/api/analytics/walltime-histogram")
+    async def api_analytics_walltime_histogram(
+        days: int = 30,
+        db: Session = Depends(get_db),
+        queue: List[str] = Query(default=[]),
+        queue_exclude: List[str] = Query(default=[]),
+        owner: List[str] = Query(default=[]),
+        owner_exclude: List[str] = Query(default=[]),
+        project: List[str] = Query(default=[]),
+        project_exclude: List[str] = Query(default=[]),
+        allocation_type: List[str] = Query(default=[]),
+        allocation_type_exclude: List[str] = Query(default=[]),
+    ):
+        """2D histogram: requested walltime (x, log buckets) vs used fraction (y buckets).
+
+        Returns server-side-binned counts — never per-job rows (plan §4.3).
+        Summary stats: median_used_fraction, pct_under_25, pct_over_95, n, excluded_unparseable.
+        """
+        now = datetime.now(timezone.utc)
+        window_start  = now - timedelta(days=days)
+        last_complete = _floor_bin(now, _auto_freq(days))
+
+        cache_key = _analytics_cache.make_key({
+            "endpoint": "walltime-histogram",
+            "window_start": window_start.isoformat(),
+            "last_complete": last_complete.isoformat(),
+            "queue": sorted(queue), "queue_exclude": sorted(queue_exclude),
+            "owner": sorted(owner), "owner_exclude": sorted(owner_exclude),
+            "project": sorted(project), "project_exclude": sorted(project_exclude),
+            "allocation_type": sorted(allocation_type),
+            "allocation_type_exclude": sorted(allocation_type_exclude),
+        })
+        cached = _analytics_cache.get(cache_key)
+        if cached:
+            return cached
+
+        # X-axis: requested walltime buckets (log scale, seconds)
+        x_edges_sec = [0, 15*60, 30*60, 60*60, 2*3600, 6*3600, 12*3600, 24*3600, float('inf')]
+        x_labels = ["≤15m", "15-30m", "30-60m", "1-2h", "2-6h", "6-12h", "12-24h", ">24h"]
+
+        # Y-axis: used-fraction buckets (%)
+        y_edges_pct = [0, 10, 25, 50, 75, 95, 100, float('inf')]
+        y_labels = ["0-10%", "10-25%", "25-50%", "50-75%", "75-95%", "95-100%", ">100%"]
+
+        def _parse_wt(wt_str):
+            """Parse HH:MM:SS walltime to seconds. Returns None on failure."""
+            if not wt_str:
+                return None
+            try:
+                parts = wt_str.strip().split(":")
+                if len(parts) == 3:
+                    h, m, s = parts
+                    return int(h) * 3600 + int(m) * 60 + int(s)
+            except (ValueError, AttributeError):
+                pass
+            return None
+
+        def _compute():
+            # Query FINISHED jobs with parseable walltime and actual runtime
+            q = db.query(Job).filter(
+                Job.state == JobState.FINISHED,
+                Job.end_time >= window_start,
+                Job.end_time < last_complete,
+                Job.walltime.isnot(None),
+                Job.actual_runtime_seconds.isnot(None),
+                Job.actual_runtime_seconds > 0,
+            )
+            q = _apply_job_filters(q, queue, queue_exclude, owner, owner_exclude,
+                                   project, project_exclude, allocation_type, allocation_type_exclude)
+            # Only pull the two columns we need — loading full Job ORM objects
+            # (incl. the multi-KB raw_pbs_data JSON) for ~450k rows blows past
+            # the request timeout.  with_entities keeps this a lean 2-column scan.
+            rows = q.with_entities(Job.walltime, Job.actual_runtime_seconds).all()
+
+            nx = len(x_labels)
+            ny = len(y_labels)
+            # 2D grid: cells[xi][yi] = count
+            grid = [[0] * ny for _ in range(nx)]
+
+            fractions = []
+            excluded_unparseable = 0
+
+            for wt_val, actual in rows:
+                req_sec = _parse_wt(wt_val)
+                if req_sec is None or req_sec <= 0:
+                    excluded_unparseable += 1
+                    continue
+                frac = actual / req_sec  # may exceed 1.0
+                frac_pct = frac * 100.0
+                fractions.append(frac)
+
+                # Bin x: requested walltime
+                xi = 0
+                for i in range(len(x_edges_sec) - 1):
+                    if x_edges_sec[i] < req_sec <= x_edges_sec[i + 1]:
+                        xi = i
+                        break
+                else:
+                    xi = nx - 1  # fallback >24h
+
+                # Bin y: used fraction %
+                yi = 0
+                for j in range(len(y_edges_pct) - 1):
+                    if y_edges_pct[j] <= frac_pct < y_edges_pct[j + 1]:
+                        yi = j
+                        break
+                else:
+                    yi = ny - 1  # >100%
+
+                grid[xi][yi] += 1
+
+            n = len(fractions)
+            if n > 0:
+                fractions.sort()
+                mid = n // 2
+                median_frac = fractions[mid] if n % 2 else (fractions[mid - 1] + fractions[mid]) / 2
+                pct_under_25 = sum(1 for f in fractions if f < 0.25) / n
+                pct_over_95  = sum(1 for f in fractions if f >= 0.95) / n
+            else:
+                median_frac = 0.0
+                pct_under_25 = 0.0
+                pct_over_95  = 0.0
+
+            # Flatten grid to sparse cells (skip zero-count cells)
+            cells = []
+            for xi in range(nx):
+                for yi in range(ny):
+                    c = grid[xi][yi]
+                    if c > 0:
+                        cells.append({"x": xi, "y": yi, "count": c})
+
+            return {
+                "x_labels": x_labels,
+                "y_labels": y_labels,
+                "cells": cells,
+                "median_used_fraction": round(median_frac, 4),
+                "pct_under_25": round(pct_under_25, 4),
+                "pct_over_95": round(pct_over_95, 4),
+                "n": n,
+                "excluded_unparseable": excluded_unparseable,
+            }
+
+        result = await asyncio.get_event_loop().run_in_executor(None, _compute)
+        _analytics_cache.set(cache_key, result)
+        return result
+
+    @app.get("/api/analytics/walltime-efficiency")
+    async def api_analytics_walltime_efficiency(
+        days: int = 30,
+        group_by: str = "user",
+        top_n: int = 20,
+        min_jobs: int = 3,
+        db: Session = Depends(get_db),
+    ):
+        """Efficiency scorecard: top/bottom N by mean efficiency, grouped by user or project.
+
+        Implements WalltimeEfficiencyAnalyzer logic directly against the shared db session.
+        Returns ranked table rows (plan §5.3, reuse WalltimeEfficiencyAnalyzer patterns).
+        """
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=days)
+
+        cache_key = _analytics_cache.make_key({
+            "endpoint": "walltime-efficiency",
+            "days": days,
+            "group_by": group_by,
+            "top_n": top_n,
+            "min_jobs": min_jobs,
+        })
+        cached = _analytics_cache.get(cache_key)
+        if cached:
+            return cached
+
+        def _parse_wt_sec(wt_str):
+            """Parse HH:MM:SS or DD:HH:MM:SS to seconds, return 0 on failure."""
+            if not wt_str:
+                return 0
+            try:
+                parts = wt_str.strip().split(":")
+                if len(parts) == 3:
+                    h, m, s = parts
+                    return int(h) * 3600 + int(m) * 60 + int(s)
+                elif len(parts) == 4:
+                    d, h, m, s = parts
+                    return int(d) * 86400 + int(h) * 3600 + int(m) * 60 + int(s)
+            except (ValueError, AttributeError):
+                pass
+            return 0
+
+        def _compute():
+            q = db.query(Job).filter(
+                Job.state == JobState.FINISHED,
+                Job.end_time >= cutoff,
+                Job.walltime.isnot(None),
+                Job.actual_runtime_seconds.isnot(None),
+                Job.actual_runtime_seconds > 0,
+            )
+            group_col_attr = Job.owner if group_by != "project" else Job.project
+            q = q.with_entities(
+                Job.walltime, Job.actual_runtime_seconds, group_col_attr
+            )
+            rows_raw = q.all()
+
+            # Aggregate by group
+            stats: dict[str, dict] = {}
+            for wt_val, actual_val, grp_val in rows_raw:
+                req_sec = _parse_wt_sec(wt_val)
+                if req_sec <= 0:
+                    continue
+                actual = actual_val or 0
+                eff = min((actual / req_sec) * 100.0, 100.0)
+                name = grp_val or "unknown"
+                if name not in stats:
+                    stats[name] = {"effs": [], "jobs": 0}
+                stats[name]["effs"].append(eff)
+                stats[name]["jobs"] += 1
+
+            # Build ranked rows
+            rows = []
+            for name, s in stats.items():
+                if s["jobs"] < min_jobs:
+                    continue
+                effs = s["effs"]
+                n = len(effs)
+                mean_e = sum(effs) / n
+                min_e  = min(effs)
+                max_e  = max(effs)
+                if n > 1:
+                    variance = sum((e - mean_e) ** 2 for e in effs) / (n - 1)
+                    std_e = variance ** 0.5
+                else:
+                    std_e = 0.0
+                rows.append({
+                    "name": name,
+                    "jobs": n,
+                    "mean_efficiency": f"{mean_e:.1f}%",
+                    "std_dev": f"{std_e:.1f}%",
+                    "min_efficiency": f"{min_e:.1f}%",
+                    "max_efficiency": f"{max_e:.1f}%",
+                    "_eff_float": mean_e,
+                })
+
+            rows.sort(key=lambda r: r["_eff_float"], reverse=True)
+            # Remove internal sort key before returning
+            for r in rows:
+                r.pop("_eff_float", None)
+
+            n_total = len(rows)
+            if len(rows) > top_n * 2:
+                rows = rows[:top_n] + rows[-top_n:]
+            elif len(rows) > top_n:
+                rows = rows[:top_n]
+
+            return {"group_by": group_by, "rows": rows, "n_total": n_total}
+
+        result = await asyncio.get_event_loop().run_in_executor(None, _compute)
+        _analytics_cache.set(cache_key, result)
+        return result
+
     # ---- static files ----
     # Serve index.html at root, everything else from /static
     @app.get("/")
@@ -1593,6 +2112,139 @@ def create_app(config=None) -> FastAPI:
             }
 
         return await asyncio.get_event_loop().run_in_executor(None, _fetch)
+
+    # ── Task E: Collector Health endpoint ───────────────────────────────────
+    @app.get("/api/analytics/collector-health")
+    async def api_analytics_collector_health(
+        days: int = 30,
+        summary: int = 0,
+        db: Session = Depends(get_db),
+    ):
+        """Collection cadence, gap detection, and failure reporting.
+
+        ?summary=1  → cheap banner payload: {gap_count, max_gap_min,
+                       last_success_age_min, failed_count}
+        full mode   → {cadence:[{t, gap_min}], gaps:[...],
+                       failures:[{timestamp, collection_type, error_message}],
+                       median_gap_min}
+
+        Gap detection uses system_snapshots timestamps (one row per successful
+        collection cycle).  A gap is flagged when it exceeds *both* 60 min AND
+        2× the median inter-snapshot interval, so brief scheduled pauses don't
+        generate noise.
+        """
+
+        def _compute():
+            from statistics import median as _median
+
+            now_utc = datetime.now(timezone.utc)
+            window_start_naive = (now_utc - timedelta(days=days)).replace(tzinfo=None)
+            now_naive = now_utc.replace(tzinfo=None)
+
+            # ── 1. Snapshot cadence (system_snapshots timestamps in window) ──
+            rows = db.execute(  # type: ignore[attr-defined]
+                text(
+                    "SELECT timestamp FROM system_snapshots "
+                    "WHERE timestamp >= :ws AND timestamp <= :we "
+                    "ORDER BY timestamp"
+                ),
+                {"ws": window_start_naive, "we": now_naive},
+            ).fetchall()
+
+            timestamps_raw = [r[0] for r in rows]
+
+            # Parse timestamps (stored without tz in SQLite)
+            def _parse(ts):
+                if isinstance(ts, str):
+                    return datetime.fromisoformat(ts)
+                return ts  # already a datetime object
+
+            timestamps = [_parse(t) for t in timestamps_raw]
+
+            # ── 2. Compute inter-snapshot gaps ───────────────────────────────
+            cadence = []  # [{t (ISO str), gap_min}]
+            gap_minutes = []  # raw gap values
+
+            for i in range(1, len(timestamps)):
+                gap_min = (timestamps[i] - timestamps[i - 1]).total_seconds() / 60.0
+                gap_minutes.append(gap_min)
+                cadence.append({
+                    "t": timestamps[i].isoformat(),
+                    "gap_min": round(gap_min, 2),
+                })
+
+            median_gap_min = round(_median(gap_minutes), 2) if gap_minutes else None
+
+            # ── 3. Flag significant gaps ──────────────────────────────────────
+            # A gap is "significant" if it is both > 60 min AND > 2× median.
+            threshold = max(60.0, 2.0 * median_gap_min) if median_gap_min else 60.0
+            gaps = [entry for entry in cadence if entry["gap_min"] > threshold]
+
+            # ── 4. Failed collections in window ──────────────────────────────
+            fail_rows = db.execute(  # type: ignore[attr-defined]
+                text(
+                    "SELECT timestamp, collection_type, error_message "
+                    "FROM data_collection_log "
+                    "WHERE status NOT IN ('SUCCESS', 'success') "
+                    "  AND timestamp >= :ws "
+                    "ORDER BY timestamp DESC"
+                ),
+                {"ws": window_start_naive},
+            ).fetchall()
+
+            failures = [
+                {
+                    "timestamp": str(r[0]),
+                    "collection_type": r[1],
+                    "error_message": r[2],
+                }
+                for r in fail_rows
+            ]
+
+            # ── 5. Last successful collection age ─────────────────────────────
+            last_ok_row = db.execute(  # type: ignore[attr-defined]
+                text(
+                    "SELECT timestamp FROM data_collection_log "
+                    "WHERE status IN ('SUCCESS', 'success') "
+                    "ORDER BY timestamp DESC LIMIT 1"
+                )
+            ).fetchone()
+
+            last_success_age_min = None
+            if last_ok_row:
+                last_ok_ts = _parse(last_ok_row[0])
+                last_success_age_min = round(
+                    (now_naive - last_ok_ts).total_seconds() / 60.0, 1
+                )
+
+            # ── 6. Build response ─────────────────────────────────────────────
+            gap_count  = len(gaps)
+            max_gap_min = round(max(g["gap_min"] for g in gaps), 1) if gaps else 0
+
+            if summary:
+                return {
+                    "gap_count":           gap_count,
+                    "max_gap_min":         max_gap_min,
+                    "last_success_age_min": last_success_age_min,
+                    "failed_count":        len(failures),
+                }
+
+            return {
+                "cadence":              cadence,
+                "gaps":                 gaps,
+                "failures":             failures,
+                "median_gap_min":       median_gap_min,
+                "gap_count":            gap_count,
+                "max_gap_min":          max_gap_min,
+                "last_success_age_min": last_success_age_min,
+                "failed_count":         len(failures),
+            }
+
+        # Summary mode is cheap (no heavy aggregation) — skip cache, run inline.
+        # Full mode runs inside executor to avoid blocking the event loop.
+        if summary:
+            return _compute()
+        return await asyncio.get_event_loop().run_in_executor(None, _compute)
 
     app.mount("/css", StaticFiles(directory=str(STATIC_DIR / "css")), name="css")
     app.mount("/js", StaticFiles(directory=str(STATIC_DIR / "js")), name="js")
