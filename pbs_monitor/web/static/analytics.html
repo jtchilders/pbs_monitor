@@ -8,6 +8,10 @@
     <link rel="stylesheet" href="css/analytics.css">
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+    <!-- chartjs-chart-matrix plugin for Task B walltime heatmap -->
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-matrix@2/dist/chartjs-chart-matrix.min.js"></script>
+    <!-- Shared color registry MUST load before analytics.js -->
+    <script src="js/colors.js"></script>
 </head>
 <body>
 <div id="app">
@@ -15,7 +19,7 @@
         <header class="header-bar">
             <div class="header-left">
                 <h1>Analytics</h1>
-                <a href="#" onclick="window.close(); return false;" class="back-link">✕ Close Tab</a>
+                <a href="#" onclick="window.close(); return false;" class="back-link">&#x2715; Close Tab</a>
                 <span class="header-system">{{ systemName }}</span>
             </div>
             <div class="header-right" style="font-size:0.8rem;color:var(--text-dim)">
@@ -25,12 +29,31 @@
 
         <main class="main-content analytics-main">
 
+            <!-- Tab bar — uses same .tab-bar / .tab-btn as front page (dashboard.css) -->
+            <div class="panel analytics-tab-panel">
+                <nav class="tab-bar analytics-page-tabs" aria-label="Analytics sections">
+                    <button v-for="tab in tabDefs" :key="tab.id"
+                            class="tab-btn"
+                            :class="{ active: activeTab === tab.id }"
+                            @click="switchTab(tab.id)">
+                        {{ tab.label }}
+                    </button>
+                </nav>
+            </div>
+
+            <!-- Completeness banner — shown on every tab when collector gaps detected.
+                 Populated by a lightweight GET /api/analytics/collector-health?summary=1
+                 call on range change (task E adds this endpoint; guarded with try/catch). -->
+            <div v-if="collectBanner" class="analytics-banner-warn">
+                &#9888; {{ collectBanner }}
+            </div>
+
             <!-- Controls -->
             <section class="panel analytics-controls-panel">
                 <div class="analytics-controls">
                     <div class="control-spinner" v-if="loadingAny">
                         <span class="spinner-ring"></span>
-                        <span class="spinner-label">Loading…</span>
+                        <span class="spinner-label">Loading&#x2026;</span>
                     </div>
                     <div class="control-group">
                         <label>Range</label>
@@ -44,15 +67,19 @@
                         <div class="btn-group">
                             <button v-for="f in freqChoices" :key="f.k"
                                     :class="{ active: freqOverride===f.k }"
-                                    @click="freqOverride=f.k; reload()">{{ f.l }}</button>
+                                    @click="freqOverride=f.k; invalidateAndReload()">{{ f.l }}</button>
                         </div>
-                        <span class="control-hint" v-if="freqOverride==='auto'">→ {{ effectiveFreqLabel }}</span>
+                        <span class="control-hint" v-if="freqOverride==='auto'">&#8594; {{ effectiveFreqLabel }}</span>
                     </div>
                     <div class="control-group">
                         <label>Group by</label>
                         <div class="btn-group">
-                            <button :class="{ active: groupBy==='queue' }" @click="groupBy='queue'; reload()">Queue</button>
-                            <button :class="{ active: groupBy==='allocation_type' }" @click="groupBy='allocation_type'; reload()">Allocation</button>
+                            <button :class="{ active: groupBy==='queue' }"
+                                    @click="groupBy='queue'; invalidateAndReload()">Queue</button>
+                            <button :class="{ active: groupBy==='allocation_type' }"
+                                    @click="groupBy='allocation_type'; invalidateAndReload()">Allocation</button>
+                            <button :class="{ active: groupBy==='project' }"
+                                    @click="groupBy='project'; invalidateAndReload()">Project</button>
                         </div>
                     </div>
                     <div class="control-group filters-group">
@@ -63,9 +90,9 @@
                                         @click="toggleFilterPanel(dim.key)">
                                     {{ dim.label }}
                                     <span v-if="activeFilterCount(dim.key)" class="filter-count">
-                                        {{ filterMode[dim.key]==='exclude' ? '−' : '+' }}{{ activeFilterCount(dim.key) }}
+                                        {{ filterMode[dim.key]==='exclude' ? '&#x2212;' : '+' }}{{ activeFilterCount(dim.key) }}
                                     </span>
-                                    <span v-else>▾</span>
+                                    <span v-else>&#x25BE;</span>
                                 </button>
                                 <div v-if="openFilterPanel===dim.key" class="filter-panel" @click.stop>
                                     <div class="filter-mode-toggle">
@@ -93,50 +120,363 @@
                 </div>
             </section>
 
-            <!-- Status -->
-            <div v-if="loading && !loadingAny" class="analytics-loading">Computing… (may take 30–60s for large ranges on first load)</div>
+            <!-- Status messages -->
+            <div v-if="loading && !loadingAny" class="analytics-loading">
+                Computing&#x2026; (may take 30&#x2013;60s for large ranges on first load)
+            </div>
             <div v-if="error" class="analytics-error">{{ error }}</div>
 
-            <!-- Chart 1: Utilization -->
-            <section class="panel">
-                <div class="panel-header">
-                    <h2>Utilization % over time</h2>
-                    <span class="panel-meta" v-if="utilMeta">{{ utilMeta }}</span>
-                </div>
-                <div class="chart-wrap">
-                    <canvas ref="utilCanvas"></canvas>
-                </div>
-            </section>
+            <!-- ===============================================================
+                 TAB CONTENT AREAS
+                 Naming convention for downstream tasks (A-E):
+                   Container id:  "tab-<tabId>"          e.g. id="tab-job-outcomes"
+                   Ref prefix:    "<tabId>Canvas"         e.g. ref="jobOutcomesCanvas"
+                   Section refs:  "<tabId>Section"        e.g. ref="jobOutcomesSection"
+                 Each placeholder <div> below has both the stable id and a
+                 comment marking it as the mount point for that task.
+                 =============================================================== -->
 
-            <!-- Chart 2: Queue Depth -->
-            <section class="panel">
-                <div class="panel-header">
-                    <h2>Queue Depth — system-hours backlog</h2>
-                    <span class="panel-meta" v-if="depthMeta">{{ depthMeta }}</span>
-                </div>
-                <div class="chart-wrap">
-                    <canvas ref="depthCanvas"></canvas>
-                </div>
-            </section>
+            <!-- Tab: Trends (default) -->
+            <template v-if="activeTab === 'trends'">
 
-            <!-- Chart 3: Wait vs Score -->
-            <section class="panel">
-                <div class="panel-header">
-                    <h2>Wait Time vs Score at Run Start</h2>
-                    <div class="btn-group">
-                        <button :class="{ active: xAxis==='queue_time' }" @click="xAxis='queue_time'; reloadScatter()">Queue Time</button>
-                        <button :class="{ active: xAxis==='elapsed_time' }" @click="xAxis='elapsed_time'; reloadScatter()">Elapsed Time</button>
+                <!-- Chart 1: Utilization -->
+                <section class="panel" id="tab-trends-util">
+                    <div class="panel-header">
+                        <h2>Utilization % over time</h2>
+                        <span class="panel-meta" v-if="utilMeta">{{ utilMeta }}</span>
                     </div>
-                </div>
-                <div v-if="scatterNote" class="analytics-note">{{ scatterNote }}</div>
-                <div class="chart-wrap">
-                    <canvas ref="scatterCanvas"></canvas>
-                </div>
-            </section>
+                    <div class="chart-wrap">
+                        <canvas ref="utilCanvas"></canvas>
+                    </div>
+                </section>
+
+                <!-- Chart 2: Queue Depth -->
+                <section class="panel" id="tab-trends-depth">
+                    <div class="panel-header">
+                        <h2>Queue Depth &#x2014; system-hours backlog</h2>
+                        <span class="panel-meta" v-if="depthMeta">{{ depthMeta }}</span>
+                    </div>
+                    <div class="chart-wrap">
+                        <canvas ref="depthCanvas"></canvas>
+                    </div>
+                </section>
+
+            </template>
+
+            <!-- Tab: Job Outcomes — Task A -->
+            <template v-if="activeTab === 'job-outcomes'">
+                <!-- Chart 1: Stacked job count / rate over time -->
+                <section class="panel" id="tab-job-outcomes" ref="jobOutcomesSection">
+                    <div class="panel-header">
+                        <h2>Job Outcomes over time</h2>
+                        <!-- Rate / Count toggle -->
+                        <div class="btn-group" style="margin-left:auto">
+                            <button :class="{ active: outcomeMode==='count' }"
+                                    @click="outcomeMode='count'; renderOutcomesFromCache()">Count</button>
+                            <button :class="{ active: outcomeMode==='rate' }"
+                                    @click="outcomeMode='rate'; renderOutcomesFromCache()">Rate %</button>
+                        </div>
+                        <span class="panel-meta" v-if="outcomesMeta">{{ outcomesMeta }}</span>
+                    </div>
+                    <!-- Legend note: visual grouping explained -->
+                    <div v-if="outcomesLegendNote" class="analytics-banner-info" style="margin-bottom:6px;font-size:0.78rem;color:#94a3b8;padding:4px 8px;border-left:3px solid #8b5cf6;">
+                        {{ outcomesLegendNote }}
+                    </div>
+                    <div v-if="loadingOutcomes" class="analytics-loading">Loading Job Outcomes&#x2026;</div>
+                    <div class="chart-wrap" v-show="!loadingOutcomes">
+                        <canvas ref="jobOutcomesCanvas"></canvas>
+                    </div>
+                </section>
+
+                <!-- Chart 2: Exit-status taxonomy bar -->
+                <section class="panel" id="tab-exit-taxonomy">
+                    <div class="panel-header">
+                        <h2>Exit-code taxonomy</h2>
+                        <span class="panel-meta" v-if="taxonomyMeta">{{ taxonomyMeta }}</span>
+                    </div>
+                    <div v-if="loadingTaxonomy" class="analytics-loading">Loading Exit Taxonomy&#x2026;</div>
+                    <div class="chart-wrap" v-show="!loadingTaxonomy">
+                        <canvas ref="exitTaxonomyCanvas"></canvas>
+                    </div>
+                </section>
+
+            </template>
+
+            <!-- Tab: Walltime Accuracy — Task B -->
+            <template v-if="activeTab === 'walltime-accuracy'">
+                <section class="panel" id="tab-walltime-accuracy" ref="walltimeSection">
+                    <div class="panel-header">
+                        <h2>Walltime Accuracy</h2>
+                        <span class="panel-meta" v-if="walltimeStats">
+                            n={{ walltimeStats.n ? walltimeStats.n.toLocaleString() : '?' }}
+                            &nbsp;|&nbsp; median used {{ walltimeStats.median_used_fraction ? (walltimeStats.median_used_fraction * 100).toFixed(1) + '%' : '?' }}
+                            &nbsp;|&nbsp; &lt;25%: {{ walltimeStats.pct_under_25 ? (walltimeStats.pct_under_25 * 100).toFixed(1) + '%' : '?' }}
+                            &nbsp;|&nbsp; &gt;95%: {{ walltimeStats.pct_over_95 ? (walltimeStats.pct_over_95 * 100).toFixed(1) + '%' : '?' }}
+                        </span>
+                    </div>
+                    <div v-if="loadingWalltime" class="analytics-loading">Loading Walltime Accuracy&#x2026;</div>
+                    <div v-if="errorWalltime" class="analytics-error">{{ errorWalltime }}</div>
+                    <div class="chart-wrap" v-show="!loadingWalltime && !errorWalltime">
+                        <canvas ref="walltimeHistCanvas"></canvas>
+                    </div>
+                </section>
+
+                <!-- Efficiency scorecard table -->
+                <section class="panel" v-if="!loadingWalltime && walltimeScorecard" style="margin-top:1rem;">
+                    <div class="panel-header"><h3>Walltime Efficiency Scorecard</h3></div>
+                    <table class="ch-failures-table">
+                        <thead>
+                            <tr>
+                                <th>{{ walltimeScorecard.group_by === 'project' ? 'Project' : 'User' }}</th>
+                                <th>Jobs</th>
+                                <th>Mean eff</th>
+                                <th>Std dev</th>
+                                <th>Min eff</th>
+                                <th>Max eff</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="row in walltimeScorecard.rows" :key="row.name">
+                                <td>{{ row.name }}</td>
+                                <td>{{ (row.jobs || 0).toLocaleString() }}</td>
+                                <td>{{ row.mean_efficiency }}</td>
+                                <td>{{ row.std_dev }}</td>
+                                <td>{{ row.min_efficiency }}</td>
+                                <td>{{ row.max_efficiency }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </section>
+            </template>
+
+            <!-- Tab: Wait Times — Task C (IMPLEMENTED) -->
+            <template v-if="activeTab === 'wait-times'">
+                <!--
+                  TASK C MOUNT POINT — IMPLEMENTED
+                  Container id:  "tab-wait-times"
+                  Chart refs:    waitEcdfCanvas (ECDF lines), waitPercentilesCanvas (p50/p90/p99 lines)
+                  Section ref:   waitTimesSection
+                  Endpoints:     GET /api/analytics/wait-ecdf, GET /api/analytics/wait-percentiles
+                -->
+
+                <!-- Loading / error states -->
+                <div v-if="loadingWaitTimes" class="analytics-loading">Loading Wait Times&#x2026;</div>
+                <div v-if="waitTimesError" class="analytics-error">{{ waitTimesError }}</div>
+
+                <!-- Chart 1: ECDF per group -->
+                <section class="panel" id="tab-wait-times" ref="waitTimesSection" v-show="!loadingWaitTimes && !waitTimesError">
+                    <div class="panel-header">
+                        <h2>Wait Time ECDF per group</h2>
+                        <span class="panel-meta" style="color:#94a3b8;font-size:0.8rem;">Cumulative distribution of queue wait times (x = hours, y = fraction of jobs)</span>
+                    </div>
+                    <div class="chart-wrap">
+                        <canvas ref="waitEcdfCanvas"></canvas>
+                    </div>
+                </section>
+
+                <!-- Chart 2: Percentile trends -->
+                <section class="panel" id="tab-wait-percentiles" style="margin-top:1rem;" v-show="!loadingWaitTimes && !waitTimesError">
+                    <div class="panel-header">
+                        <h2>Wait Time Percentile Trend</h2>
+                        <!-- p50 / p90 / p99 toggle -->
+                        <div class="btn-group" style="margin-left:auto">
+                            <button :class="{ active: waitPctView==='p50' }" @click="switchWaitPctView('p50')">p50</button>
+                            <button :class="{ active: waitPctView==='p90' }" @click="switchWaitPctView('p90')">p90</button>
+                            <button :class="{ active: waitPctView==='p99' }" @click="switchWaitPctView('p99')">p99</button>
+                        </div>
+                    </div>
+                    <div class="chart-wrap">
+                        <canvas ref="waitPercentilesCanvas"></canvas>
+                    </div>
+                </section>
+
+            </template>
+
+            <!-- Tab: Reservations — Task D (IMPLEMENTED) -->
+            <template v-if="activeTab === 'reservations'">
+                <!--
+                  TASK D MOUNT POINT — IMPLEMENTED
+                  Container id:  "tab-reservations"
+                  Chart refs:    resvTimelineCanvas (horizontal bar: reserved vs used)
+                  Table ref:     resvRankingTable
+                  Section ref:   reservationsSection
+                  Endpoint:      GET /api/analytics/reservation-utilization-timeline
+                -->
+
+                <!-- Loading / error states -->
+                <div v-if="loadingReservations" class="analytics-loading">Loading Reservations&#x2026;</div>
+                <div v-if="reservationsError" class="analytics-error">{{ reservationsError }}</div>
+
+                <!-- Summary stat chips -->
+                <section class="panel" id="tab-reservations" ref="reservationsSection" v-show="!loadingReservations && !reservationsError && reservationsSummary">
+                    <div class="panel-header">
+                        <h2>Reservation Utilization</h2>
+                    </div>
+
+                    <!-- Summary stats row (mirrors ch-summary-row style) -->
+                    <div class="ch-summary-row">
+                        <div class="ch-stat">
+                            <span class="ch-stat-value">{{ reservationsSummary.total_reservations }}</span>
+                            <span class="ch-stat-label">Reservations</span>
+                        </div>
+                        <div class="ch-stat">
+                            <span class="ch-stat-value" :class="{ 'ch-bad': reservationsSummary.avg_utilization_pct < 25 }">
+                                {{ reservationsSummary.avg_utilization_pct }}%
+                            </span>
+                            <span class="ch-stat-label">Avg utilization</span>
+                        </div>
+                        <div class="ch-stat">
+                            <span class="ch-stat-value ch-bad">
+                                {{ reservationsSummary.under_25_pct_count }}
+                            </span>
+                            <span class="ch-stat-label">Under 25% util</span>
+                        </div>
+                        <div class="ch-stat">
+                            <span class="ch-stat-value">
+                                {{ reservationsSummary.total_reserved_node_hours ? reservationsSummary.total_reserved_node_hours.toLocaleString(undefined, {maximumFractionDigits:0}) : '?' }}
+                            </span>
+                            <span class="ch-stat-label">Reserved node-hrs</span>
+                        </div>
+                        <div class="ch-stat">
+                            <span class="ch-stat-value ch-bad">
+                                {{ reservationsSummary.total_wasted_node_hours ? reservationsSummary.total_wasted_node_hours.toLocaleString(undefined, {maximumFractionDigits:0}) : '?' }}
+                            </span>
+                            <span class="ch-stat-label">Wasted node-hrs</span>
+                        </div>
+                    </div>
+
+                    <!-- Horizontal bar chart: top N by wasted node-hours -->
+                    <div class="chart-wrap" style="height:500px;">
+                        <canvas ref="resvTimelineCanvas"></canvas>
+                    </div>
+                </section>
+
+                <!-- Ranking table: top N reservations by wasted node-hours -->
+                <section class="panel" style="margin-top:1rem;"
+                         v-if="!loadingReservations && !reservationsError && reservationsData && reservationsData.reservations">
+                    <div class="panel-header">
+                        <h3>Top Reservations by Wasted Node-Hours</h3>
+                        <span class="panel-meta" style="color:#94a3b8;font-size:0.8rem;">Sorted descending by wasted node-hours (reserved &#x2212; used)</span>
+                    </div>
+                    <table class="ch-failures-table" ref="resvRankingTable">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Owner</th>
+                                <th>Nodes</th>
+                                <th>Reserved nh</th>
+                                <th>Used nh</th>
+                                <th>Wasted nh</th>
+                                <th>Util %</th>
+                                <th>Start</th>
+                                <th>End</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="r in reservationsData.reservations" :key="r.reservation_id">
+                                <td>{{ r.name }}</td>
+                                <td>{{ r.owner }}</td>
+                                <td>{{ r.nodes.toLocaleString() }}</td>
+                                <td>{{ r.reserved_node_hours.toLocaleString(undefined, {maximumFractionDigits:1}) }}</td>
+                                <td>{{ r.used_node_hours.toLocaleString(undefined, {maximumFractionDigits:1}) }}</td>
+                                <td :class="{ 'ch-bad': r.utilization_pct < 25 }">{{ r.wasted_node_hours.toLocaleString(undefined, {maximumFractionDigits:1}) }}</td>
+                                <td :class="{ 'ch-bad': r.utilization_pct < 25 }">{{ r.utilization_pct }}%</td>
+                                <td>{{ r.start ? r.start.substring(0,10) : '?' }}</td>
+                                <td>{{ r.end ? r.end.substring(0,10) : '?' }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </section>
+
+            </template>
+
+            <!-- Tab: Collector Health — Task E -->
+            <template v-if="activeTab === 'collector-health'">
+                <section class="panel" id="tab-collector-health" ref="collectorHealthSection">
+                    <div class="panel-header">
+                        <h2>Collector Health</h2>
+                        <span class="panel-meta" v-if="collectorHealthMeta">{{ collectorHealthMeta }}</span>
+                    </div>
+
+                    <!-- Loading / error states -->
+                    <div v-if="loadingCollectorHealth" class="analytics-loading">Loading collector health&#x2026;</div>
+                    <div v-if="collectorHealthError" class="analytics-error">{{ collectorHealthError }}</div>
+
+                    <!-- Summary stats row -->
+                    <div class="ch-summary-row" v-if="!loadingCollectorHealth && !collectorHealthError && collectorHealthData">
+                        <div class="ch-stat">
+                            <span class="ch-stat-value" :class="{ 'ch-bad': collectorHealthData.gap_count > 0 }">
+                                {{ collectorHealthData.gap_count }}
+                            </span>
+                            <span class="ch-stat-label">Gaps detected</span>
+                        </div>
+                        <div class="ch-stat">
+                            <span class="ch-stat-value" :class="{ 'ch-bad': collectorHealthData.max_gap_min > 120 }">
+                                {{ collectorHealthData.max_gap_min > 0 ? collectorHealthData.max_gap_min + ' min' : '&#x2014;' }}
+                            </span>
+                            <span class="ch-stat-label">Max gap</span>
+                        </div>
+                        <div class="ch-stat">
+                            <span class="ch-stat-value">
+                                {{ collectorHealthData.median_gap_min != null ? collectorHealthData.median_gap_min + ' min' : '&#x2014;' }}
+                            </span>
+                            <span class="ch-stat-label">Median cadence</span>
+                        </div>
+                        <div class="ch-stat">
+                            <span class="ch-stat-value" :class="{ 'ch-bad': collectorHealthData.failed_count > 0 }">
+                                {{ collectorHealthData.failed_count }}
+                            </span>
+                            <span class="ch-stat-label">Collection failures</span>
+                        </div>
+                        <div class="ch-stat">
+                            <span class="ch-stat-value"
+                                  :class="{ 'ch-bad': collectorHealthData.last_success_age_min != null && collectorHealthData.last_success_age_min > 120 }">
+                                {{ collectorHealthData.last_success_age_min != null
+                                    ? (collectorHealthData.last_success_age_min > 1440
+                                        ? (collectorHealthData.last_success_age_min / 1440).toFixed(1) + 'd'
+                                        : collectorHealthData.last_success_age_min + ' min')
+                                    : '&#x2014;' }}
+                            </span>
+                            <span class="ch-stat-label">Since last success</span>
+                        </div>
+                    </div>
+
+                    <!-- Gap chart: step chart of gap_min over time, gaps >60min flagged red -->
+                    <div class="chart-wrap" v-show="!loadingCollectorHealth && !collectorHealthError && collectorHealthData">
+                        <canvas ref="collectorGapCanvas"></canvas>
+                    </div>
+
+                    <!-- Failures table (only shown when failures exist) -->
+                    <div v-if="collectorHealthData && collectorHealthData.failures && collectorHealthData.failures.length > 0"
+                         class="panel" style="margin-top:1rem;">
+                        <div class="panel-header"><h3>Collection Failures</h3></div>
+                        <table class="ch-failures-table">
+                            <thead>
+                                <tr><th>Timestamp</th><th>Type</th><th>Error</th></tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="f in collectorHealthData.failures" :key="f.timestamp">
+                                    <td>{{ f.timestamp }}</td>
+                                    <td>{{ f.collection_type }}</td>
+                                    <td class="ch-error-msg">{{ f.error_message || '(no message)' }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- No-data state -->
+                    <div v-if="!loadingCollectorHealth && !collectorHealthError && collectorHealthData && collectorHealthData.cadence && collectorHealthData.cadence.length === 0"
+                         class="tab-placeholder">
+                        <p>No snapshot data found in the selected range.</p>
+                    </div>
+                </section>
+            </template>
+
         </main>
     </div>
 </div>
 
+<!-- colors.js is already loaded in <head> — loads before analytics.js -->
 <script src="js/analytics.js"></script>
 </body>
 </html>

@@ -69,12 +69,25 @@ class DatabaseMigration:
     
     def check_schema_version(self) -> Optional[str]:
         """Check current schema version.
-        For tests: None when no tables; otherwise report 1.0.0.
+        Inspects actual column presence to determine schema version:
+          - None: no tables yet
+          - 1.0.0: jobs table present but no reservation tables
+          - 1.1.0: reservation tables present but no outcome_class column
+          - 1.2.0: outcome_class column present on jobs table (latest)
         """
         try:
             existing = self.get_existing_tables()
             if not existing:
                 return None
+            inspector = inspect(self.db_manager.engine)
+            # Check for outcome_class column (v1.2)
+            if 'jobs' in existing:
+                job_cols = [c['name'] for c in inspector.get_columns('jobs')]
+                if 'outcome_class' in job_cols:
+                    return "1.2.0"
+            # Check for reservation tables (v1.1)
+            if 'reservations' in existing:
+                return "1.1.0"
             return "1.0.0"
         except Exception:
             return None
@@ -109,10 +122,16 @@ class DatabaseMigration:
         if current_version == "1.0.0":
             logger.info("Migrating from v1.0.0 to v1.1.0 (adding reservation tables)")
             self.migrate_to_v1_1_reservations()
+            current_version = "1.1.0"
+        
+        # Migration path from 1.1.0 to 1.2.0 (add outcome_class column + indexes)
+        if current_version == "1.1.0":
+            logger.info("Migrating from v1.1.0 to v1.2.0 (adding outcome_class column)")
+            self.migrate_to_v1_2_outcome_class()
             return
         
         # Already at latest version
-        if current_version == "1.1.0":
+        if current_version == "1.2.0":
             logger.info("Database schema is up to date")
             return
         
@@ -172,6 +191,195 @@ class DatabaseMigration:
         except Exception as e:
             logger.error(f"Failed to add reservations_collected column: {str(e)}")
             raise
+
+    # ------------------------------------------------------------------
+    # v1.2.0 – T0: outcome_class column + indexes
+    # ------------------------------------------------------------------
+
+    def migrate_to_v1_2_outcome_class(self) -> None:
+        """Add outcome_class VARCHAR column and indexes to the jobs table (v1.2).
+
+        **IMPORTANT – DB BACKUP:** This migration alters a potentially large
+        table (~450 k rows on Aurora).  Take a database backup before running
+        in production::
+
+            pbs-monitor database backup
+
+        The migration is idempotent — it is safe to run more than once.
+        """
+        logger.info("Migrating to v1.2 – adding outcome_class column to jobs table")
+        logger.warning(
+            "T0 migration: back up the database before running this on production data. "
+            "Run: pbs-monitor database backup"
+        )
+
+        try:
+            inspector = inspect(self.db_manager.engine)
+            job_cols = [c['name'] for c in inspector.get_columns('jobs')]
+
+            # --- 1. Add the column (idempotent) ---
+            if 'outcome_class' not in job_cols:
+                logger.info("Adding outcome_class column to jobs table")
+                with self.db_manager.get_session() as session:
+                    session.execute(text(
+                        "ALTER TABLE jobs ADD COLUMN outcome_class VARCHAR(20)"
+                    ))
+                    session.commit()
+                logger.info("outcome_class column added successfully")
+            else:
+                logger.info("outcome_class column already exists")
+
+            # --- 2. Add indexes (CREATE INDEX IF NOT EXISTS is idempotent) ---
+            with self.db_manager.get_session() as session:
+                session.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_jobs_outcome_class "
+                    "ON jobs (outcome_class)"
+                ))
+                session.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_jobs_end_time_outcome_class "
+                    "ON jobs (end_time, outcome_class)"
+                ))
+                session.commit()
+            logger.info("Indexes on outcome_class created/verified")
+
+            logger.info("Migration to v1.2.0 completed successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to migrate to v1.2.0: {str(e)}")
+            raise
+
+    # ------------------------------------------------------------------
+    # T0 Backfill – populate exit_status + outcome_class for existing rows
+    # ------------------------------------------------------------------
+
+    def backfill_exit_status_and_outcome_class(
+        self, batch_size: int = 5000, dry_run: bool = False
+    ) -> Dict[str, Any]:
+        """Backfill ``exit_status`` (parsed from ``raw_pbs_data.Exit_status``) and
+        ``outcome_class`` (via :func:`~pbs_monitor.analytics.outcome_classifier.classify_exit`)
+        for all existing jobs rows.
+
+        **IMPORTANT – DB BACKUP:** This operation updates up to ~458 k rows.
+        Take a database backup before running in production::
+
+            pbs-monitor database backup
+
+        The operation is **batched** (default 5 000 rows per transaction) and
+        **idempotent** — rows that already have both ``exit_status`` and
+        ``outcome_class`` populated are skipped automatically.
+
+        Args:
+            batch_size: Number of rows to update per transaction.
+            dry_run:    When ``True`` the function scans and classifies but
+                        does not write anything to the database.
+
+        Returns:
+            Dict with keys: ``updated``, ``skipped``, ``errors``, ``dry_run``.
+        """
+        import json as _json
+        from ..analytics.outcome_classifier import classify_exit
+
+        logger.info(
+            "Starting T0 backfill: exit_status + outcome_class "
+            f"(batch_size={batch_size}, dry_run={dry_run})"
+        )
+        if dry_run:
+            logger.info("DRY RUN – no rows will be written")
+
+        stats: Dict[str, Any] = {"updated": 0, "skipped": 0, "errors": 0, "dry_run": dry_run}
+
+        def _parse_walltime_seconds(wt_str: Optional[str]) -> Optional[int]:
+            """Parse HH:MM:SS → seconds.  Returns None on failure."""
+            if not wt_str:
+                return None
+            try:
+                parts = wt_str.strip().split(":")
+                if len(parts) == 3:
+                    h, m, s = parts
+                    return int(h) * 3600 + int(m) * 60 + int(s)
+            except (ValueError, AttributeError):
+                pass
+            return None
+
+        with self.db_manager.get_session() as session:
+            # Stream IDs in chunks to avoid loading 450k rows into RAM at once.
+            offset = 0
+            while True:
+                rows = session.execute(
+                    text(
+                        "SELECT job_id, state, exit_status, outcome_class, "
+                        "       actual_runtime_seconds, walltime, raw_pbs_data "
+                        "FROM jobs "
+                        "ORDER BY job_id "
+                        f"LIMIT {batch_size} OFFSET {offset}"
+                    )
+                ).fetchall()
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    job_id = row[0]
+                    state = row[1]
+                    db_exit_status = row[2]
+                    db_outcome_class = row[3]
+                    actual_runtime_seconds = row[4]
+                    walltime_str = row[5]
+                    raw_pbs_data = row[6]
+
+                    # --- Parse exit_status from raw JSON if not already set ---
+                    exit_status = db_exit_status
+                    if exit_status is None and raw_pbs_data:
+                        try:
+                            raw = raw_pbs_data if isinstance(raw_pbs_data, dict) else _json.loads(raw_pbs_data)
+                            # Use explicit None checks — exit_status 0 is falsy but valid
+                            es_raw = raw.get("Exit_status")
+                            if es_raw is None:
+                                es_raw = raw.get("exit_status")
+                            if es_raw is not None:
+                                exit_status = int(es_raw)
+                        except (ValueError, TypeError, _json.JSONDecodeError):
+                            stats["errors"] += 1
+                            logger.debug(f"job_id={job_id}: failed to parse Exit_status from raw_pbs_data")
+
+                    # --- Classify ---
+                    requested_walltime_seconds = _parse_walltime_seconds(walltime_str)
+                    new_outcome_class = classify_exit(
+                        state or "F",
+                        exit_status,
+                        actual_runtime_seconds=actual_runtime_seconds,
+                        requested_walltime_seconds=requested_walltime_seconds,
+                    )
+
+                    # --- Skip if nothing changed ---
+                    if exit_status == db_exit_status and new_outcome_class == db_outcome_class:
+                        stats["skipped"] += 1
+                        continue
+
+                    if not dry_run:
+                        session.execute(
+                            text(
+                                "UPDATE jobs "
+                                "SET exit_status = :es, outcome_class = :oc "
+                                "WHERE job_id = :job_id"
+                            ),
+                            {"es": exit_status, "oc": new_outcome_class, "job_id": job_id},
+                        )
+
+                    stats["updated"] += 1
+
+                if not dry_run:
+                    session.commit()
+
+                offset += batch_size
+                logger.info(
+                    f"Backfill progress: offset={offset}, "
+                    f"updated={stats['updated']}, skipped={stats['skipped']}, "
+                    f"errors={stats['errors']}"
+                )
+
+        logger.info(f"T0 backfill complete: {stats}")
+        return stats
     
     def validate_schema(self) -> Dict[str, Any]:
         """Validate database schema"""
@@ -406,4 +614,20 @@ def clean_old_data(job_history_days: int = 365, snapshot_days: int = 90,
 def get_database_info(config: Optional[Config] = None) -> Dict[str, Any]:
     """Get database information"""
     migration = DatabaseMigration(config)
-    return migration.get_database_info() 
+    return migration.get_database_info()
+
+
+def backfill_exit_status_and_outcome_class(
+    batch_size: int = 5000,
+    dry_run: bool = False,
+    config: Optional[Config] = None,
+) -> Dict[str, Any]:
+    """Run T0 backfill: populate exit_status + outcome_class for existing jobs rows.
+
+    **IMPORTANT – DB BACKUP FIRST:** This updates up to ~458 k rows.
+    Run ``pbs-monitor database backup`` before calling this on production data.
+    """
+    migration = DatabaseMigration(config)
+    return migration.backfill_exit_status_and_outcome_class(
+        batch_size=batch_size, dry_run=dry_run
+    )

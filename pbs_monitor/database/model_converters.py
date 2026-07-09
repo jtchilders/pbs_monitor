@@ -23,12 +23,42 @@ from .models import (
 )
 
 
+def _parse_walltime_to_seconds(wt_str: Optional[str]) -> Optional[int]:
+    """Parse an HH:MM:SS walltime string to total seconds.  Returns None on failure."""
+    if not wt_str:
+        return None
+    try:
+        parts = wt_str.strip().split(":")
+        if len(parts) == 3:
+            h, m, s = parts
+            return int(h) * 3600 + int(m) * 60 + int(s)
+    except (ValueError, AttributeError):
+        pass
+    return None
+
+
 class JobConverter:
     """Converter between PBSJob and database Job models"""
     
     @staticmethod
     def to_database(pbs_job: PBSJob) -> Job:
-        """Convert PBSJob to database Job model"""
+        """Convert PBSJob to database Job model, computing outcome_class on the fly."""
+        # Lazy import to avoid a circular import at module-load time:
+        # importing the analytics *package* (analytics/__init__) pulls in the
+        # heavy analyzers, one of which transitively imports data_collector,
+        # which imports this module — a cycle that leaves ModelConverters
+        # unbound and breaks the daemon. Import the leaf module directly here.
+        from ..analytics.outcome_classifier import classify_exit as _classify_exit
+
+        # Compute outcome_class for finished/completed jobs.
+        requested_walltime_seconds = _parse_walltime_to_seconds(pbs_job.walltime)
+        outcome_class = _classify_exit(
+            state=pbs_job.state.value,
+            exit_status=pbs_job.exit_status,
+            actual_runtime_seconds=pbs_job.actual_runtime_seconds,
+            requested_walltime_seconds=requested_walltime_seconds,
+        )
+
         return Job(
             job_id=pbs_job.job_id,
             job_name=pbs_job.job_name,
@@ -51,6 +81,7 @@ class JobConverter:
             priority=pbs_job.priority,
             execution_node=pbs_job.execution_node,
             exit_status=pbs_job.exit_status,
+            outcome_class=outcome_class,  # T0: computed from classify_exit
             
             # Project and allocation information
             project=pbs_job.project,

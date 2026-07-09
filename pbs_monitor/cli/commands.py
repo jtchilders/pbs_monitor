@@ -24,7 +24,8 @@ from ..models.reservation import PBSReservation, ReservationState
 from ..utils.json_helpers import load_json_safe
 from ..database.migrations import (
     initialize_database, migrate_database, validate_database,
-    backup_database, restore_database, clean_old_data, get_database_info
+    backup_database, restore_database, clean_old_data, get_database_info,
+    backfill_exit_status_and_outcome_class,
 )
 from ..utils.formatters import (
    format_duration, format_timestamp, format_memory,
@@ -1202,6 +1203,7 @@ class DatabaseCommand(BaseCommand):
             print("  cleanup         Clean up old data from database")
             print("  show            Show table data from database")
             print("  refresh-cache   Recalculate derived/analytical cache tables")
+            print("  backfill        Backfill exit_status + outcome_class for existing jobs")
             print("\nExamples:")
             print("  pbs-monitor database init                              # Initialize database")
             print("  pbs-monitor database status                            # Show database status")
@@ -1231,9 +1233,11 @@ class DatabaseCommand(BaseCommand):
             return self._show_table_data(args)
          elif subcommand == 'refresh-cache':
             return self._refresh_cache(args)
+         elif subcommand == 'backfill':
+            return self._backfill_database(args)
          else:
             print(f"Unknown database subcommand: {subcommand}")
-            print("\nAvailable actions: init, migrate, status, validate, backup, restore, cleanup, show, refresh-cache")
+            print("\nAvailable actions: init, migrate, status, validate, backup, restore, cleanup, show, refresh-cache, backfill")
             return 1
             
       except Exception as e:
@@ -1687,6 +1691,51 @@ class DatabaseCommand(BaseCommand):
          print(f"  ✗ {errors} error(s) encountered.")
 
       return errors
+
+   def _backfill_database(self, args: argparse.Namespace) -> int:
+      """Backfill exit_status + outcome_class columns for all existing job rows.
+
+      Wraps backfill_exit_status_and_outcome_class() from database.migrations.
+      The backfill is batched and idempotent — rows that already have both
+      columns populated are skipped automatically.
+      """
+      batch_size = getattr(args, 'batch_size', 5000)
+      dry_run = getattr(args, 'dry_run', False)
+
+      print("=" * 60)
+      print("PBS Monitor — T0 Database Backfill")
+      print("=" * 60)
+      if not dry_run:
+         print()
+         print("⚠  WARNING: This operation updates up to ~458k rows.")
+         print("   Back up your database FIRST:")
+         print("     pbs-monitor database backup")
+         print()
+         confirm = input("Type 'yes' to proceed (or anything else to abort): ").strip()
+         if confirm.lower() != 'yes':
+            print("Backfill aborted.")
+            return 0
+      else:
+         print("(dry-run mode — no rows will be written)")
+
+      print(f"\nRunning backfill (batch_size={batch_size}, dry_run={dry_run})…")
+      try:
+         result = backfill_exit_status_and_outcome_class(
+            batch_size=batch_size,
+            dry_run=dry_run,
+            config=self.config,
+         )
+      except Exception as e:
+         print(f"Backfill failed: {e}")
+         return 1
+
+      print()
+      print("Backfill complete:")
+      print(f"  Updated : {result.get('updated', 0):,}")
+      print(f"  Skipped : {result.get('skipped', 0):,}")
+      print(f"  Errors  : {result.get('errors', 0):,}")
+      print(f"  Dry-run : {result.get('dry_run', dry_run)}")
+      return 0
 
 
 class HistoryCommand(BaseCommand):

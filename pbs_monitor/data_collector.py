@@ -23,8 +23,18 @@ try:
       DatabaseManager, initialize_database
    )
    DATABASE_AVAILABLE = True
-except ImportError:
+   _DATABASE_IMPORT_ERROR = None
+except ImportError as _db_import_exc:
    DATABASE_AVAILABLE = False
+   # Preserve the real cause. A bare pass here masks genuine bugs — e.g. a
+   # broken import *inside* the database package (missing analytics module,
+   # syntax error) looks identical to "database extras not installed", and
+   # surfaces later as a confusing NameError when ModelConverters is used.
+   _DATABASE_IMPORT_ERROR = _db_import_exc
+   import logging as _logging
+   _logging.getLogger(__name__).warning(
+      "Database integration unavailable — import failed: %s", _db_import_exc
+   )
 
 from .database.repositories import RepositoryFactory, JobStateInfo, ReservationStateInfo
 
@@ -77,6 +87,15 @@ class DataCollector:
       
       # Database integration
       if self._database_enabled:
+         if not DATABASE_AVAILABLE:
+            raise RuntimeError(
+               "Database integration was requested but the database package "
+               "failed to import. Root cause: "
+               f"{_DATABASE_IMPORT_ERROR!r}. "
+               "This usually means a broken/partial deployment (e.g. the "
+               "pbs_monitor.analytics.outcome_classifier module is missing or "
+               "stale). Reinstall/redeploy the package and retry."
+            )
          self._repository_factory = RepositoryFactory(config)
          self._model_converters = ModelConverters()
       else:
