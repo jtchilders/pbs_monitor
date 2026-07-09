@@ -21,7 +21,6 @@ from .models import (
     Job, Queue, Node, Reservation, JobHistory, QueueSnapshot, NodeSnapshot, SystemSnapshot,
     JobState, QueueState, NodeState, ReservationState, ReservationHistory
 )
-from ..analytics.outcome_classifier import classify_exit as _classify_exit
 
 
 def _parse_walltime_to_seconds(wt_str: Optional[str]) -> Optional[int]:
@@ -44,6 +43,13 @@ class JobConverter:
     @staticmethod
     def to_database(pbs_job: PBSJob) -> Job:
         """Convert PBSJob to database Job model, computing outcome_class on the fly."""
+        # Lazy import to avoid a circular import at module-load time:
+        # importing the analytics *package* (analytics/__init__) pulls in the
+        # heavy analyzers, one of which transitively imports data_collector,
+        # which imports this module — a cycle that leaves ModelConverters
+        # unbound and breaks the daemon. Import the leaf module directly here.
+        from ..analytics.outcome_classifier import classify_exit as _classify_exit
+
         # Compute outcome_class for finished/completed jobs.
         requested_walltime_seconds = _parse_walltime_to_seconds(pbs_job.walltime)
         outcome_class = _classify_exit(
