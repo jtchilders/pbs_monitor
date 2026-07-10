@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PBS Monitor &#x2014; Reservation</title>
+    <link rel="stylesheet" href="/css/dashboard.css">
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+    <style>
+        .ctx-header {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: var(--panel-bg);
+            border-bottom: 1px solid var(--accent-border);
+            padding: 0.75rem 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+            flex-wrap: wrap;
+        }
+        .ctx-back-link {
+            color: #60a5fa;
+            text-decoration: none;
+            font-size: 0.875rem;
+            white-space: nowrap;
+            cursor: pointer;
+            background: none;
+            border: none;
+            padding: 0;
+            font-family: inherit;
+        }
+        .ctx-back-link:hover { text-decoration: underline; }
+        .ctx-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-color);
+        }
+        .ctx-subtitle {
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            font-family: monospace;
+        }
+        .resv-state-pill {
+            margin-left: auto;
+            padding: 0.3rem 0.8rem;
+            border-radius: 999px;
+            font-size: 0.8rem;
+            font-weight: 700;
+            letter-spacing: 0.03em;
+        }
+        .resv-state-RUNNING   { background: #14532d; color: #4ade80; }
+        .resv-state-CONFIRMED { background: #1e3a8a; color: #93c5fd; }
+        .resv-state-COMPLETED { background: #1e293b; color: #94a3b8; }
+        .resv-state-DEGRADED  { background: #451a03; color: #fbbf24; }
+        .resv-state-CANCELLED { background: #450a0a; color: #f87171; }
+        .resv-state-EXPIRED   { background: #1e293b; color: #94a3b8; }
+        .resv-state-UNKNOWN   { background: #334155; color: #cbd5e1; }
+
+        .ctx-body {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+        }
+
+        /* Summary cards */
+        .summary-cards {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1rem;
+        }
+        @media (max-width: 900px) { .summary-cards { grid-template-columns: repeat(2, 1fr); } }
+        @media (max-width: 500px) { .summary-cards { grid-template-columns: 1fr; } }
+
+        .summary-card {
+            background: var(--panel-bg);
+            border: 1px solid var(--accent-border);
+            border-radius: 8px;
+            padding: 1rem 1.25rem;
+        }
+        .summary-card .sc-label {
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.4rem;
+        }
+        .summary-card .sc-value {
+            font-size: 1.75rem;
+            font-weight: 700;
+            color: var(--text-color);
+            line-height: 1;
+        }
+        .summary-card .sc-sub {
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            margin-top: 0.3rem;
+        }
+
+        /* Details panel */
+        .details-panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--accent-border);
+            border-radius: 8px;
+            padding: 1rem 1.25rem;
+        }
+        .details-panel h2 {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin: 0 0 0.85rem 0;
+        }
+        .details-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0.85rem 1.5rem;
+        }
+        @media (max-width: 900px) { .details-grid { grid-template-columns: repeat(2, 1fr); } }
+        @media (max-width: 500px) { .details-grid { grid-template-columns: 1fr; } }
+        .detail-field { display: flex; flex-direction: column; gap: 0.2rem; }
+        .df-label {
+            font-size: 0.7rem;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .df-value { font-size: 0.9rem; color: var(--text-color); word-break: break-word; }
+        .df-value.mono { font-family: monospace; font-size: 0.82rem; }
+        .df-value.wide { grid-column: 1 / -1; }
+
+        /* Usage chart panel */
+        .usage-panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--accent-border);
+            border-radius: 8px;
+            padding: 1rem 1.25rem;
+        }
+        .usage-panel h2 {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin: 0 0 0.25rem 0;
+        }
+        .usage-sub {
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            margin-bottom: 0.75rem;
+        }
+        .chart-wrap { position: relative; height: 320px; }
+        .chart-no-data {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 320px;
+            color: var(--text-dim);
+            font-size: 0.85rem;
+            font-style: italic;
+        }
+
+        /* State counts row */
+        .state-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        .state-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            padding: 0.2rem 0.6rem;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .state-RUNNING    { background: #14532d; color: #4ade80; }
+        .state-QUEUED     { background: #1e3a8a; color: #93c5fd; }
+        .state-FINISHED   { background: #1e293b; color: #94a3b8; }
+        .state-HELD       { background: #451a03; color: #fbbf24; }
+        .state-UNKNOWN_END { background: #450a0a; color: #f87171; }
+        .state-UNKNOWN    { background: #334155; color: #cbd5e1; }
+
+        /* Jobs panel */
+        .jobs-panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--accent-border);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .jobs-panel-header {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--accent-border);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        .jobs-panel-header h2 {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-right: auto;
+        }
+        .state-filter-btn {
+            padding: 0.25rem 0.6rem;
+            border: 1px solid var(--accent-border);
+            background: transparent;
+            color: var(--text-dim);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            transition: all 0.15s;
+        }
+        .state-filter-btn.active { background: var(--accent-job-exclusive); border-color: var(--accent-job-exclusive); color: white; }
+        .state-filter-btn:hover:not(.active) { border-color: #60a5fa; color: #60a5fa; }
+
+        .table-wrapper { overflow-x: auto; overflow-y: auto; max-height: 520px; }
+        .ctx-jobs-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.82rem;
+        }
+        .ctx-jobs-table thead th {
+            padding: 0.5rem 0.75rem;
+            text-align: left;
+            color: var(--text-dim);
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            border-bottom: 1px solid var(--accent-border);
+            white-space: nowrap;
+            cursor: pointer;
+            user-select: none;
+            position: sticky;
+            top: 0;
+            background: var(--panel-bg);
+            z-index: 1;
+        }
+        .ctx-jobs-table thead th:hover { color: var(--text-color); }
+        .ctx-jobs-table tbody tr {
+            border-bottom: 1px solid #1e293b;
+            cursor: pointer;
+            transition: background 0.1s;
+        }
+        .ctx-jobs-table tbody tr:hover { background: #1e293b; }
+        .ctx-jobs-table tbody td {
+            padding: 0.45rem 0.75rem;
+            color: var(--text-color);
+            white-space: nowrap;
+        }
+        .ctx-jobs-table .empty-row {
+            text-align: center;
+            color: var(--text-dim);
+            padding: 2rem;
+        }
+        .context-link { color: #60a5fa; text-decoration: none; }
+        .context-link:hover { text-decoration: underline; }
+
+        /* Loading */
+        .ctx-loading {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 4rem;
+            gap: 1rem;
+            color: var(--text-dim);
+        }
+        .ctx-error {
+            max-width: 700px;
+            margin: 3rem auto;
+            padding: 1.5rem;
+            background: #450a0a;
+            border: 1px solid #7f1d1d;
+            border-radius: 8px;
+            color: #fca5a5;
+        }
+    </style>
+</head>
+<body>
+<div id="app">
+
+    <!-- Header -->
+    <div class="ctx-header">
+        <button onclick="window.close()" class="ctx-back-link">&#x2190; Close Tab</button>
+        <div>
+            <div class="ctx-title">Reservation: {{ summary.reservation_name || shortId }}</div>
+            <div class="ctx-subtitle">{{ reservationId }}</div>
+        </div>
+        <span v-if="!loading && !loadError" class="resv-state-pill" :class="'resv-state-' + displayState">{{ displayState }}</span>
+    </div>
+
+    <!-- Loading -->
+    <div v-if="loading" class="ctx-loading">
+        <div class="spinner"></div>
+        <span>Loading&#x2026;</span>
+    </div>
+
+    <div v-else-if="loadError" class="ctx-error">
+        &#x26A0; Failed to load reservation: {{ loadError }}
+    </div>
+
+    <div v-else class="ctx-body">
+
+        <!-- Summary cards -->
+        <div class="summary-cards">
+            <div class="summary-card">
+                <div class="sc-label">Nodes Reserved</div>
+                <div class="sc-value">{{ summary.nodes != null ? summary.nodes.toLocaleString() : '&#x2014;' }}</div>
+                <div class="sc-sub">for {{ fmtDuration(summary.duration_seconds) }}</div>
+            </div>
+            <div class="summary-card">
+                <div class="sc-label">Node-Hours Reserved</div>
+                <div class="sc-value">{{ fmtNodeHours(summary.node_hours_reserved) }}</div>
+                <div class="sc-sub">max possible</div>
+            </div>
+            <div class="summary-card">
+                <div class="sc-label">Node-Hours Used</div>
+                <div class="sc-value">{{ fmtNodeHours(summary.node_hours_used) }}</div>
+                <div class="sc-sub">by {{ summary.total_jobs }} jobs</div>
+            </div>
+            <div class="summary-card">
+                <div class="sc-label">Utilization</div>
+                <div class="sc-value">{{ summary.utilization_pct != null ? summary.utilization_pct + '%' : '&#x2014;' }}</div>
+                <div class="sc-sub">used / reserved</div>
+            </div>
+        </div>
+
+        <!-- Details -->
+        <div class="details-panel">
+            <h2>Reservation Details</h2>
+            <div class="details-grid">
+                <div class="detail-field">
+                    <span class="df-label">Owner</span>
+                    <span class="df-value"><a :href="'/page/user/' + summary.owner" target="_blank" class="context-link">{{ summary.owner || '&#x2014;' }}</a></span>
+                </div>
+                <div class="detail-field">
+                    <span class="df-label">Queue</span>
+                    <span class="df-value mono">{{ summary.queue || '&#x2014;' }}</span>
+                </div>
+                <div class="detail-field">
+                    <span class="df-label">State</span>
+                    <span class="df-value"><span class="resv-state-pill" :class="'resv-state-' + displayState" style="margin:0;">{{ displayState }}</span></span>
+                </div>
+                <div class="detail-field">
+                    <span class="df-label">Nodes</span>
+                    <span class="df-value">{{ summary.nodes != null ? summary.nodes.toLocaleString() : '&#x2014;' }}</span>
+                </div>
+                <div class="detail-field" v-if="summary.ncpus">
+                    <span class="df-label">CPUs</span>
+                    <span class="df-value">{{ summary.ncpus.toLocaleString() }}</span>
+                </div>
+                <div class="detail-field" v-if="summary.ngpus">
+                    <span class="df-label">GPUs</span>
+                    <span class="df-value">{{ summary.ngpus.toLocaleString() }}</span>
+                </div>
+                <div class="detail-field">
+                    <span class="df-label">Walltime</span>
+                    <span class="df-value">{{ summary.walltime || '&#x2014;' }}</span>
+                </div>
+                <div class="detail-field">
+                    <span class="df-label">Start</span>
+                    <span class="df-value">{{ fmtIso(summary.start_time) }}</span>
+                </div>
+                <div class="detail-field">
+                    <span class="df-label">End</span>
+                    <span class="df-value">{{ fmtIso(summary.end_time) }}</span>
+                </div>
+                <div class="detail-field" v-if="summary.creation_time">
+                    <span class="df-label">Created</span>
+                    <span class="df-value">{{ fmtIso(summary.creation_time) }}</span>
+                </div>
+                <div class="detail-field" v-if="summary.partition">
+                    <span class="df-label">Partition</span>
+                    <span class="df-value">{{ summary.partition }}</span>
+                </div>
+                <div class="detail-field" v-if="summary.server">
+                    <span class="df-label">Server</span>
+                    <span class="df-value mono">{{ summary.server }}</span>
+                </div>
+                <div class="detail-field wide" v-if="(summary.authorized_groups && summary.authorized_groups.length) || (summary.authorized_users && summary.authorized_users.length)">
+                    <span class="df-label">Authorized Groups / Users</span>
+                    <span class="df-value">{{ [...(summary.authorized_groups||[]), ...(summary.authorized_users||[])].join(', ') || '&#x2014;' }}</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Usage over time -->
+        <div class="usage-panel">
+            <h2>Usage Over Time (Node-Hours)</h2>
+            <div class="usage-sub">
+                Bars show node-hours consumed by jobs in each interval. The red dashed line is the
+                maximum possible (all {{ summary.nodes != null ? summary.nodes.toLocaleString() : '?' }} reserved nodes fully utilized).
+            </div>
+            <div v-show="hasUsageData" class="chart-wrap"><canvas ref="usageCanvas"></canvas></div>
+            <div v-if="!hasUsageData" class="chart-no-data">No usage timeline available for this reservation.</div>
+        </div>
+
+        <!-- Jobs table -->
+        <div class="jobs-panel">
+            <div class="jobs-panel-header">
+                <h2>Jobs ({{ filteredJobs.length }})</h2>
+                <button v-for="s in stateOptions" :key="s"
+                        class="state-filter-btn" :class="{ active: stateFilter === s }"
+                        @click="stateFilter = s; fetchJobs()">{{ s }}</button>
+            </div>
+            <div class="table-wrapper">
+                <table class="ctx-jobs-table">
+                    <thead>
+                        <tr>
+                            <th @click="sortBy('job_id')">Job ID {{ sortArrow('job_id') }}</th>
+                            <th @click="sortBy('name')">Name {{ sortArrow('name') }}</th>
+                            <th @click="sortBy('state')">State {{ sortArrow('state') }}</th>
+                            <th @click="sortBy('owner')">Owner {{ sortArrow('owner') }}</th>
+                            <th @click="sortBy('project')">Project {{ sortArrow('project') }}</th>
+                            <th @click="sortBy('nodes')">Nodes {{ sortArrow('nodes') }}</th>
+                            <th @click="sortBy('walltime')">Walltime {{ sortArrow('walltime') }}</th>
+                            <th @click="sortBy('start_time')">Started {{ sortArrow('start_time') }}</th>
+                            <th @click="sortBy('actual_runtime_seconds')">Runtime {{ sortArrow('actual_runtime_seconds') }}</th>
+                            <th @click="sortBy('node_hours')">Node-Hours {{ sortArrow('node_hours') }}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="job in filteredJobs" :key="job.full_job_id"
+                            @click="openJobDetail(job.full_job_id)">
+                            <td>{{ job.job_id }}</td>
+                            <td>{{ job.name || '&#x2014;' }}</td>
+                            <td><span class="state-badge" :class="'state-' + job.state">{{ job.state }}</span></td>
+                            <td><a :href="'/page/user/' + job.owner" target="_blank" class="context-link" @click.stop>{{ job.owner || '&#x2014;' }}</a></td>
+                            <td><a :href="'/page/project/' + job.project" target="_blank" class="context-link" @click.stop>{{ job.project || '&#x2014;' }}</a></td>
+                            <td>{{ job.nodes }}</td>
+                            <td>{{ job.walltime || '&#x2014;' }}</td>
+                            <td>{{ fmtIso(job.start_time) }}</td>
+                            <td>{{ fmtDuration(job.actual_runtime_seconds) }}</td>
+                            <td>{{ job.node_hours != null ? job.node_hours.toFixed(1) : '&#x2014;' }}</td>
+                        </tr>
+                        <tr v-if="filteredJobs.length === 0">
+                            <td colspan="10" class="empty-row">No jobs found in this reservation</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Job Detail Modal -->
+    <div v-if="jobDetail" class="modal-backdrop" @click.self="closeJobDetail">
+        <div class="modal-panel" role="dialog" aria-modal="true">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <span class="modal-job-id">Job {{ jobDetail.job_id }}</span>
+                    <span class="modal-job-name">{{ jobDetail.job_name }}</span>
+                    <span class="modal-state-badge" :class="'state-' + jobDetail.state">{{ jobDetail.state }}</span>
+                </div>
+                <button class="modal-close" @click="closeJobDetail">&#x2715;</button>
+            </div>
+            <div class="modal-body">
+                <div v-if="jobDetail._loading" class="modal-loading">
+                    <div class="spinner"></div><span>Loading job details&#x2026;</span>
+                </div>
+                <div v-else-if="jobDetail._error" class="modal-error">
+                    &#x26A0; Failed to load: {{ jobDetail._error }}
+                </div>
+                <template v-else>
+                    <div class="modal-section">
+                        <h3 class="modal-section-title">Ownership</h3>
+                        <div class="modal-grid">
+                            <div class="modal-field"><span class="mf-label">Owner</span><span class="mf-value">{{ jobDetail.owner || '&#x2014;' }}</span></div>
+                            <div class="modal-field"><span class="mf-label">Project</span><span class="mf-value">{{ jobDetail.project || '&#x2014;' }}</span></div>
+                            <div class="modal-field"><span class="mf-label">Allocation</span><span class="mf-value">{{ jobDetail.allocation_type || '&#x2014;' }}</span></div>
+                            <div class="modal-field"><span class="mf-label">Queue</span><span class="mf-value mono">{{ jobDetail.queue }}</span></div>
+                            <div class="modal-field" v-if="jobDetail.score != null"><span class="mf-label">Score (WFP)</span><span class="mf-value">{{ fmtScore(jobDetail.score) }}</span></div>
+                        </div>
+                    </div>
+                    <div class="modal-section">
+                        <h3 class="modal-section-title">Resources Requested</h3>
+                        <div class="modal-grid">
+                            <div class="modal-field"><span class="mf-label">Nodes</span><span class="mf-value">{{ jobDetail.nodes || '&#x2014;' }}</span></div>
+                            <div class="modal-field" v-if="jobDetail.total_cores"><span class="mf-label">Total CPUs</span><span class="mf-value">{{ jobDetail.total_cores }}</span></div>
+                            <div class="modal-field"><span class="mf-label">Walltime</span><span class="mf-value">{{ jobDetail.walltime || '&#x2014;' }}</span></div>
+                        </div>
+                    </div>
+                    <div class="modal-section">
+                        <h3 class="modal-section-title">Timing</h3>
+                        <div class="modal-grid">
+                            <div class="modal-field" v-if="jobDetail.submit_time"><span class="mf-label">Submitted</span><span class="mf-value">{{ fmtIso(jobDetail.submit_time) }}</span></div>
+                            <div class="modal-field" v-if="jobDetail.start_time"><span class="mf-label">Started</span><span class="mf-value">{{ fmtIso(jobDetail.start_time) }}</span></div>
+                            <div class="modal-field" v-if="jobDetail.end_time"><span class="mf-label">Ended</span><span class="mf-value">{{ fmtIso(jobDetail.end_time) }}</span></div>
+                            <div class="modal-field" v-if="jobDetail.queue_time_seconds != null"><span class="mf-label">Queue Wait</span><span class="mf-value">{{ fmtDuration(jobDetail.queue_time_seconds) }}</span></div>
+                            <div class="modal-field" v-if="jobDetail.actual_runtime_seconds != null"><span class="mf-label">Runtime</span><span class="mf-value">{{ fmtDuration(jobDetail.actual_runtime_seconds) }}</span></div>
+                        </div>
+                    </div>
+                    <div class="modal-section" v-if="jobDetail.execution_nodes && jobDetail.execution_nodes.length">
+                        <h3 class="modal-section-title">Execution Nodes ({{ jobDetail.execution_node_count }})</h3>
+                        <div class="modal-nodes-list">
+                            <span v-for="n in jobDetail.execution_nodes" :key="n" class="modal-node-tag">{{ n }}</span>
+                        </div>
+                    </div>
+                    <div class="modal-section">
+                        <h3 class="modal-section-title">PBS Details</h3>
+                        <div class="modal-grid">
+                            <div class="modal-field"><span class="mf-label">Full Job ID</span><span class="mf-value mono small">{{ jobDetail.full_job_id }}</span></div>
+                            <div class="modal-field" v-if="jobDetail.exit_status != null"><span class="mf-label">Exit Status</span><span class="mf-value">{{ jobDetail.exit_status }}</span></div>
+                        </div>
+                        <div v-if="jobDetail.comment" class="modal-field-wide">
+                            <span class="mf-label">Comment</span><span class="mf-value">{{ jobDetail.comment }}</span>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </div>
+
+</div>
+<script>
+const { createApp, ref, computed, onMounted, onUnmounted, nextTick } = Vue;
+
+// State display mapping (mirrors server.py _STATE_DISPLAY)
+const STATE_DISPLAY = {
+    'RUNNING':'RUNNING','RUNNING_SHORT':'RUNNING','RN':'RUNNING','RESV_RUNNING':'RUNNING',
+    'CONFIRMED':'CONFIRMED','CONFIRMED_SHORT':'CONFIRMED','CO':'CONFIRMED','RESV_CONFIRMED':'CONFIRMED',
+    'DEGRADED':'DEGRADED','DG':'DEGRADED','RESV_DEGRADED':'DEGRADED',
+    'FINISHED':'COMPLETED','RESV_FINISHED':'COMPLETED',
+    'RESV_DELETED':'CANCELLED','DELETED':'CANCELLED','BD':'CANCELLED',
+    'EXPIRED':'EXPIRED',
+    'UN':'UNKNOWN','UNKNOWN':'UNKNOWN',
+};
+
+function fmtDuration(totalSec) {
+    if (totalSec == null) return '\u2014';
+    const s = Math.max(0, Math.floor(totalSec));
+    const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+    if (d > 0) return `${d}d ${h}h ${m}m`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+}
+function fmtIso(isoStr) {
+    if (!isoStr) return '\u2014';
+    const d = new Date(isoStr);
+    return isNaN(d) ? isoStr : d.toLocaleString(undefined, { year:'numeric', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:false });
+}
+function fmtScore(score) {
+    if (score == null) return '\u2014';
+    if (score >= 1e6) return (score/1e6).toFixed(2)+'M';
+    if (score >= 1e3) return (score/1e3).toFixed(1)+'k';
+    return score.toFixed(1);
+}
+function fmtNodeHours(nh) {
+    if (nh == null) return '\u2014';
+    if (nh >= 1e6) return (nh/1e6).toFixed(2)+'M';
+    if (nh >= 1e3) return (nh/1e3).toFixed(1)+'k';
+    return nh.toFixed(1);
+}
+
+createApp({
+    setup() {
+        // Reservation ID is the last path segment (URL-encoded, may contain dots)
+        const pathParts = window.location.pathname.split('/');
+        const reservationId = decodeURIComponent(pathParts[pathParts.length - 1] || '');
+        const shortId = reservationId.split('.')[0];
+
+        const loading      = ref(true);
+        const loadError    = ref(null);
+        const summary      = ref({});
+        const jobs         = ref([]);
+        const stateFilter  = ref('ALL');
+        const stateOptions = ['ALL', 'FINISHED', 'RUNNING', 'QUEUED', 'HELD', 'UNKNOWN_END'];
+        const sortKey      = ref('start_time');
+        const sortDesc     = ref(false);
+        const jobDetail    = ref(null);
+
+        const usageCanvas  = ref(null);
+        let usageChart = null;
+
+        const displayState = computed(() => {
+            const k = summary.value.state || 'UNKNOWN';
+            return STATE_DISPLAY[k] || k;
+        });
+
+        const hasUsageData = computed(() =>
+            Array.isArray(summary.value.usage_series) && summary.value.usage_series.length > 0
+        );
+
+        const filteredJobs = computed(() => {
+            const list = [...jobs.value];
+            return list.sort((a, b) => {
+                let va = a[sortKey.value] ?? '', vb = b[sortKey.value] ?? '';
+                if (typeof va === 'string') { va = va.toLowerCase(); vb = vb.toLowerCase(); }
+                if (va < vb) return sortDesc.value ? 1 : -1;
+                if (va > vb) return sortDesc.value ? -1 : 1;
+                return 0;
+            });
+        });
+
+        function sortBy(key) {
+            if (sortKey.value === key) sortDesc.value = !sortDesc.value;
+            else { sortKey.value = key; sortDesc.value = true; }
+        }
+        function sortArrow(key) {
+            if (sortKey.value !== key) return '';
+            return sortDesc.value ? ' \u25BC' : ' \u25B2';
+        }
+
+        async function fetchSummary() {
+            const res = await fetch(`/api/reservation/${encodeURIComponent(reservationId)}/summary`);
+            if (!res.ok) throw new Error(`Summary API ${res.status}`);
+            summary.value = await res.json();
+        }
+        async function fetchJobs() {
+            const res = await fetch(`/api/reservation/${encodeURIComponent(reservationId)}/jobs?state=${stateFilter.value}`);
+            if (!res.ok) throw new Error(`Jobs API ${res.status}`);
+            jobs.value = (await res.json()).jobs || [];
+        }
+        async function fetchAll() {
+            loading.value = true;
+            loadError.value = null;
+            try {
+                await Promise.all([fetchSummary(), fetchJobs()]);
+            } catch (e) {
+                loadError.value = e.message;
+            } finally {
+                loading.value = false;
+            }
+            // Build the chart AFTER loading flips false so the v-else body
+            // (which contains the usage canvas) is actually in the DOM. Two
+            // nextTicks: one for the v-else body to mount, one inside
+            // buildUsageChart for the v-show canvas layout.
+            if (!loadError.value) {
+                await nextTick();
+                await buildUsageChart();
+            }
+        }
+
+        async function buildUsageChart() {
+            const series = summary.value.usage_series || [];
+            // Wait for v-show canvas to exist & be laid out (avoids 300x150 bug)
+            await nextTick();
+            if (usageChart) { usageChart.destroy(); usageChart = null; }
+            if (!series.length || !usageCanvas.value) return;
+
+            const labels = series.map(s => fmtBinLabel(s.bin_start));
+            const used   = series.map(s => s.used_node_hours);
+            const maxNH  = series.map(s => s.max_node_hours);
+
+            usageChart = new Chart(usageCanvas.value, {
+                data: {
+                    labels,
+                    datasets: [
+                        {
+                            type: 'bar',
+                            label: 'Used node-hours',
+                            data: used,
+                            backgroundColor: '#3b82f6',
+                            borderRadius: 2,
+                            order: 2,
+                        },
+                        {
+                            type: 'line',
+                            label: 'Max possible (reserved)',
+                            data: maxNH,
+                            borderColor: '#ef4444',
+                            borderWidth: 2,
+                            borderDash: [6, 4],
+                            pointRadius: 0,
+                            fill: false,
+                            stepped: 'middle',
+                            order: 1,
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            labels: { color: '#cbd5e1', font: { size: 11 }, usePointStyle: true },
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)} node-h`,
+                            },
+                        },
+                    },
+                    scales: {
+                        x: {
+                            ticks: { color: '#94a3b8', font: { size: 9 }, maxRotation: 60, minRotation: 0, autoSkip: true, maxTicksLimit: 16 },
+                            grid: { color: '#1e293b' },
+                        },
+                        y: {
+                            beginAtZero: true,
+                            title: { display: true, text: 'Node-hours', color: '#94a3b8', font: { size: 10 } },
+                            ticks: { color: '#94a3b8', font: { size: 10 } },
+                            grid: { color: '#1e293b' },
+                        },
+                    },
+                },
+            });
+        }
+
+        function fmtBinLabel(iso) {
+            const d = new Date(iso);
+            if (isNaN(d)) return iso;
+            return d.toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:false });
+        }
+
+        async function openJobDetail(jid) {
+            jobDetail.value = { job_id: jid, _loading: true };
+            try {
+                const res = await fetch(`/api/jobs/${encodeURIComponent(jid)}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                jobDetail.value = await res.json();
+            } catch(e) {
+                jobDetail.value = { job_id: jid, _error: e.message };
+            }
+        }
+        function closeJobDetail() { jobDetail.value = null; }
+        function onKeyDown(e) { if (e.key === 'Escape' && jobDetail.value) closeJobDetail(); }
+
+        onMounted(async () => {
+            document.title = `PBS Monitor \u2014 Reservation: ${shortId}`;
+            await fetchAll();
+            window.addEventListener('keydown', onKeyDown);
+        });
+        onUnmounted(() => {
+            window.removeEventListener('keydown', onKeyDown);
+            if (usageChart) usageChart.destroy();
+        });
+
+        return {
+            reservationId, shortId, loading, loadError, summary, jobs,
+            stateFilter, stateOptions, sortKey, sortDesc, filteredJobs, jobDetail,
+            displayState, hasUsageData, usageCanvas,
+            fetchJobs, sortBy, sortArrow, openJobDetail, closeJobDetail,
+            fmtDuration, fmtIso, fmtScore, fmtNodeHours,
+        };
+    }
+}).mount('#app');
+</script>
+</body>
+</html>

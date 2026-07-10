@@ -707,6 +707,10 @@ def create_app(config=None) -> FastAPI:
     async def serve_project_page(project: str):
         return FileResponse(STATIC_DIR / "project.html")
 
+    @app.get("/page/reservation/{reservation_id}")
+    async def serve_reservation_page(reservation_id: str):
+        return FileResponse(STATIC_DIR / "reservation.html")
+
     # ---- user/project API endpoints ----
 
     def _date_range(range_days: int) -> datetime:
@@ -891,6 +895,213 @@ def create_app(config=None) -> FastAPI:
     ):
         now = datetime.now(timezone.utc)
         jobs = _query_jobs(db, Job.project, project, range, state)
+        return {"total": len(jobs), "jobs": [_serialize_job(j, now) for j in jobs]}
+
+    # ---- reservation detail API endpoints ----
+
+    def _naive(dt):
+        """Strip tzinfo for naive-datetime DBs (SQLite); no-op if already naive."""
+        if dt is not None and hasattr(dt, "tzinfo") and dt.tzinfo is not None:
+            return dt.replace(tzinfo=None)
+        return dt
+
+    def _resv_jobs_query(db: Session, r):
+        """Jobs that ran in a reservation's queue overlapping its time window.
+
+        Mirrors the linkage used by the reservations list + analytics timeline:
+        a job belongs to a reservation if it ran in the reservation's dedicated
+        queue and its run window overlaps the reservation window.
+        """
+        if not r.queue:
+            return []
+        start_t = _naive(r.start_time)
+        end_t = _naive(r.end_time)
+        q = db.query(Job).filter(Job.queue == r.queue)
+        # Overlap: job started before reservation ended, and (no end or ended
+        # after reservation started). Only meaningful when the window is known.
+        if start_t is not None:
+            q = q.filter(
+                or_(Job.end_time == None, Job.end_time >= start_t)  # noqa: E711
+            )
+        if end_t is not None:
+            q = q.filter(
+                or_(Job.start_time == None, Job.start_time <= end_t)  # noqa: E711
+            )
+        return q.order_by(Job.start_time.asc().nullslast()).all()
+
+    @app.get("/api/reservation/{reservation_id}/summary")
+    def api_reservation_summary(
+        reservation_id: str,
+        db: Session = Depends(get_db),
+    ):
+        r = db.query(Reservation).filter(
+            Reservation.reservation_id == reservation_id
+        ).first()
+        if r is None:
+            raise HTTPException(status_code=404, detail="Reservation not found")
+
+        start_t = _naive(r.start_time)
+        end_t = _naive(r.end_time)
+
+        # Reservation-level derived numbers
+        duration_seconds = r.duration_seconds
+        if not duration_seconds and start_t and end_t and end_t > start_t:
+            duration_seconds = int((end_t - start_t).total_seconds())
+        nodes = r.nodes or 0
+        node_hours_reserved = None
+        if nodes and duration_seconds:
+            node_hours_reserved = round(nodes * duration_seconds / 3600.0, 1)
+
+        # State display normalisation (reuse the same mapping as the list endpoint)
+        state_key = r.state.name if hasattr(r.state, "name") else str(r.state)
+
+        # ---- usage-over-time series ----
+        # Bin the reservation window and compute used node-hours per bin plus the
+        # max possible per bin (nodes * bin_hours). Choose a bin count that keeps
+        # the plot readable regardless of reservation length.
+        series = []
+        total_used_node_hours = 0.0
+        jobs_list = _resv_jobs_query(db, r)
+        if start_t and end_t and end_t > start_t and nodes > 0:
+            total_hours = (end_t - start_t).total_seconds() / 3600.0
+            # Aim for ~24-48 bins; snap bin size to a sensible unit.
+            if total_hours <= 6:
+                bin_hours = 0.25          # 15 min
+            elif total_hours <= 24:
+                bin_hours = 1.0           # hourly
+            elif total_hours <= 24 * 7:
+                bin_hours = 6.0           # 6-hourly
+            elif total_hours <= 24 * 30:
+                bin_hours = 24.0          # daily
+            else:
+                bin_hours = 24.0 * 7      # weekly
+            n_bins = max(1, int((total_hours + bin_hours - 1e-9) // bin_hours))
+            # Cap to avoid pathological payloads
+            if n_bins > 400:
+                bin_hours = total_hours / 400.0
+                n_bins = 400
+            bin_seconds = bin_hours * 3600.0
+
+            bin_edges = [start_t + timedelta(seconds=bin_seconds * i) for i in range(n_bins + 1)]
+            bin_edges[-1] = end_t  # last edge clamps to reservation end
+            used_per_bin = [0.0] * n_bins
+            max_per_bin = []
+            for i in range(n_bins):
+                b0 = bin_edges[i]
+                b1 = bin_edges[i + 1]
+                bh = (b1 - b0).total_seconds() / 3600.0
+                max_per_bin.append(nodes * bh)
+
+            # Distribute each job's overlap-with-reservation across the bins
+            for job in jobs_list:
+                j_nodes = job.nodes or 0
+                if j_nodes <= 0:
+                    continue
+                j_start = _naive(job.start_time)
+                if j_start is None:
+                    continue
+                j_end = _naive(job.end_time) or end_t
+                # Clip to reservation window
+                ov_start = max(j_start, start_t)
+                ov_end = min(j_end, end_t)
+                if ov_end <= ov_start:
+                    continue
+                # Which bins does [ov_start, ov_end) touch?
+                rel_start = (ov_start - start_t).total_seconds()
+                rel_end = (ov_end - start_t).total_seconds()
+                first_bin = max(0, int(rel_start // bin_seconds))
+                last_bin = min(n_bins - 1, int((rel_end - 1e-9) // bin_seconds))
+                for bi in range(first_bin, last_bin + 1):
+                    bin_lo = bi * bin_seconds
+                    bin_hi = min((bi + 1) * bin_seconds, rel_end if bi == last_bin else (bi + 1) * bin_seconds)
+                    seg_lo = max(rel_start, bin_lo)
+                    seg_hi = min(rel_end, (bi + 1) * bin_seconds)
+                    if seg_hi > seg_lo:
+                        used_per_bin[bi] += j_nodes * (seg_hi - seg_lo) / 3600.0
+
+            for i in range(n_bins):
+                used = round(used_per_bin[i], 2)
+                # A job can't use more node-hours than the reservation offers in a bin
+                capped = min(used, round(max_per_bin[i], 2))
+                total_used_node_hours += capped
+                series.append({
+                    "bin_start": bin_edges[i].isoformat(),
+                    "bin_end": bin_edges[i + 1].isoformat(),
+                    "used_node_hours": capped,
+                    "max_node_hours": round(max_per_bin[i], 2),
+                })
+
+        total_used_node_hours = round(total_used_node_hours, 1)
+        utilization_pct = None
+        if node_hours_reserved and node_hours_reserved > 0:
+            utilization_pct = round(
+                min(total_used_node_hours, node_hours_reserved) / node_hours_reserved * 100, 1
+            )
+
+        try:
+            auth_users = _json.loads(r.authorized_users or "[]")
+            auth_groups = _json.loads(r.authorized_groups or "[]")
+        except Exception:
+            auth_users, auth_groups = [], []
+        auth_users = [u.split("@")[0] for u in auth_users]
+
+        creation_t = _naive(r.creation_time)
+        # State breakdown of jobs in the reservation
+        state_counts: dict[str, int] = {}
+        for j in jobs_list:
+            st = j.state.name if j.state else "UNKNOWN"
+            state_counts[st] = state_counts.get(st, 0) + 1
+
+        return {
+            "reservation_id": r.reservation_id,
+            "reservation_name": r.reservation_name or "",
+            "owner": r.owner or "",
+            "state": state_key,
+            "queue": r.queue or "",
+            "nodes": r.nodes,
+            "ncpus": r.ncpus,
+            "ngpus": r.ngpus,
+            "walltime": r.walltime,
+            "duration_seconds": duration_seconds,
+            "start_time": start_t.isoformat() if start_t else None,
+            "end_time": end_t.isoformat() if end_t else None,
+            "creation_time": creation_t.isoformat() if creation_t else None,
+            "partition": r.partition,
+            "server": r.server,
+            "authorized_users": auth_users,
+            "authorized_groups": auth_groups,
+            "node_hours_reserved": node_hours_reserved,
+            "node_hours_used": total_used_node_hours,
+            "utilization_pct": utilization_pct,
+            "total_jobs": len(jobs_list),
+            "state_counts": state_counts,
+            "usage_series": series,
+        }
+
+    @app.get("/api/reservation/{reservation_id}/jobs")
+    def api_reservation_jobs(
+        reservation_id: str,
+        state: str = Query("ALL"),
+        db: Session = Depends(get_db),
+    ):
+        r = db.query(Reservation).filter(
+            Reservation.reservation_id == reservation_id
+        ).first()
+        if r is None:
+            raise HTTPException(status_code=404, detail="Reservation not found")
+        now = datetime.now(timezone.utc)
+        jobs = _resv_jobs_query(db, r)
+        if state and state.upper() != "ALL":
+            state_map = {
+                "RUNNING": JobState.RUNNING,
+                "QUEUED": JobState.QUEUED,
+                "FINISHED": JobState.FINISHED,
+                "HELD": JobState.HELD,
+                "UNKNOWN_END": JobState.UNKNOWN_END,
+            }
+            js = state_map.get(state.upper())
+            if js:
+                jobs = [j for j in jobs if j.state == js]
         return {"total": len(jobs), "jobs": [_serialize_job(j, now) for j in jobs]}
 
     # ---- reservations endpoint ----
