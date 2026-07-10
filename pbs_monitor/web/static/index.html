@@ -389,7 +389,7 @@
                     </thead>
                     <tbody>
                         <tr v-for="r in sortedReservations" :key="r.reservation_id">
-                            <td class="resv-name">{{ r.reservation_name || r.reservation_id }}</td>
+                            <td class="resv-name"><a :href="'/page/reservation/' + encodeURIComponent(r.reservation_id)" target="_blank" class="context-link">{{ r.reservation_name || r.reservation_id }}</a></td>
                             <td>{{ r.owner }}</td>
                             <td><span class="resv-state-badge" :class="'resv-state-' + r.display_state">{{ r.display_state }}</span></td>
                             <td>{{ r.nodes ?? '—' }}</td>
