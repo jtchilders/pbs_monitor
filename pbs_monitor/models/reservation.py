@@ -378,6 +378,19 @@ class PBSReservation:
         # Parse start and end times
         start_time = PBSReservation._parse_summary_datetime(start_str)
         end_time = PBSReservation._parse_summary_datetime(end_str)
+
+        # The summary end stamp is unreliable: for active reservations PBS emits
+        # a relative "Wkdy HH:MM" / "Today HH:MM" form that _parse_summary_datetime
+        # can only resolve against the *collection* date, which collapses or
+        # inverts the window (e.g. "Tue 11:00 / 345600 / Sat 11:00" parsing to
+        # start == end == today).  The duration is authoritative, so whenever we
+        # have a start and a duration, derive the end deterministically instead
+        # of trusting the parsed end string.  Fall back to the parsed end only
+        # when we cannot compute it (no start or no duration).
+        if start_time is not None and duration_seconds:
+            derived_end = start_time + timedelta(seconds=duration_seconds)
+            if end_time is None or end_time != derived_end:
+                end_time = derived_end
         
         return start_time, duration_seconds, end_time
     
