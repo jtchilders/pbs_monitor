@@ -861,20 +861,48 @@ class PBSCommands:
          raise PBSCommandError(f"Failed to get reservation details for {reservation_id}: {str(e)}")
    
    def pbs_rstat_all_detailed(self) -> List[PBSReservation]:
-      """Get detailed information for all reservations"""
-      # Strategy: Get summary first, then detailed for each ID
+      """Get detailed information for all reservations.
+
+      Strategy: enumerate reservation IDs from the summary, then fetch the
+      authoritative ``pbs_rstat -f`` detail for each.
+
+      IMPORTANT — do NOT fall back to persisting the summary-parsed object when
+      the detail fetch fails.  The summary parser yields (a) a *base* reservation
+      id (e.g. ``M8644167``) instead of the canonical fully-qualified id
+      (``M8644167.aurora-pbs-0001.hostmgmt...``) that ``-f`` returns, and
+      (b) unreliable start/end times (the summary shows relative weekday/"Today"
+      stamps that get resolved against the collection date).  Appending such an
+      object creates a SECOND row for the same reservation under a different
+      primary key, with a corrupted (often zero-length) window — the duplicate
+      "M8644167 appears twice" bug.  If the detail fetch fails we skip the
+      reservation this cycle; it is picked up on the next collection once
+      ``pbs_rstat -f`` succeeds, rather than polluting the DB with a duplicate.
+      """
       summary_reservations = self.pbs_rstat_summary()
       detailed_reservations = []
-      
+
       for reservation in summary_reservations:
-         try:
-            detailed = self.pbs_rstat_detailed(reservation.reservation_id)
+         detailed = None
+         # One retry to ride out transient pbs_rstat -f failures under load.
+         for attempt in range(2):
+            try:
+               detailed = self.pbs_rstat_detailed(reservation.reservation_id)
+               break
+            except Exception as e:
+               if attempt == 0:
+                  self.logger.debug(
+                     f"pbs_rstat -f {reservation.reservation_id} failed "
+                     f"(attempt 1), retrying: {e}"
+                  )
+                  continue
+               self.logger.warning(
+                  f"Failed to get details for {reservation.reservation_id} "
+                  f"after retry; SKIPPING this cycle to avoid creating a "
+                  f"base-id duplicate row: {e}"
+               )
+         if detailed is not None:
             detailed_reservations.append(detailed)
-         except Exception as e:
-            self.logger.warning(f"Failed to get details for {reservation.reservation_id}: {e}")
-            # Fall back to summary data
-            detailed_reservations.append(reservation)
-      
+
       return detailed_reservations
    
    def _parse_rstat_summary(self, output: str) -> List[PBSReservation]:
