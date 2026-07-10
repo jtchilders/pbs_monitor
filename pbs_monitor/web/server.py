@@ -929,17 +929,30 @@ def create_app(config=None) -> FastAPI:
             )
         return q.order_by(Job.start_time.asc().nullslast()).all()
 
-    @app.get("/api/reservation/{reservation_id}/summary")
-    def api_reservation_summary(
-        reservation_id: str,
-        db: Session = Depends(get_db),
-    ):
-        r = db.query(Reservation).filter(
-            Reservation.reservation_id == reservation_id
-        ).first()
-        if r is None:
-            raise HTTPException(status_code=404, detail="Reservation not found")
+    def _compute_reservation_utilization(db: Session, r) -> dict:
+        """Compute node-hour utilization for a reservation using live binning+capping.
 
+        This is the single canonical implementation shared by both the detail
+        endpoint (api_reservation_summary) and the table endpoint (get_reservations).
+        It does NOT open its own DB session — it reuses the caller's ``db`` session.
+
+        Returns a dict with keys:
+            node_hours_reserved  – float or None
+            node_hours_used      – float (0.0 if window invalid)
+            utilization_pct      – float or None
+            total_jobs           – int (all jobs matched by _resv_jobs_query)
+            usage_series         – list[dict] (bin-level breakdown; empty when
+                                   window is degenerate or nodes==0)
+
+        Algorithm (canonical reference):
+        - Full start→end window (NOT capped at now) for both reserved and used.
+        - Jobs fetched via _resv_jobs_query (queue match + run-window overlap).
+        - Window binned into sensible intervals (15-min … weekly).
+        - Each job's overlap clipped to the reservation window and distributed
+          across bins proportionally.
+        - Each bin's used value is CAPPED at that bin's max (min(used, max_per_bin)).
+        - utilization_pct = min(total_used, reserved) / reserved * 100
+        """
         start_t = _naive(r.start_time)
         end_t = _naive(r.end_time)
 
@@ -952,16 +965,13 @@ def create_app(config=None) -> FastAPI:
         if nodes and duration_seconds:
             node_hours_reserved = round(nodes * duration_seconds / 3600.0, 1)
 
-        # State display normalisation (reuse the same mapping as the list endpoint)
-        state_key = r.state.name if hasattr(r.state, "name") else str(r.state)
-
-        # ---- usage-over-time series ----
-        # Bin the reservation window and compute used node-hours per bin plus the
-        # max possible per bin (nodes * bin_hours). Choose a bin count that keeps
-        # the plot readable regardless of reservation length.
-        series = []
-        total_used_node_hours = 0.0
+        # Fetch jobs once; used for both binning and total_jobs count
         jobs_list = _resv_jobs_query(db, r)
+
+        # ---- usage-over-time series (binning + per-bin cap) ----
+        series: list = []
+        total_used_node_hours = 0.0
+
         if start_t and end_t and end_t > start_t and nodes > 0:
             total_hours = (end_t - start_t).total_seconds() / 3600.0
             # Aim for ~24-48 bins; snap bin size to a sensible unit.
@@ -1038,6 +1048,42 @@ def create_app(config=None) -> FastAPI:
                 min(total_used_node_hours, node_hours_reserved) / node_hours_reserved * 100, 1
             )
 
+        return {
+            "node_hours_reserved": node_hours_reserved,
+            "node_hours_used": total_used_node_hours,
+            "utilization_pct": utilization_pct,
+            "total_jobs": len(jobs_list),
+            "usage_series": series,
+            # Expose jobs_list for callers that need per-job data (e.g. state_counts)
+            "_jobs_list": jobs_list,
+        }
+
+    @app.get("/api/reservation/{reservation_id}/summary")
+    def api_reservation_summary(
+        reservation_id: str,
+        db: Session = Depends(get_db),
+    ):
+        r = db.query(Reservation).filter(
+            Reservation.reservation_id == reservation_id
+        ).first()
+        if r is None:
+            raise HTTPException(status_code=404, detail="Reservation not found")
+
+        start_t = _naive(r.start_time)
+        end_t = _naive(r.end_time)
+
+        # Reservation-level derived numbers (needed for the response beyond utilization)
+        duration_seconds = r.duration_seconds
+        if not duration_seconds and start_t and end_t and end_t > start_t:
+            duration_seconds = int((end_t - start_t).total_seconds())
+
+        # State display normalisation (reuse the same mapping as the list endpoint)
+        state_key = r.state.name if hasattr(r.state, "name") else str(r.state)
+
+        # ---- utilization via shared canonical helper ----
+        util = _compute_reservation_utilization(db, r)
+        jobs_list = util["_jobs_list"]
+
         try:
             auth_users = _json.loads(r.authorized_users or "[]")
             auth_groups = _json.loads(r.authorized_groups or "[]")
@@ -1070,12 +1116,12 @@ def create_app(config=None) -> FastAPI:
             "server": r.server,
             "authorized_users": auth_users,
             "authorized_groups": auth_groups,
-            "node_hours_reserved": node_hours_reserved,
-            "node_hours_used": total_used_node_hours,
-            "utilization_pct": utilization_pct,
-            "total_jobs": len(jobs_list),
+            "node_hours_reserved": util["node_hours_reserved"],
+            "node_hours_used": util["node_hours_used"],
+            "utilization_pct": util["utilization_pct"],
+            "total_jobs": util["total_jobs"],
             "state_counts": state_counts,
-            "usage_series": series,
+            "usage_series": util["usage_series"],
         }
 
     @app.get("/api/reservation/{reservation_id}/jobs")
@@ -1108,7 +1154,6 @@ def create_app(config=None) -> FastAPI:
     @app.get("/api/reservations")
     async def get_reservations(db: Session = Depends(get_db)):
         import json as _json
-        from sqlalchemy import func as safunc
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=14)
 
@@ -1125,35 +1170,6 @@ def create_app(config=None) -> FastAPI:
                 Reservation.end_time >= cutoff,
             )
         ).order_by(Reservation.start_time.desc()).all()
-
-        # Build a lookup of the most recent utilization analysis per reservation.
-        # This uses the reservation_utilization cache table populated by
-        # `pbs-monitor database refresh-cache -t utilization`.
-        resv_ids = [r.reservation_id for r in reservations]
-        util_lookup: dict = {}  # reservation_id -> ReservationUtilization row
-        if resv_ids:
-            # Subquery: latest analysis_timestamp per reservation_id
-            latest_sq = (
-                db.query(
-                    ReservationUtilization.reservation_id,
-                    safunc.max(ReservationUtilization.analysis_timestamp).label('max_ts'),
-                )
-                .filter(ReservationUtilization.reservation_id.in_(resv_ids))
-                .group_by(ReservationUtilization.reservation_id)
-                .subquery()
-            )
-            latest_rows = (
-                db.query(ReservationUtilization)
-                .join(
-                    latest_sq,
-                    and_(
-                        ReservationUtilization.reservation_id == latest_sq.c.reservation_id,
-                        ReservationUtilization.analysis_timestamp == latest_sq.c.max_ts,
-                    ),
-                )
-                .all()
-            )
-            util_lookup = {u.reservation_id: u for u in latest_rows}
 
         # Normalise state → a clean display label + CSS key
         _STATE_DISPLAY = {
@@ -1183,38 +1199,16 @@ def create_app(config=None) -> FastAPI:
             state_key = r.state.name if hasattr(r.state, 'name') else str(r.state)
             display_state = _STATE_DISPLAY.get(state_key, state_key)
 
-            # Pull metrics from the utilization cache when available.
-            # Fall back to simple reservation-level math when no cache entry exists
-            # (e.g. before the first refresh-cache run).
-            util = util_lookup.get(r.reservation_id)
-            if util:
-                node_hours_reserved = round(util.total_node_hours_reserved or 0, 1)
-                node_hours_used     = round(util.total_node_hours_used or 0, 1)
-                utilization_pct     = round(util.utilization_percentage or 0, 1)
-                jobs_submitted      = util.jobs_submitted or 0
-            else:
-                # Fallback: compute from reservation metadata + job table
-                jobs_submitted = 0
-                node_hours_used = 0.0
-                if r.queue:
-                    agg = db.query(
-                        safunc.count(Job.job_id),
-                        safunc.sum(
-                            safunc.coalesce(
-                                Job.nodes * Job.actual_runtime_seconds / 3600.0,
-                                0.0
-                            )
-                        )
-                    ).filter(Job.queue == r.queue).one()
-                    jobs_submitted  = agg[0] or 0
-                    node_hours_used = round(float(agg[1] or 0), 1)
-
-                node_hours_reserved = None
-                utilization_pct = None
-                if r.nodes and r.duration_seconds:
-                    node_hours_reserved = round(r.nodes * r.duration_seconds / 3600, 1)
-                    if node_hours_reserved > 0:
-                        utilization_pct = round(node_hours_used / node_hours_reserved * 100, 1)
+            # Compute utilization using the same canonical live binning+capping logic
+            # as the detail endpoint — ensures table and detail page always agree.
+            # (The previous reservation_utilization cache table approach capped at
+            # "now" for running reservations and lacked per-bin capping, producing
+            # different numbers than the detail page for the same reservation.)
+            util = _compute_reservation_utilization(db, r)
+            node_hours_reserved = util["node_hours_reserved"]
+            node_hours_used     = util["node_hours_used"]
+            utilization_pct     = util["utilization_pct"]
+            jobs_submitted      = util["total_jobs"]
 
             try:
                 auth_users  = _json.loads(r.authorized_users  or '[]')
