@@ -147,7 +147,12 @@ class Job(Base):
     
     # Calculated fields
     total_cores = Column(Integer)
-    actual_runtime_seconds = Column(Integer)
+    actual_runtime_seconds = Column(Integer)  # Elapsed wall span: end_time - start_time
+    # True node-occupancy time from PBS resources_used.walltime (v1.3). For
+    # requeued/preempted jobs this excludes HELD/QUEUED gaps that inflate the
+    # start..end span; NULL/0 for jobs that never ran. Preferred over
+    # actual_runtime_seconds by utilization + walltime-efficiency analytics.
+    occupied_seconds = Column(Integer)
     queue_time_seconds = Column(Integer)
     
     # System tracking

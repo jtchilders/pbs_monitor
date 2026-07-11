@@ -275,7 +275,7 @@ class TestDatabaseMigrations:
         migration.create_fresh_database()
         
         # Check that database now exists with correct schema
-        assert migration.check_schema_version() == "1.2.0"
+        assert migration.check_schema_version() == "1.3.0"
         
         # Check that all required tables exist
         existing_tables = migration.get_existing_tables()
@@ -304,7 +304,7 @@ class TestDatabaseMigrations:
         info = migration.get_database_info()
         
         assert 'database_url' in info
-        assert info['schema_version'] == "1.2.0"
+        assert info['schema_version'] == "1.3.0"
         assert len(info['tables']) >= 8  # Should have all required tables
         assert 'validation' in info
         assert info['validation']['valid'] == True

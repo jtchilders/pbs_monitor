@@ -302,6 +302,21 @@
     font-weight: normal;
 }
 
+.panel-note {
+    font-size: 0.72rem;
+    line-height: 1.5;
+    color: var(--text-dim);
+    margin: 0.5rem 0 0.25rem;
+    padding: 0 0.25rem;
+}
+
+.panel-note code {
+    font-size: 0.7rem;
+    background: rgba(255, 255, 255, 0.06);
+    padding: 0 3px;
+    border-radius: 3px;
+}
+
 /* Loading spinner */
 .control-spinner {
     display: flex;
