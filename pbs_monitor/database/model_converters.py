@@ -37,6 +37,55 @@ def _parse_walltime_to_seconds(wt_str: Optional[str]) -> Optional[int]:
     return None
 
 
+def _parse_duration_to_seconds(dur_str: Optional[str]) -> Optional[int]:
+    """Parse a PBS duration string to total seconds.
+
+    Handles both ``HH:MM:SS`` and ``DD:HH:MM:SS`` forms. PBS
+    ``resources_used.walltime`` for multi-day jobs can use the 4-field form,
+    so this is more permissive than :func:`_parse_walltime_to_seconds`.
+    Returns None on failure.
+    """
+    if not dur_str:
+        return None
+    try:
+        parts = dur_str.strip().split(":")
+        if len(parts) == 3:
+            h, m, s = parts
+            return int(h) * 3600 + int(m) * 60 + int(s)
+        if len(parts) == 4:
+            d, h, m, s = parts
+            return int(d) * 86400 + int(h) * 3600 + int(m) * 60 + int(s)
+    except (ValueError, AttributeError):
+        pass
+    return None
+
+
+def _compute_occupied_seconds(pbs_job: PBSJob) -> Optional[int]:
+    """Derive true node-occupancy seconds for a job.
+
+    Prefers PBS's measured ``resources_used.walltime`` (the actual time the job
+    held nodes, which correctly excludes HELD/QUEUED gaps for requeued/preempted
+    jobs). Falls back to ``actual_runtime_seconds`` (elapsed start..end span)
+    only when no ``resources_used.walltime`` is recorded AND the job actually ran.
+    Returns None when the job never occupied nodes (no run record).
+    """
+    raw = getattr(pbs_job, "raw_attributes", None) or {}
+    ru = raw.get("resources_used")
+    if isinstance(ru, dict):
+        occ = _parse_duration_to_seconds(ru.get("walltime"))
+        if occ is not None:
+            return occ
+        # resources_used present but no parseable walltime → job ran; best
+        # available estimate is the elapsed span.
+        return pbs_job.actual_runtime_seconds
+    # No resources_used block. If PBS recorded an execution host the job did
+    # run at least once; use the elapsed span as a fallback. Otherwise the job
+    # never occupied nodes → None (contributes zero to utilization).
+    if raw.get("exec_host") or raw.get("exec_vnode"):
+        return pbs_job.actual_runtime_seconds
+    return None
+
+
 class JobConverter:
     """Converter between PBSJob and database Job models"""
     
@@ -90,6 +139,7 @@ class JobConverter:
             # Calculated fields
             total_cores=pbs_job.total_cores,
             actual_runtime_seconds=pbs_job.actual_runtime_seconds,
+            occupied_seconds=_compute_occupied_seconds(pbs_job),
             queue_time_seconds=pbs_job.queue_time_seconds,
             
             # Metadata

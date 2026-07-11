@@ -1517,11 +1517,27 @@ def create_app(config=None) -> FastAPI:
                 je = job.end_time
                 if js and js.tzinfo: js = js.replace(tzinfo=None)
                 if je and je.tzinfo: je = je.replace(tzinfo=None)
+                # Effective occupancy end = start + measured node-occupancy time
+                # (occupied_seconds, from PBS resources_used.walltime). This
+                # excludes HELD/QUEUED gaps that inflate the raw start..end span
+                # for requeued/preempted jobs.
+                #
+                # occupied_seconds IS NULL means the job never occupied nodes
+                # (never ran — no resources_used / exec record), so it must
+                # contribute ZERO. Do NOT fall back to end_time here: that would
+                # re-introduce the multi-week span of never-ran jobs and is the
+                # exact bug this fix removes. (Deploy order guarantees the column
+                # is backfilled before this code serves traffic.)
+                occ = getattr(job, 'occupied_seconds', None)
+                if occ is None or js is None:
+                    continue
+                occ_end = js + timedelta(seconds=occ)
+                je_eff = occ_end if je is None else min(je, occ_end)
                 n = job.nodes or 1
                 for i, t in enumerate(bins):
                     nt = _next_bin(t, eff_freq)
                     seg_s = max(js, t)
-                    seg_e = min(je, nt)
+                    seg_e = min(je_eff, nt)
                     hours = max(0.0, (seg_e - seg_s).total_seconds() / 3600)
                     if hours > 0:
                         groups[grp][i] += n * hours

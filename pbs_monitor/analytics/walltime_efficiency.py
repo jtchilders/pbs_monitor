@@ -294,23 +294,36 @@ class WalltimeEfficiencyAnalyzer:
    
    def _get_actual_runtime_seconds(self, job: Job) -> Optional[int]:
       """
-      Get actual runtime in seconds, preferring stored value over calculation
-      
+      Get actual node-occupancy runtime in seconds.
+
+      Preference order:
+        1. occupied_seconds — PBS-measured node-occupancy time
+           (resources_used.walltime), which excludes HELD/QUEUED gaps for
+           requeued/preempted jobs. This is the correct basis for efficiency.
+        2. actual_runtime_seconds — elapsed start..end span (legacy; overstates
+           for requeued jobs). Used only when occupied_seconds is not populated.
+        3. end_time - start_time — computed fallback.
+
       Args:
          job: Job database model
-         
+
       Returns:
          Actual runtime in seconds or None if unavailable
       """
-      # Prefer stored actual_runtime_seconds
+      # Prefer PBS-measured node-occupancy time
+      occupied = getattr(job, 'occupied_seconds', None)
+      if occupied is not None and occupied > 0:
+         return occupied
+
+      # Fall back to stored elapsed span (legacy field)
       if job.actual_runtime_seconds is not None and job.actual_runtime_seconds > 0:
          return job.actual_runtime_seconds
-      
-      # Fall back to calculation from start/end times
+
+      # Final fallback: compute from start/end times
       if job.start_time and job.end_time:
          duration = job.end_time - job.start_time
          return int(duration.total_seconds())
-      
+
       return None
    
    def _parse_walltime_to_seconds(self, walltime_str: str) -> int:

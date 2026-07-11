@@ -80,9 +80,11 @@ class DatabaseMigration:
             if not existing:
                 return None
             inspector = inspect(self.db_manager.engine)
-            # Check for outcome_class column (v1.2)
+            # Check jobs-table columns (v1.2 = outcome_class, v1.3 = occupied_seconds)
             if 'jobs' in existing:
                 job_cols = [c['name'] for c in inspector.get_columns('jobs')]
+                if 'occupied_seconds' in job_cols:
+                    return "1.3.0"
                 if 'outcome_class' in job_cols:
                     return "1.2.0"
             # Check for reservation tables (v1.1)
@@ -128,10 +130,16 @@ class DatabaseMigration:
         if current_version == "1.1.0":
             logger.info("Migrating from v1.1.0 to v1.2.0 (adding outcome_class column)")
             self.migrate_to_v1_2_outcome_class()
-            return
-        
-        # Already at latest version
+            current_version = "1.2.0"
+
+        # Migration path from 1.2.0 to 1.3.0 (add occupied_seconds column)
         if current_version == "1.2.0":
+            logger.info("Migrating from v1.2.0 to v1.3.0 (adding occupied_seconds column)")
+            self.migrate_to_v1_3_occupied_seconds()
+            return
+
+        # Already at latest version
+        if current_version == "1.3.0":
             logger.info("Database schema is up to date")
             return
         
@@ -246,6 +254,57 @@ class DatabaseMigration:
 
         except Exception as e:
             logger.error(f"Failed to migrate to v1.2.0: {str(e)}")
+            raise
+
+    # ------------------------------------------------------------------
+    # v1.3.0 – occupied_seconds column (true node-occupancy time)
+    # ------------------------------------------------------------------
+
+    def migrate_to_v1_3_occupied_seconds(self) -> None:
+        """Add ``occupied_seconds`` INTEGER column to the jobs table (v1.3).
+
+        ``occupied_seconds`` holds PBS's measured node-occupancy time
+        (``resources_used.walltime``), which — unlike ``actual_runtime_seconds``
+        (elapsed start..end span) — excludes HELD/QUEUED gaps for requeued or
+        preempted jobs. It is the correct basis for utilization and
+        walltime-efficiency analytics.
+
+        The migration only adds the (nullable) column. Existing rows are left
+        NULL and populated separately by
+        :meth:`backfill_occupied_seconds`. New collections populate it
+        automatically via ``JobConverter.to_database``.
+
+        **IMPORTANT – DB BACKUP:** alters a potentially large table (~450 k rows
+        on Aurora). On SQLite run ``pbs-monitor database backup`` first; on
+        Postgres use ``pg_dump`` (the CLI backup is SQLite-only).
+
+        The migration is idempotent — safe to run more than once.
+        """
+        logger.info("Migrating to v1.3 – adding occupied_seconds column to jobs table")
+        logger.warning(
+            "v1.3 migration: back up the database before running on production data "
+            "(SQLite: pbs-monitor database backup; Postgres: pg_dump)."
+        )
+
+        try:
+            inspector = inspect(self.db_manager.engine)
+            job_cols = [c['name'] for c in inspector.get_columns('jobs')]
+
+            if 'occupied_seconds' not in job_cols:
+                logger.info("Adding occupied_seconds column to jobs table")
+                with self.db_manager.get_session() as session:
+                    session.execute(text(
+                        "ALTER TABLE jobs ADD COLUMN occupied_seconds INTEGER"
+                    ))
+                    session.commit()
+                logger.info("occupied_seconds column added successfully")
+            else:
+                logger.info("occupied_seconds column already exists")
+
+            logger.info("Migration to v1.3.0 completed successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to migrate to v1.3.0: {str(e)}")
             raise
 
     # ------------------------------------------------------------------
@@ -380,7 +439,152 @@ class DatabaseMigration:
 
         logger.info(f"T0 backfill complete: {stats}")
         return stats
-    
+
+    # ------------------------------------------------------------------
+    # v1.3 Backfill – populate occupied_seconds for existing rows
+    # ------------------------------------------------------------------
+
+    def backfill_occupied_seconds(
+        self, batch_size: int = 5000, dry_run: bool = False
+    ) -> Dict[str, Any]:
+        """Backfill ``occupied_seconds`` for existing jobs rows.
+
+        Derives the value from PBS ``resources_used.walltime`` inside
+        ``raw_pbs_data`` (the measured node-occupancy time, excluding HELD/QUEUED
+        gaps for requeued jobs). When ``resources_used.walltime`` is absent but
+        the job has an execution record (``exec_host``/``exec_vnode``), falls
+        back to ``actual_runtime_seconds`` (elapsed span). Jobs that never ran
+        (no run record) are left NULL — they occupied no nodes.
+
+        **IMPORTANT – DB BACKUP:** updates up to ~458 k rows. Back up first
+        (SQLite: ``pbs-monitor database backup``; Postgres: ``pg_dump``).
+
+        Batched (default 5 000 rows/txn) and **idempotent** — only rows whose
+        ``occupied_seconds`` is currently NULL are considered, so re-running
+        touches nothing already populated.
+
+        Args:
+            batch_size: Rows per transaction.
+            dry_run:    When True, scan and compute but write nothing.
+
+        Returns:
+            Dict with keys: ``updated``, ``skipped``, ``errors``, ``dry_run``.
+        """
+        import json as _json
+
+        def _parse_duration_seconds(dur_str: Optional[str]) -> Optional[int]:
+            """Parse HH:MM:SS or DD:HH:MM:SS → seconds. None on failure."""
+            if not dur_str:
+                return None
+            try:
+                parts = str(dur_str).strip().split(":")
+                if len(parts) == 3:
+                    h, m, s = parts
+                    return int(h) * 3600 + int(m) * 60 + int(s)
+                if len(parts) == 4:
+                    d, h, m, s = parts
+                    return int(d) * 86400 + int(h) * 3600 + int(m) * 60 + int(s)
+            except (ValueError, AttributeError):
+                pass
+            return None
+
+        logger.info(
+            f"Starting v1.3 backfill: occupied_seconds "
+            f"(batch_size={batch_size}, dry_run={dry_run})"
+        )
+        if dry_run:
+            logger.info("DRY RUN – no rows will be written")
+
+        stats: Dict[str, Any] = {"updated": 0, "skipped": 0, "errors": 0, "dry_run": dry_run}
+
+        with self.db_manager.get_session() as session:
+            # offset advances only past rows we LEAVE null (never-ran → skipped),
+            # since updated rows drop out of the `occupied_seconds IS NULL`
+            # filter on the next pass. This avoids reprocessing skipped rows
+            # forever while still visiting every NULL row exactly once.
+            offset = 0
+            while True:
+                rows = session.execute(
+                    text(
+                        "SELECT job_id, actual_runtime_seconds, raw_pbs_data "
+                        "FROM jobs "
+                        "WHERE occupied_seconds IS NULL "
+                        "ORDER BY job_id "
+                        f"LIMIT {batch_size} OFFSET {offset}"
+                    )
+                ).fetchall()
+
+                if not rows:
+                    break
+
+                batch_updated = 0
+                batch_skipped = 0
+                for row in rows:
+                    job_id = row[0]
+                    actual_runtime_seconds = row[1]
+                    raw_pbs_data = row[2]
+
+                    occ: Optional[int] = None
+                    ran = False
+                    if raw_pbs_data:
+                        try:
+                            raw = (
+                                raw_pbs_data
+                                if isinstance(raw_pbs_data, dict)
+                                else _json.loads(raw_pbs_data)
+                            )
+                            ru = raw.get("resources_used")
+                            if isinstance(ru, dict):
+                                ran = True
+                                occ = _parse_duration_seconds(ru.get("walltime"))
+                            if occ is None and (raw.get("exec_host") or raw.get("exec_vnode")):
+                                ran = True
+                        except (ValueError, TypeError, _json.JSONDecodeError):
+                            stats["errors"] += 1
+                            logger.debug(f"job_id={job_id}: failed to parse raw_pbs_data")
+
+                    # Fallback to elapsed span only when the job actually ran.
+                    if occ is None and ran:
+                        occ = actual_runtime_seconds
+
+                    if occ is None:
+                        # Job never occupied nodes; leave NULL (contributes zero
+                        # to utilization). Skipped rows stay in the NULL filter,
+                        # so we page past them via offset.
+                        batch_skipped += 1
+                        continue
+
+                    if not dry_run:
+                        session.execute(
+                            text(
+                                "UPDATE jobs SET occupied_seconds = :occ "
+                                "WHERE job_id = :job_id"
+                            ),
+                            {"occ": int(occ), "job_id": job_id},
+                        )
+                    batch_updated += 1
+
+                if not dry_run and batch_updated:
+                    session.commit()
+
+                stats["updated"] += batch_updated
+                stats["skipped"] += batch_skipped
+
+                # In dry-run nothing is written, so NO rows leave the filter →
+                # advance past the whole batch. In a real run, updated rows drop
+                # out of the filter, so only skipped rows remain before this
+                # window → advance by batch_skipped.
+                offset += len(rows) if dry_run else batch_skipped
+
+                logger.info(
+                    f"occupied_seconds backfill progress: "
+                    f"updated={stats['updated']}, skipped={stats['skipped']}, "
+                    f"errors={stats['errors']}"
+                )
+
+        logger.info(f"v1.3 occupied_seconds backfill complete: {stats}")
+        return stats
+
     def validate_schema(self) -> Dict[str, Any]:
         """Validate database schema"""
         validation_results = {
@@ -629,5 +833,25 @@ def backfill_exit_status_and_outcome_class(
     """
     migration = DatabaseMigration(config)
     return migration.backfill_exit_status_and_outcome_class(
+        batch_size=batch_size, dry_run=dry_run
+    )
+
+
+def backfill_occupied_seconds(
+    batch_size: int = 5000,
+    dry_run: bool = False,
+    config: Optional[Config] = None,
+) -> Dict[str, Any]:
+    """Run v1.3 backfill: populate occupied_seconds for existing jobs rows.
+
+    Derives node-occupancy time from PBS ``resources_used.walltime`` in
+    ``raw_pbs_data``. Requires the v1.3 migration (occupied_seconds column) to
+    have run first.
+
+    **IMPORTANT – DB BACKUP FIRST:** updates up to ~458 k rows. Back up first
+    (SQLite: ``pbs-monitor database backup``; Postgres: ``pg_dump``).
+    """
+    migration = DatabaseMigration(config)
+    return migration.backfill_occupied_seconds(
         batch_size=batch_size, dry_run=dry_run
     )

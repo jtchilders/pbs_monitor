@@ -148,6 +148,17 @@
                     <div class="chart-wrap">
                         <canvas ref="utilCanvas"></canvas>
                     </div>
+                    <p class="panel-note">
+                        Node-hours are based on each job&#x2019;s measured occupancy
+                        (PBS <code>resources_used.walltime</code>), which excludes the
+                        HELD/QUEUED time between runs for requeued or preempted jobs.
+                        Each run&#x2019;s occupancy is placed starting at the job&#x2019;s
+                        start time; for jobs that ran, were requeued, and ran again, this
+                        can shift <em>when</em> within the run the time is counted by up to
+                        one bin, but per-bin totals remain accurate. Jobs that never ran
+                        contribute zero. During collection gaps (see the completeness
+                        banner) utilization may read low.
+                    </p>
                 </section>
 
                 <!-- Chart 2: Queue Depth -->
