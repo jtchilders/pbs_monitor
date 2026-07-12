@@ -1,0 +1,246 @@
+# Automated Alerts & Autonomous Agents — Design Brainstorm
+
+**Status:** Brainstorm / design reference (not yet scheduled for implementation)
+**Audience:** ALCF operations staff (Aurora/Polaris), the User Experience group, and PBS Monitor maintainers
+**Last updated:** 2026-07-12
+
+---
+
+## 1. Purpose
+
+PBS Monitor already collects ~13.5 months of rich scheduler data (jobs, job-state
+history, per-queue and system snapshots, node snapshots, reservations, and the
+collector's own self-health log). Today that data powers analytics dashboards but
+drives **no automated action**. This document brainstorms two related capabilities
+we can build on top of the existing data:
+
+1. **Automated alerts** — detectors that watch the collected data and notify a human
+   when something crosses a threshold.
+2. **Autonomous agents** — the same detectors given *agency* to take (bounded,
+   auditable) actions: draft outreach, file tickets, restart the collector, flag
+   reservations for teardown, etc.
+
+The intent is to help two audiences:
+
+- **Operators** managing Aurora, Polaris, and other systems (machine health,
+  utilization, contention, data-integrity of the monitor itself).
+- **The User Experience group**, who may want to proactively reach out to a user who
+  is struggling (chronic failures, repeated identical crashes, walltime misconfig).
+
+---
+
+## 2. Framing: one detector, three agency tiers
+
+Every idea below is fundamentally a **detector** that reads existing tables. What
+differs is what the system is allowed to *do* when a detector fires. We define three
+agency tiers and tag each idea with the **highest tier we'd trust for a first cut**.
+
+| Tier | Name | Behavior |
+|------|------|----------|
+| **0** | **Alert** | Notify a human. No action taken. |
+| **1** | **Draft** | Compose the artifact (email, ticket, chat message) for a human to review and send with one click. |
+| **2** | **Act** | Take a reversible, low-risk action autonomously, and write an audit record. |
+
+**Hard requirements for any Tier 2 agent:**
+
+- An **audit log** (`alert_events` table, see §6) recording every action, the
+  triggering data, and the outcome.
+- A **kill switch** (global + per-agent enable/disable in config).
+- **Reversibility** — no destructive or irreversible action without a human.
+
+**Cross-cutting requirement for every detector (all tiers):** a baseline +
+hysteresis + a dedupe/cooldown window. Without this, operators will mute everything
+within a week (alarm fatigue is the primary failure mode of this whole effort).
+
+---
+
+## 3. Data grounding
+
+All numbers below are **real signals** derived from the ~13.5-month Aurora example DB
+(`pbs_monitor_aurora.db`, 2025-04-21 → 2026-06-04). They are illustrative of scale;
+**re-derive on the live DB before acting on any threshold.**
+
+Relevant tables (see `references/db-schema.md` in the `pbs-monitor` skill for full schema):
+
+- `jobs` (~458K rows) — terminal record per job. `outcome_class` populated post-T0;
+  real exit code lives in `raw_pbs_data.Exit_status`.
+- `job_history` (~1.04M rows) — state transitions + scheduler `score` trajectory.
+- `queue_snapshots` (~309K) / `system_snapshots` (~6.3K) — depth/util over time.
+- `node_snapshots` (~6.3K) — per-node-set TEXT blob (`snapshot_data`).
+- `reservations` (259) / `reservation_utilization` (1,441) — reserved vs used node-hours.
+- `data_collection_log` (~36K) — the collector's own health (status, duration, errors).
+
+---
+
+## 4. Operator-facing detectors
+
+### A1. Collector self-health watchdog — **Tier 2 (safe)**
+**The monitor's own blind spot.** `data_collection_log` shows 22 gaps >60 min and one
+95 h gap, plus 7 FAILED collections — and *nothing alerts on it today*. Silent gaps
+corrupt trend plots (this is the root of the known "utilization reads low on 90 d"
+artifact).
+
+- **Detector:** collection gap > 2× cadence, OR `status = FAILED`, OR duration spike.
+- **Tier 2 action:** auto-restart the daemon once; escalate to ops if the retry also
+  fails. Post the gap window to the ops channel so people know which plots to distrust.
+- **Why first:** protects the integrity of every other signal; cheap; low risk.
+
+### A2. Machine-utilization anomaly — **Tier 0/1**
+Ground truth from `system_snapshots`: `(total_nodes − available_nodes) / total_nodes`.
+
+- **Detector:** utilization below a floor for N consecutive prime-time snapshots
+  (idle capacity = wasted allocation-hours), OR pinned ~100% with a deep queue (contention).
+- **Tier 1 draft:** standup summary — "Aurora sat at 34% for 3 h overnight; largest
+  queued job needed 2048 nodes; 4100 free."
+
+### A3. Node-health / down-node tracker — **Tier 1**
+Parse `node_snapshots.snapshot_data` for offline/down counts over time.
+
+- **Detector:** down-node count crosses a threshold or climbs monotonically (rack
+  going bad).
+- **Tier 1 draft:** ticket listing the specific offline nodes.
+- **Caveat:** `snapshot_data` is a TEXT blob — a parser must be built first. This is
+  the **least-ready** data source in this document.
+
+### A4. Fragmentation / large-job-starvation detector — **Tier 0/1**
+Cross `system_snapshots` free-node count against the largest queued job's node request.
+
+- **Detector:** a big job has waited > queue p95 AND free nodes never simultaneously
+  reach its size → the scheduler cannot drain for it.
+- **Value:** flags when operators may need to intervene (drain / reservation). A
+  signal ops usually compute by hand.
+
+### A5. Queue-wait SLA breach — **Tier 0**
+Wait ECDF + p50/p90/p99 per queue already exist. Turn p90/p99 into a live tripwire.
+
+- **Detector:** a queue's rolling p90 wait exceeds its historical baseline + kσ.
+- **Value:** distinguishes "prod is congested" from "one whale job skews the tail."
+
+### A6. System-wide failure surge — **Tier 0/1**
+30.8% of finished jobs carry a non-zero exit (`outcome_class` now available). A sudden
+surge in a *specific* class — `134/139/137` (SIGABRT/SEGV/SIGKILL = real crashes) or
+`127` (cmd-not-found) — clustered in time often signals a **filesystem hiccup, a bad
+module, or a compute-node problem**, not user error.
+
+- **Detector:** rate of a specific failure class over baseline + kσ within a window.
+- **Tier 1 draft:** ops alert with exit-class breakdown and affected node list.
+- **Why notable:** turns failure data into an **early-warning system for machine problems**.
+
+### A7. Reservation-expiry-with-low-utilization — **Tier 1/2**
+Mean reservation utilization is 24.8%; 65% run under 25%.
+
+- **Detector:** reservation nearing end with node-hours-used far below reserved.
+- **Tier 1 draft:** nudge the owner — "your reservation ends in 4 h at 18% use —
+  release early?"
+- **Tier 2 (policy sign-off required):** auto-flag for early teardown.
+- **Value:** directly recovers wasted capacity.
+
+---
+
+## 5. User-Experience-group-facing detectors (proactive outreach)
+
+**All capped at Tier 1 (draft-for-approval) for a first cut.** User-facing messages are
+reputational, and exit-code semantics are site-specific — a `-29` / `271` is usually a
+**benign requeue/preempt**, not the user's fault. Misfiring erodes trust and causes
+alarm fatigue. **Confirm exact code semantics with the scheduler admins before any
+user-facing text ships.**
+
+### U1. Chronic-failure user — **Tier 1**
+Several users have 200+ jobs at 88–99.5% non-zero-exit rate.
+
+- **Detector:** ≥ N jobs in a window with fail-rate > X, **excluding requeue/preempt codes**.
+- **Draft:** warm, specific email — "we noticed most of your recent Aurora jobs are
+  exiting with SIGSEGV — want help?"
+
+### U2. Repeated-identical-crash — **Tier 1**
+Same `owner` + `job_name` + exit code ≥ K times = a user stuck in a loop burning
+allocation on the same broken run.
+
+- **Detector:** grouped count over the signature.
+- **Value:** **highest-signal outreach trigger** — the pattern is unambiguous. Draft
+  includes the repeating signature and job IDs.
+
+### U3. Chronic walltime over-requester — **Tier 1**
+77,380 jobs requested ≥ 1 h but ran < 5 min; median job uses 40% of requested walltime.
+Over-requesting hurts the user's own queue priority and the scheduler's backfill.
+
+- **Detector:** rolling median walltime-usage fraction < 10% over ≥ M jobs.
+- **Draft:** gentle right-sizing tip with their actual distribution.
+- **Note:** use measured `resources_used.walltime` / `occupied_seconds`, **not**
+  `end − start` (that field overstates for requeued jobs — see the occupancy fix).
+
+### U4. Walltime-kill repeat offender — **Tier 1**
+Mirror image of U3: 15.3% of jobs use > 95% of walltime; those repeatedly hitting exit
+`143` (SIGTERM/walltime-kill) are losing work at the finish line.
+
+- **Draft:** suggest requesting more time or checkpointing.
+
+### U5. New-user / first-jobs-failing — **Tier 1**
+A user's *first* handful of jobs all failing is the highest-leverage UX moment — catch
+them before they give up.
+
+- **Detector:** owner with < M lifetime jobs and a failing opening streak.
+- **Draft:** warmer, onboarding-flavored template (distinct from the chronic-offender one).
+
+### U6. Stuck-job nudge — **Tier 0/1**
+A job queued/held far beyond its queue's p95 wait with a low/flat scheduler `score`
+(available in `job_history`). Often a dependency, a forgotten hold, or an unsatisfiable
+resource request.
+
+- **Draft:** nudge, or flag for UX triage.
+
+---
+
+## 6. Self-service (no outreach; user pulls)
+
+### S1. Per-job post-mortem panel — **Tier 0 (UI feature)**
+"Why did my job fail?" — plain-English exit-code translation + walltime-usage + wait
+context on the existing user page. Deflects UX tickets entirely.
+
+### S2. Per-user / per-project health-score badge — **Tier 0 (UI feature)**
+Composite badge (fail-rate, walltime efficiency, wait exposure) on the user/project
+pages. Self-serve for PIs; free triage-priority list for the UX team.
+
+---
+
+## 7. Shared infrastructure (build once, reuse everywhere)
+
+Rather than N one-off cron jobs, build a single engine that all detectors plug into:
+
+- **`pbs-monitor alerts` CLI subcommand** — run/evaluate detectors, list recent events,
+  test a rule against historical data (dry-run).
+- **`alert_rules` config** — declarative rule definitions (detector type, thresholds,
+  baseline window, hysteresis, cooldown, agency tier, notification target).
+- **`alert_events` audit table** — one row per firing: rule id, timestamp, triggering
+  data snapshot, agency tier, action taken, outcome, human-ack status. **Mandatory for
+  every Tier 2 action.**
+- **Notification adapters** — chat (ops channel), email (UX drafts), ticket system.
+- **Global + per-rule kill switch.**
+
+---
+
+## 8. Recommended build order (impact × readiness)
+
+1. **Shared alert engine** (§7) — the substrate everything else needs.
+2. **A1 — Collector self-health watchdog** (Tier 2). Protects the integrity of every
+   other signal; we've already been bitten by silent gaps. Cheap, low risk.
+3. **A6 — System-wide failure-surge detector** (Tier 0→1). `outcome_class` backfill
+   already unlocked this; it bridges the alert half and the machine-problem-detection half.
+4. **U2 — Repeated-identical-crash** (Tier 1). Least ambiguous outreach trigger; good
+   first user-facing agent.
+5. Then broaden: A2/A4/A5 (operator situational awareness), U1/U3 (outreach), S1/S2 (UI).
+
+---
+
+## 9. Caveats & risks
+
+- **Exit-code semantics are site-specific.** Confirm with Aurora/Polaris scheduler
+  admins which codes are benign requeues (`-29`, `271`) vs. real faults before any
+  user-facing text ships. Getting this wrong causes alarm fatigue and bad outreach.
+- **Node-health (A3)** is the least-ready idea — the data is in a TEXT blob needing a parser.
+- **Alarm fatigue is the real enemy.** Every detector needs a baseline + hysteresis +
+  dedupe/cooldown, or all of it gets muted.
+- **`actual_runtime_seconds` overstates runtime** for requeued/preempted jobs
+  (`end − start` brackets idle time). Use measured `occupied_seconds` /
+  `resources_used.walltime` for any walltime-based detector.
+- **Tier 2 requires audit + kill switch + reversibility**, no exceptions.
