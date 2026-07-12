@@ -74,16 +74,57 @@ Relevant tables (see `references/db-schema.md` in the `pbs-monitor` skill for fu
 
 ## 4. Operator-facing detectors
 
-### A1. Collector self-health watchdog — **Tier 2 (safe)**
+### A1. Collector self-health watchdog — **Tier 0/1 — DEFERRED until Hermes hosting exists**
 **The monitor's own blind spot.** `data_collection_log` shows 22 gaps >60 min and one
 95 h gap, plus 7 FAILED collections — and *nothing alerts on it today*. Silent gaps
 corrupt trend plots (this is the root of the known "utilization reads low on 90 d"
 artifact).
 
-- **Detector:** collection gap > 2× cadence, OR `status = FAILED`, OR duration spike.
-- **Tier 2 action:** auto-restart the daemon once; escalate to ops if the retry also
-  fails. Post the gap window to the ops channel so people know which plots to distrust.
-- **Why first:** protects the integrity of every other signal; cheap; low risk.
+- **Detector:** the freshness question — has a new `SUCCESS` row appeared in Postgres
+  within the expected cadence? Signals: stall (`now − last_success > 2 ×
+  auto_persist_interval`), new `FAILED` rows, snapshot gap (`> 60 min AND > 2× median`,
+  the existing `/api/analytics/collector-health` math), duration spike, silent-empty
+  (SUCCESS row with `jobs_collected = 0`). Detection logic **already exists** inside the
+  web endpoint `api_analytics_collector_health` (`web/server.py`) and should be extracted
+  into a pure, reusable `analytics/collector_health.evaluate(db, config)` function.
+
+- **CRITICAL architecture constraint — the watchdog must NOT run on the cluster it
+  watches.** A watchdog co-located with the daemon shares its failure domain: if an
+  Aurora login node reboots or its Postgres goes down, a same-node watchdog dies *with*
+  the daemon and the outage that matters most goes unreported. A same-node watchdog is
+  false comfort — worse than no watchdog. The observer must sit on the *other* side of
+  the network boundary so that "daemon wedged," "Postgres down," and "login node gone"
+  are all detectable (the last two become "connection refused," which is itself an alert).
+
+- **Correct home: an external, stateless, scheduled job on Hermes (K8s).** It is a
+  short-lived `SELECT max(timestamp)`-style freshness probe against each cluster's
+  Postgres — a *query*, not a standing service. A **K8s `CronJob`** is the right
+  primitive: K8s schedules a throwaway pod every ~5 min running
+  `pbs-monitor watchdog --once --targets aurora,polaris`, then tears it down. K8s owns
+  its lifecycle and restarts on failure — solving "who watches the watchdog" with the
+  orchestrator we already want. This is a *soft, low-stakes first workload for Hermes*,
+  achievable long before Hermes can serve the website (a freshness probe is trivial
+  next to hosting the full app).
+
+- **Dead-man's-switch (closes the silent-failure gap).** A watchdog that only speaks up
+  on bad news fails silently if it *itself* stops (silence looks like health). Invert it:
+  emit a positive heartbeat on every healthy run to an external dead-man's-switch
+  (Healthchecks.io or self-hosted). Daemon dies → watchdog alerts; watchdog dies →
+  heartbeat stops → dead-man's-switch alerts. One tiny external dependency, not a
+  standing service per cluster.
+
+- **Tier for Tier 2 (auto-restart daemon):** only viable if Hermes has a control path
+  back to the cluster (e.g. SSH). Ship at **Tier 0 (notify only)** first; promote to
+  auto-restart per-cluster only after burn-in, and only with idempotency + rate-limit
+  (≤1 restart/hr) + verify-before/after + a maintenance flag so it never fights an
+  operator who stopped the daemon on purpose.
+
+- **Hard prerequisite (the real gate):** Hermes needs a network path to each cluster's
+  `localhost:5432` Postgres (today reached only via SSH tunnels from Taylor's MacBook).
+  Solving this is the same connectivity Hermes needs to eventually serve the website —
+  so it is down-payment on the bigger goal, not throwaway work. **Until that path
+  exists, do NOT build the watchdog** (see build order Phase B). The interim state —
+  daemon self-logging plus eyes-on — is acceptable; a wrong-architecture watchdog is not.
 
 ### A2. Machine-utilization anomaly — **Tier 0/1**
 Ground truth from `system_snapshots`: `(total_nodes − available_nodes) / total_nodes`.
@@ -221,14 +262,35 @@ Rather than N one-off cron jobs, build a single engine that all detectors plug i
 
 ## 8. Recommended build order (impact × readiness)
 
-1. **Shared alert engine** (§7) — the substrate everything else needs.
-2. **A1 — Collector self-health watchdog** (Tier 2). Protects the integrity of every
-   other signal; we've already been bitten by silent gaps. Cheap, low risk.
-3. **A6 — System-wide failure-surge detector** (Tier 0→1). `outcome_class` backfill
-   already unlocked this; it bridges the alert half and the machine-problem-detection half.
-4. **U2 — Repeated-identical-crash** (Tier 1). Least ambiguous outreach trigger; good
+Sequencing is now split into two phases by their infrastructure dependency, to avoid
+**service creep** (see §9). The floor per cluster is **two** standing services —
+Postgres + the collector daemon (the web server is on-demand, not standing). No detector
+below should add a *third* standing service to a cluster.
+
+### Phase A — buildable now (no new cluster services; runs in-app or as one shared job)
+1. **Shared alert engine** (§7) — the substrate everything else needs. Detectors that
+   run *inside* the existing app/daemon or as a single scheduled job add no per-cluster
+   service.
+2. **A6 — System-wide failure-surge detector** (Tier 0→1). `outcome_class` backfill
+   already unlocked this; it bridges the alert half and the machine-problem-detection
+   half. Runs against the local DB — no new service, no external reachability needed.
+3. **U2 — Repeated-identical-crash** (Tier 1). Least ambiguous outreach trigger; good
    first user-facing agent.
-5. Then broaden: A2/A4/A5 (operator situational awareness), U1/U3 (outreach), S1/S2 (UI).
+4. Then broaden: A2/A4/A5 (operator situational awareness), U1/U3 (outreach), S1/S2 (UI).
+
+### Phase B — gated on Hermes (K8s) hosting + network path to cluster Postgres
+5. **A1 — Collector self-health watchdog** — DEFERRED here **by design decision
+   (2026-07-12)**, not oversight. It cannot be built correctly on-cluster (shared
+   failure domain, §4/A1) and requires an *external* observer with a network path to the
+   cluster Postgres instances — the same connectivity Hermes needs to serve the website.
+   Build it as Hermes's first low-stakes K8s `CronJob` workload once that path exists.
+   In the interim, rely on daemon self-logging + eyes-on; do **not** ship a same-node
+   watchdog as a stopgap (false comfort).
+
+**Prep work that can happen during Phase A** (no dependency, reduces Phase B risk):
+extract the collector-health detection out of `web/server.py` into a pure
+`analytics/collector_health.evaluate()` function with unit tests. Safe refactor, no
+behavior change, and it makes the watchdog a thin scheduler around an already-tested core.
 
 ---
 
@@ -244,3 +306,11 @@ Rather than N one-off cron jobs, build a single engine that all detectors plug i
   (`end − start` brackets idle time). Use measured `occupied_seconds` /
   `resources_used.walltime` for any walltime-based detector.
 - **Tier 2 requires audit + kill switch + reversibility**, no exceptions.
+- **Guard against service creep.** The per-cluster floor is two standing services
+  (Postgres + collector daemon); the web server is on-demand. Prefer detectors that run
+  *inside* the existing daemon/app or as a *single* shared scheduled job over anything
+  that adds a standing per-cluster service. A monitoring component whose whole purpose is
+  to detect that a cluster-local thing died must NOT live on that cluster — it shares the
+  failure domain and reports nothing at the moment it matters most. Cross-boundary
+  observation (from Hermes) or a dead-man's-switch is the only honest design for
+  liveness monitoring.
