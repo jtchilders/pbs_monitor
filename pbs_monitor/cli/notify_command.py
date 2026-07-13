@@ -20,7 +20,7 @@ import logging
 from ..config import Config
 from ..database.connection import get_db_session
 from ..notifications.engine import NotificationEngine, default_state_path
-from ..notifications.slack import SlackNotifier
+from ..notifications.slack import SlackNotifier, SlackMessage
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +67,17 @@ class NotifyCommand:
     # -- test --------------------------------------------------------------- #
 
     def _test(self, args: argparse.Namespace) -> int:
-        """Evaluate rules and print what WOULD post. No posting, no state."""
+        """Evaluate rules and print what WOULD post. No posting, no state.
+
+        With --send-test-message, instead POST a fixed connectivity-test message
+        (real, non-dry-run) so the webhook can be verified independent of rules.
+        """
         sc = self.config.slack
+
+        # Connectivity smoke test: actually post a fixed message.
+        if getattr(args, "send_test_message", False):
+            return self._send_test_message()
+
         notifier = SlackNotifier.from_config(sc, dry_run=True)
         print("=" * 70)
         print("pbs-monitor notify test  (DRY RUN -- nothing is posted)")
@@ -97,6 +106,55 @@ class NotifyCommand:
         if notifier.transport == "none":
             print("  NOTE: no webhook/bot token configured -- 'send' would be a no-op.")
         return 0
+
+    def _send_test_message(self) -> int:
+        """POST a fixed connectivity-test message to Slack (real, non-dry-run).
+
+        Verifies the webhook/bot-token path works, independent of rule firing
+        and independent of cooldown/state. Honors slack.dry_run only if the user
+        explicitly set it (so a user testing connectivity gets a real post unless
+        they deliberately configured dry_run).
+        """
+        import datetime as _dt
+
+        sc = self.config.slack
+        # Build a notifier that WILL post (ignore the engine's usual dry-run),
+        # but still respect an explicit slack.dry_run=true in config.
+        explicit_dry = bool(getattr(sc, "dry_run", False))
+        notifier = SlackNotifier.from_config(sc, dry_run=explicit_dry)
+
+        cluster = getattr(sc, "cluster_label", None) or "cluster"
+        now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        text = (
+            f":satellite: *PBS Monitor Slack connectivity test* "
+            f"({cluster}) -- {now}. "
+            f"If you can read this, the webhook is wired up correctly."
+        )
+
+        print("=" * 70)
+        print("pbs-monitor notify test --send-test-message")
+        print("=" * 70)
+        print(f"  transport : {notifier.transport}")
+        print(f"  dry_run   : {explicit_dry}")
+        print(f"  channel   : {getattr(sc, 'channel', None) or '(webhook default)'}")
+
+        if notifier.transport == "none":
+            print("-" * 70)
+            print("  FAILED: no webhook_url or bot_token configured in slack config.")
+            print("  Set slack.webhook_url (or bot_token) in ~/.pbs_monitor.yaml.")
+            return 1
+
+        ok = notifier.post(SlackMessage(text=text))
+        print("-" * 70)
+        if ok and explicit_dry:
+            print("  OK (dry-run): message rendered but NOT posted (slack.dry_run=true).")
+        elif ok:
+            print("  OK: test message posted. Check the Slack channel.")
+        else:
+            print("  FAILED: post returned an error. Check the logs above and the "
+                  "webhook URL. (Common causes: bad/rotated webhook, network egress "
+                  "blocked from the login node.)")
+        return 0 if ok else 1
 
     # -- send --------------------------------------------------------------- #
 

@@ -1148,9 +1148,15 @@ Examples:
       dest="notify_action",
       help="Notification actions"
    )
-   notify_subparsers.add_parser(
+   notify_test_parser = notify_subparsers.add_parser(
       "test",
       help="Evaluate all rules and PRINT what would post (dry run; no post)"
+   )
+   notify_test_parser.add_argument(
+      "--send-test-message",
+      action="store_true",
+      help="Actually POST a fixed connectivity-test message to Slack (verifies "
+           "the webhook works, independent of whether any rule fires)"
    )
    notify_send_parser = notify_subparsers.add_parser(
       "send",

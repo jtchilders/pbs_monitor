@@ -64,3 +64,37 @@ def test_message_payload_includes_blocks_and_channel():
     assert payload["text"] == "t"
     assert payload["blocks"] == [{"type": "section"}]
     assert payload["channel"] == "#c"
+
+
+def test_send_test_message_no_transport_returns_1():
+    from pbs_monitor.cli.notify_command import NotifyCommand
+    from pbs_monitor.config import Config
+
+    cfg = Config.__new__(Config)
+    cfg.slack = type("S", (), {"enabled": True, "webhook_url": None,
+                               "bot_token": None, "channel": None,
+                               "dry_run": False, "cluster_label": "Aurora"})()
+    cmd = NotifyCommand(None, cfg)
+    assert cmd._send_test_message() == 1  # no webhook -> failure
+
+
+def test_send_test_message_posts_and_returns_0():
+    from unittest import mock
+    from pbs_monitor.cli.notify_command import NotifyCommand
+    from pbs_monitor.config import Config
+    import pbs_monitor.notifications.slack as slackmod
+
+    cfg = Config.__new__(Config)
+    cfg.slack = type("S", (), {
+        "enabled": True,
+        "webhook_url": "https://hooks.slack.com/services/X/Y/Z",
+        "bot_token": None, "channel": None, "dry_run": False,
+        "cluster_label": "Aurora", "timeout_seconds": 10,
+    })()
+    cmd = NotifyCommand(None, cfg)
+    resp = mock.Mock(status_code=200, text="ok")
+    with mock.patch.object(slackmod.requests, "post", return_value=resp) as mp:
+        rc = cmd._send_test_message()
+    assert rc == 0
+    assert mp.called
+    assert mp.call_args.args[0] == "https://hooks.slack.com/services/X/Y/Z"
