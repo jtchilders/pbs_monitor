@@ -1091,7 +1091,11 @@ class DataCollector:
                          f"{len(db_data['jobs'])} jobs, {len(db_data['queues'])} queues, "
                          f"{len(db_data['nodes'])} nodes, {len(db_data['reservations'])} reservations "
                          f"in {duration:.1f}s")
-         
+
+         # Evaluate notification rules and post any fired alerts to Slack.
+         # Best-effort and gated on slack.enabled; never disturbs collection.
+         self._run_notifications()
+
          return {
             'status': 'success',
             'jobs_collected': len(db_data['jobs']),
@@ -1387,6 +1391,39 @@ class DataCollector:
    def database_enabled(self) -> bool:
       """Check if database functionality is enabled"""
       return self._database_enabled
+
+   def _run_notifications(self) -> None:
+      """Evaluate notification rules and post fired alerts to Slack.
+
+      Best-effort: any failure here is logged and swallowed so it can never
+      disturb the data-collection cycle. No-op unless slack.enabled is True.
+      Lazily constructs (and caches) the NotificationEngine on first use.
+      """
+      slack_cfg = getattr(self.config, "slack", None)
+      if slack_cfg is None or not getattr(slack_cfg, "enabled", False):
+         return
+      try:
+         import functools
+         from .database.connection import get_db_session
+         from .notifications.engine import NotificationEngine, default_state_path
+
+         engine = getattr(self, "_notification_engine", None)
+         if engine is None:
+            engine = NotificationEngine(
+               slack_config=slack_cfg,
+               session_getter=functools.partial(get_db_session, self.config),
+               state_path=default_state_path(
+                  getattr(self.config.database, "url", "") or ""
+               ),
+            )
+            self._notification_engine = engine
+
+         outcomes = engine.run_once()
+         posted = [o.key for o in outcomes if o.posted]
+         if posted:
+            self.logger.info("Posted Slack notifications: %s", ", ".join(posted))
+      except Exception as e:  # noqa: BLE001 - never break collection on notify
+         self.logger.error("Notification step failed (ignored): %s", e)
    
    def __del__(self):
       """Cleanup on destruction"""

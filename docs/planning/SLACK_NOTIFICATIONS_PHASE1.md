@@ -122,9 +122,12 @@ slack:
    through the engine (honors cooldown/state; `--dry-run` renders instead of posting);
    `status` = show state file + last-fired times + config summary. No PBS connection needed.
    Verified end-to-end against the migrated Aurora DB copy.
-5. **Daemon hook (ONLY remaining wiring)** — call the engine's `run_once()` on the SUCCESS
-   path of `collect_and_persist` so the running daemon posts fired alerts each cycle. One
-   small, well-bounded insertion. Held pending Taylor's go-ahead + a live webhook.
+5. **Daemon hook** — ✅ DONE (`data_collector.py::_run_notifications`, called on the SUCCESS
+   path of `collect_and_persist`). Best-effort + gated on `slack.enabled`; lazy-imports the
+   engine (no daemon circular-import regression — `DATABASE_AVAILABLE` stays True) and
+   swallows any error so a notify failure never disturbs collection. Verified through a real
+   DataCollector against the Aurora DB: builds the engine lazily, fires `repeated_crash`,
+   logs "Posted Slack notifications: repeated_crash". Inert until `slack.enabled: true`.
 6. **Replace `down_node_surge`** with a node-state-parser-backed implementation, or drop it.
 
 ### How to go live (once the daemon hook lands)
