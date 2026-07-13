@@ -13,6 +13,7 @@ from ..utils.logging_setup import setup_logging
 from ..data_collector import DataCollector
 from .commands import StatusCommand, JobsCommand, NodesCommand, QueuesCommand, DatabaseCommand, HistoryCommand, DaemonCommand, ReservationsCommand, ScoreFormulaCommand
 from .analyze_commands import AnalyzeCommand
+from .notify_command import NotifyCommand
 from ..replay.cli import ReplayCommand
 
 
@@ -1137,7 +1138,34 @@ Examples:
       "status",
       help="Show daemon status and recent collection activity"
    )
-   
+
+   # Notify command (Slack notifications; no PBS connection needed)
+   notify_parser = subparsers.add_parser(
+      "notify",
+      help="Evaluate and send Slack notifications for alert rules"
+   )
+   notify_subparsers = notify_parser.add_subparsers(
+      dest="notify_action",
+      help="Notification actions"
+   )
+   notify_subparsers.add_parser(
+      "test",
+      help="Evaluate all rules and PRINT what would post (dry run; no post)"
+   )
+   notify_send_parser = notify_subparsers.add_parser(
+      "send",
+      help="Evaluate rules and POST fired messages (honors cooldown/state)"
+   )
+   notify_send_parser.add_argument(
+      "--dry-run",
+      action="store_true",
+      help="Run the full engine (state/cooldown) but render instead of posting"
+   )
+   notify_subparsers.add_parser(
+      "status",
+      help="Show current alert state (last fired times) and config summary"
+   )
+
    return parser
 
 
@@ -1253,6 +1281,11 @@ def main(argv: Optional[List[str]] = None) -> int:
    # Handle daemon command (doesn't need PBS connection)
    if args.command == "daemon":
       cmd = DaemonCommand(None, config)  # No need for collector
+      return cmd.execute(args)
+
+   # Handle notify command (doesn't need PBS connection)
+   if args.command == "notify":
+      cmd = NotifyCommand(None, config)  # No need for collector
       return cmd.execute(args)
 
    # Handle web command (doesn't need PBS connection)

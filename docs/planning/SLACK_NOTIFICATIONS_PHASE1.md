@@ -111,14 +111,28 @@ slack:
 
 1. **Provide a Slack credential** — ✅ Taylor uses an **incoming webhook**. Put it in the
    local yaml above (not in git).
-3. **Notifier engine + cooldown/dedup** — edge-trigger (fire on entering a bad state, not
-   every cycle) + per-rule cooldown + global `min_interval_seconds`. Start with a small
-   JSON state file next to the DB; graduate to an `alert_events` table later.
-4. **Daemon hook** — call `evaluate_all()` on the SUCCESS path of `collect_and_persist`,
-   post any fired messages through the engine. One small, well-bounded insertion.
-5. **`pbs-monitor notify test` CLI** — evaluate all rules against the live/DB data and
-   print what *would* post (dry-run), for eyeballing before going live.
+3. **Notifier engine + cooldown/dedup** — ✅ DONE (`notifications/engine.py`). Edge-triggers
+   (posts once on entering a bad state, not every 5-min cycle), per-rule `cooldown_seconds`,
+   global `min_interval_seconds` floor, durable JSON state next to the DB. Verified against
+   real Aurora data: cycle1 posts → cycle2 (+5m) suppressed(cooldown) → cycle3 (+2h) posts
+   again. 8 engine tests (`tests/test_notification_engine.py`), incl. a regression test for
+   a global-floor bug that had blocked the very first post.
+4. **`pbs-monitor notify {test|send|status}` CLI** — ✅ DONE (`cli/notify_command.py`).
+   `test` = dry-run print of what would post (no post, no state); `send` = evaluate + post
+   through the engine (honors cooldown/state; `--dry-run` renders instead of posting);
+   `status` = show state file + last-fired times + config summary. No PBS connection needed.
+   Verified end-to-end against the migrated Aurora DB copy.
+5. **Daemon hook (ONLY remaining wiring)** — call the engine's `run_once()` on the SUCCESS
+   path of `collect_and_persist` so the running daemon posts fired alerts each cycle. One
+   small, well-bounded insertion. Held pending Taylor's go-ahead + a live webhook.
 6. **Replace `down_node_surge`** with a node-state-parser-backed implementation, or drop it.
+
+### How to go live (once the daemon hook lands)
+1. Put the webhook + `enabled: true` in the local `~/.pbs_monitor.yaml` (see block above).
+2. `pbs-monitor notify test` — eyeball what would post against current data.
+3. `pbs-monitor notify send --dry-run` — exercise the full engine (state/cooldown) without posting.
+4. `pbs-monitor notify send` — post for real once. Check the channel.
+5. Restart the daemon so its per-cycle hook takes over.
 
 ## Design notes / pitfalls captured
 
