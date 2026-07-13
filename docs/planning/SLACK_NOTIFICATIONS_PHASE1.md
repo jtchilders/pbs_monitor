@@ -48,14 +48,30 @@ trigger.** Least ambiguous of the three; turn on first.
   **Confirm with scheduler admins before this drives actual user contact.** Fine for
   channel testing now.
 
-### S1 — `queue_drying` (system) — ⚠️ WORKS, NEEDS QUEUE CALIBRATION
-High utilization + thin backlog on watched queue(s) = idle-capacity risk soon.
-Mechanic verified (fired at 94% util). **BUT:** the default `queues: ["prod"]` is wrong
-for Aurora — there is no load-bearing `prod` queue. Real Aurora running queues (latest
-snapshot): `capacity` (27 running), `small` (15), `debug-scaling` (11), `nre-priority`
-(11), `debug` (8), `large`. **Action for Taylor: set `slack.rules.queue_drying.queues`
-to the real production queues per cluster, and tune `min_queued_jobs` / `high_util_pct`
-against real backlog behavior.** This is the "what does *shallow* mean" calibration.
+### S1 — `queue_drying` (system) — ✅ CALIBRATED FOR AURORA (prod = routing queue)
+High utilization + thin **routed** backlog = idle-capacity risk soon.
+
+**Key correction (Taylor, 2026-07-12):** `prod` is a *routing* queue — it dispatches to
+execution queues `small`/`medium`/`large` and holds ~nothing itself (latest snapshot:
+prod = 1 queued). Watching prod's own counts is useless. The rule now aggregates queued
+backlog across the **execution queues** prod routes to.
+
+Config keys: `exec_queues` (default `["small","medium","large"]`), `routing_label`
+(default `"prod"`), `min_queued_jobs` (default **10**), `high_util_pct` (default 85).
+
+**Threshold grounded in real Aurora data** (aggregate queued across small+medium+large
+over 6,329 collection ticks): median 42, p25 24, p10 11, p5 8. Firing at **≤10** =
+bottom decile (~9% of ticks) — genuinely thin without being noisy (≤20 would trip 21% of
+the time; too chatty). Verified:
+- Latest healthy snapshot (109 queued, 94% util) → **does not fire** (correct).
+- Real drought ticks exist and match: e.g. 2026-05-26 19:39 had 10 queued at 97% util.
+  Reproduced → fires with:
+  > :chart_with_downwards_trend: *Aurora - prod backlog drying up.* Utilization 97% but
+  > only *10 queued* across prod's execution queues (`small` 4q/20r, `medium` 3q/5r,
+  > `large` 3q/2r). Idle-capacity risk if the backlog isn't refilled soon.
+
+4 unit tests lock this in (`tests/test_notification_rules.py`). **Per-cluster note:**
+Polaris' routing topology may differ — set `exec_queues` accordingly there.
 
 ### S3 — `down_node_surge` (system) — ❌ CANNOT SHIP FROM system_snapshots
 **Real-data finding:** `system_snapshots.available_nodes` counts *idle/free* nodes, not
@@ -69,9 +85,32 @@ the node-state parser exists. Do NOT enable against system_snapshots.
 
 ## Remaining work (Phase B — when Taylor is back)
 
-1. **Provide a Slack credential** (webhook URL or bot token) → set in a *local*
-   `~/.pbs_monitor.yaml` (keep secrets out of git).
-2. **Calibrate `queue_drying`** queue list + thresholds against real per-cluster topology.
+### Sample `~/.pbs_monitor.yaml` block (keep this file OUT of git — it holds the secret)
+```yaml
+slack:
+  enabled: true
+  webhook_url: "https://hooks.slack.com/services/XXX/YYY/ZZZ"   # <- your webhook
+  channel: "#alcf-pbs-monitor"      # informational for webhooks
+  dry_run: false                    # set true to render-only while testing
+  cluster_label: "Aurora"           # or "Polaris"
+  min_interval_seconds: 3600        # global anti-spam floor (once engine lands)
+  rules:
+    repeated_crash:
+      enabled: true
+      min_repeats: 3
+      window_hours: 6
+    queue_drying:
+      enabled: true
+      exec_queues: ["small", "medium", "large"]   # prod's routed exec queues
+      routing_label: "prod"
+      min_queued_jobs: 10           # bottom-decile of Aurora backlog
+      high_util_pct: 85
+    down_node_surge:
+      enabled: false                # keep OFF until node-state parser exists
+```
+
+1. **Provide a Slack credential** — ✅ Taylor uses an **incoming webhook**. Put it in the
+   local yaml above (not in git).
 3. **Notifier engine + cooldown/dedup** — edge-trigger (fire on entering a bad state, not
    every cycle) + per-rule cooldown + global `min_interval_seconds`. Start with a small
    JSON state file next to the DB; graduate to an `alert_events` table later.

@@ -138,20 +138,35 @@ def down_node_surge(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessa
 # --------------------------------------------------------------------------- #
 
 def queue_drying(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessage]:
-    """Fire when production backlog is thin WHILE utilization is high.
+    """Fire when routed production backlog is thin WHILE utilization is high.
 
     The actionable moment: the machine is nearly full now but the queued work
     that keeps it full is running out -> idle capacity risk soon.
 
-    Condition (per configured queue, latest snapshot):
-        queued_jobs <= min_queued_jobs  AND  system utilization >= high_util_pct
+    IMPORTANT -- routing queues hold nothing. On Aurora ``prod`` is a *routing*
+    queue that dispatches to execution queues (small/medium/large); its own
+    ``queued_jobs`` is ~0 by design, so watching it directly is useless. Instead
+    we aggregate the queued backlog across the EXECUTION queues it routes to.
+
+    Config (``slack.rules.queue_drying``):
+        exec_queues     : list of execution queues to aggregate
+                          (default ["small", "medium", "large"])
+        routing_label   : display name for the group (default "prod")
+        min_queued_jobs : fire when aggregate queued <= this (default 10;
+                          ~bottom decile of Aurora's small+medium+large backlog)
+        high_util_pct   : only fire when system utilization >= this (default 85)
+
+    Condition: aggregate_queued(exec_queues) <= min_queued_jobs
+               AND system utilization >= high_util_pct
     """
     rc = _rule_cfg(cfg, "queue_drying")
-    queues: List[str] = list(rc.get("queues", ["prod"]))
-    min_queued_jobs = int(rc.get("min_queued_jobs", 20))
+    exec_queues: List[str] = list(rc.get("exec_queues", ["small", "medium", "large"]))
+    routing_label: str = str(rc.get("routing_label", "prod"))
+    min_queued_jobs = int(rc.get("min_queued_jobs", 10))
     high_util_pct = float(rc.get("high_util_pct", 85.0))
 
     # Current system utilization from the latest system snapshot.
+    # NOTE: available_nodes = FREE nodes; utilization = busy fraction.
     sysrow = db.execute(
         text(
             "SELECT total_nodes, available_nodes FROM system_snapshots "
@@ -167,9 +182,11 @@ def queue_drying(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessage]
     if util_pct < high_util_pct:
         return None
 
-    # For each watched queue, read its latest snapshot's queued_jobs.
-    drying: List[str] = []
-    for q in queues:
+    # Aggregate the LATEST queued backlog across the execution queues.
+    per_queue: List[str] = []
+    total_queued = 0
+    total_running = 0
+    for q in exec_queues:
         qrow = db.execute(
             text(
                 "SELECT queued_jobs, running_jobs FROM queue_snapshots "
@@ -180,19 +197,23 @@ def queue_drying(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessage]
         if not qrow:
             continue
         queued = int(qrow[0] or 0)
-        if queued <= min_queued_jobs:
-            running = int(qrow[1] or 0)
-            drying.append(f"`{q}` ({queued} queued, {running} running)")
+        running = int(qrow[1] or 0)
+        total_queued += queued
+        total_running += running
+        per_queue.append(f"`{q}` {queued}q/{running}r")
 
-    if not drying:
+    if not per_queue:
+        return None
+    if total_queued > min_queued_jobs:
         return None
 
     cluster = _cluster(cfg)
+    breakdown = ", ".join(per_queue)
     text_msg = (
-        f":chart_with_downwards_trend: *{cluster} - queue drying up.* "
-        f"Utilization is {util_pct:.0f}% but backlog is thin: "
-        + ", ".join(drying)
-        + f". Idle capacity risk if the backlog isn't refilled."
+        f":chart_with_downwards_trend: *{cluster} - {routing_label} backlog drying up.* "
+        f"Utilization {util_pct:.0f}% but only *{total_queued} queued* across "
+        f"{routing_label}'s execution queues ({breakdown}). "
+        f"Idle-capacity risk if the backlog isn't refilled soon."
     )
     return SlackMessage(text=text_msg)
 
