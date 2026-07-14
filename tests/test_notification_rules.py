@@ -29,7 +29,8 @@ def db():
         ))
         cx.execute(text(
             "CREATE TABLE jobs("
-            "job_id TEXT, owner TEXT, job_name TEXT, outcome_class TEXT, end_time TEXT)"
+            "job_id TEXT, owner TEXT, job_name TEXT, outcome_class TEXT, "
+            "exit_status INT, end_time TEXT)"
         ))
     session = sessionmaker(bind=eng)()
     yield session
@@ -44,6 +45,14 @@ def _sys(db, ts, total, avail):
 def _q(db, ts, name, queued, running):
     db.execute(text("INSERT INTO queue_snapshots VALUES(:t,:n,:q,:r)"),
                {"t": ts, "n": name, "q": queued, "r": running})
+
+
+def _job(db, job_id, owner, job_name, outcome_class, exit_status, end_time):
+    db.execute(
+        text("INSERT INTO jobs VALUES(:j,:o,:n,:c,:e,:t)"),
+        {"j": job_id, "o": owner, "n": job_name, "c": outcome_class,
+         "e": exit_status, "t": end_time},
+    )
 
 
 NOW = datetime(2026, 6, 4, 21, 10)
@@ -107,10 +116,11 @@ def test_queue_drying_ignores_routing_queue_own_counts(db):
 # ---- repeated_crash -------------------------------------------------------- #
 
 def test_repeated_crash_fires_on_looping_user(db):
+    # 5 identical failures, all walltime-exceeded (-29) -> fires and reports the
+    # exit code with its human label.
     for i in range(5):
-        db.execute(text("INSERT INTO jobs VALUES(:j,:o,:n,:c,:t)"),
-                   {"j": f"job{i}", "o": "kaiyuyue", "n": "gpt_synth",
-                    "c": "error", "t": "2026-06-04 1%d:00:00" % (i + 3)})
+        _job(db, f"job{i}", "kaiyuyue", "gpt_synth", "walltime_killed", -29,
+             "2026-06-04 1%d:00:00" % (i + 3))
     db.commit()
     cfg = SlackConfig(enabled=True, cluster_label="Aurora",
                       rules={"repeated_crash": {"enabled": True, "min_repeats": 3,
@@ -119,13 +129,35 @@ def test_repeated_crash_fires_on_looping_user(db):
     assert msg is not None
     assert "kaiyuyue" in msg.text
     assert "gpt_synth" in msg.text
+    # The exit code and its walltime-exceeded label must be in the message.
+    assert "-29" in msg.text
+    assert "walltime exceeded" in msg.text
+    assert "walltime_killed" in msg.text
+
+
+def test_repeated_crash_reports_mixed_exit_codes(db):
+    # Same job fails with a mix of codes across classes; total >= min_repeats.
+    _job(db, "j1", "alice", "train", "walltime_killed", -29, "2026-06-04 18:00:00")
+    _job(db, "j2", "alice", "train", "walltime_killed", -29, "2026-06-04 19:00:00")
+    _job(db, "j3", "alice", "train", "error", 1, "2026-06-04 20:00:00")
+    db.commit()
+    cfg = SlackConfig(enabled=True, cluster_label="Aurora",
+                      rules={"repeated_crash": {"enabled": True, "min_repeats": 3,
+                                                "window_hours": 24}})
+    msg = rules.repeated_crash(db, cfg, NOW)
+    assert msg is not None
+    assert "alice" in msg.text and "train" in msg.text
+    # Both classes and both codes appear; -29 (2x) sorts before exit 1 (1x).
+    assert "walltime_killed x2" in msg.text
+    assert "error x1" in msg.text
+    assert "-29 (walltime exceeded) x2" in msg.text
+    assert "exit 1 x1" in msg.text
 
 
 def test_repeated_crash_below_threshold_does_not_fire(db):
     for i in range(2):  # only 2 failures, threshold is 3
-        db.execute(text("INSERT INTO jobs VALUES(:j,:o,:n,:c,:t)"),
-                   {"j": f"job{i}", "o": "someone", "n": "run",
-                    "c": "error", "t": "2026-06-04 1%d:00:00" % (i + 3)})
+        _job(db, f"job{i}", "someone", "run", "error", 1,
+             "2026-06-04 1%d:00:00" % (i + 3))
     db.commit()
     cfg = SlackConfig(enabled=True, cluster_label="Aurora",
                       rules={"repeated_crash": {"enabled": True, "min_repeats": 3,

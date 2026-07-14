@@ -69,6 +69,39 @@ def _cluster(cfg: Any) -> str:
     return getattr(cfg, "cluster_label", None) or "cluster"
 
 
+# Human-readable annotations for the exit codes most worth calling out in an
+# alert. Anything not listed is shown as the bare number. Kept intentionally
+# small -- the goal is to explain the *actionable* codes at a glance, not to be
+# an exhaustive PBS/signal table (the web dashboard has the full taxonomy).
+_EXIT_CODE_NOTES: Dict[int, str] = {
+    -29: "walltime exceeded",   # confirmed on Aurora: 100% ran >=95% of walltime
+    143: "SIGTERM",             # graceful kill (walltime/qdel/drain)
+    137: "SIGKILL/OOM",         # hard kill -- frequently the OOM killer
+    139: "SIGSEGV",             # segfault
+    134: "SIGABRT",             # abort()
+    271: "requeued",
+    127: "command not found",
+    126: "not executable",
+}
+
+
+def _fmt_exit_code(code: Any) -> str:
+    """Format an exit code for a Slack message, annotating notable codes.
+
+    ``None`` (no recorded exit code) -> ``"none"``. Known actionable codes get a
+    short parenthetical (e.g. ``"-29 (walltime exceeded)"``); everything else is
+    the bare integer.
+    """
+    if code is None:
+        return "none"
+    try:
+        ci = int(code)
+    except (TypeError, ValueError):
+        return str(code)
+    note = _EXIT_CODE_NOTES.get(ci)
+    return f"{ci} ({note})" if note else str(ci)
+
+
 # --------------------------------------------------------------------------- #
 # S3 -- Down / offline node surge  (system-level, no exit-code semantics)
 # --------------------------------------------------------------------------- #
@@ -235,6 +268,11 @@ def repeated_crash(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessag
     >= min_repeats times within window_hours. Unambiguous "stuck in a loop"
     signal -- a strong candidate for UX outreach.
 
+    The message reports, for each offending (owner, job_name) signature, the
+    failure outcome class(es), the raw PBS exit code(s) behind them, and the
+    count -- so the reader immediately sees *why* the jobs died (e.g. exit -29 =
+    walltime exceeded, 137 = SIGKILL/OOM) without opening the dashboard.
+
     Returns a message describing up to ``max_report`` distinct offending
     (owner, job_name) signatures.
     """
@@ -246,29 +284,63 @@ def repeated_crash(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessag
     cutoff = now - timedelta(hours=window_hours)
     placeholders = ",".join(f"'{c}'" for c in _REAL_FAILURE_CLASSES)
 
+    # Group by (owner, job_name, outcome_class, exit_status) so we can both count
+    # per-signature failures AND surface the distinct raw exit codes. Rolling the
+    # exit codes up in Python keeps this portable across SQLite (test copies) and
+    # Postgres (production) -- no GROUP_CONCAT/STRING_AGG dialect split.
     rows = db.execute(
         text(
-            "SELECT owner, job_name, outcome_class, COUNT(*) AS n "
+            "SELECT owner, job_name, outcome_class, exit_status, COUNT(*) AS n "
             "FROM jobs "
             "WHERE end_time >= :cut "
             f"  AND outcome_class IN ({placeholders}) "
             "  AND job_name IS NOT NULL AND job_name != '' "
-            "GROUP BY owner, job_name, outcome_class "
-            "HAVING COUNT(*) >= :minr "
-            "ORDER BY n DESC "
-            "LIMIT :lim"
+            "GROUP BY owner, job_name, outcome_class, exit_status"
         ),
-        {"cut": cutoff, "minr": min_repeats, "lim": max_report},
+        {"cut": cutoff},
     ).fetchall()
 
     if not rows:
         return None
 
+    # Roll up per (owner, job_name): total failures, per-class counts, exit codes.
+    from collections import defaultdict
+
+    sig_total: Dict[tuple, int] = defaultdict(int)
+    sig_classes: Dict[tuple, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    sig_codes: Dict[tuple, Dict[Any, int]] = defaultdict(lambda: defaultdict(int))
+    for owner, job_name, outcome_class, exit_status, n in rows:
+        key = (owner, job_name)
+        n = int(n)
+        sig_total[key] += n
+        sig_classes[key][outcome_class] += n
+        sig_codes[key][exit_status] += n
+
+    # Keep only signatures whose TOTAL failures across classes/codes >= min_repeats.
+    offenders = [(k, t) for k, t in sig_total.items() if t >= min_repeats]
+    if not offenders:
+        return None
+    offenders.sort(key=lambda kt: -kt[1])
+    offenders = offenders[:max_report]
+
     cluster = _cluster(cfg)
     lines = []
-    for owner, job_name, outcome_class, n in rows:
+    for (owner, job_name), total in offenders:
+        # class summary, most common first: "walltime_killed x4, error x1"
+        cls_parts = [
+            f"{c} x{n}"
+            for c, n in sorted(sig_classes[(owner, job_name)].items(), key=lambda x: -x[1])
+        ]
+        cls_summary = ", ".join(cls_parts)
+        # exit-code summary with human labels, most common first:
+        # "exit -29 (walltime exceeded) x4, exit 1 x1"
+        code_parts = [
+            f"exit {_fmt_exit_code(code)} x{n}"
+            for code, n in sorted(sig_codes[(owner, job_name)].items(), key=lambda x: -x[1])
+        ]
+        code_summary = ", ".join(code_parts)
         lines.append(
-            f"- `{owner}` ran `{job_name}` {n}x, all *{outcome_class}*"
+            f"- `{owner}` ran `{job_name}` {total}x: *{cls_summary}* — {code_summary}"
         )
     body = "\n".join(lines)
     text_msg = (

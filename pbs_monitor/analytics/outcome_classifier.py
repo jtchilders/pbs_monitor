@@ -7,17 +7,32 @@ walltime information) to a human-readable outcome class.
 Outcome classes (verbatim from ANALYTICS_REORG_PLAN.md §6):
     success         — exit_status == 0
     signal_killed   — 128 < exit_status < 192 (killed by Unix signal)
-    walltime_killed — exit_status == 143 AND actual_runtime >= 0.95 * requested_walltime
+    walltime_killed — exit_status == -29 (PBS walltime-exceeded kill), OR
+                      exit_status == 143 AND actual_runtime >= 0.95 * requested_walltime
     requeued        — exit_status == 271 (256+15, provisional: preemption/maintenance)
-    could_not_run   — exit_status < 0 (PBS special: -29, -20, -3, …)
+    could_not_run   — exit_status < 0 (other PBS special: -20, -3, -14, …)
     error           — any other non-zero integer exit status
     unknown         — exit_status is None / not recorded
 
+NOTE on -29 (confirmed against real Aurora data 2026-07-14): exit_status == -29
+is PBS's "job exceeded its walltime and was killed" code. On the Aurora DB it is
+the SINGLE most common non-zero exit code (53,189 jobs / ~11.6% of all jobs) and
+100% of those jobs ran >= 95% of their requested walltime (median used/requested
+ratio 1.007 — i.e. they ran slightly past the wall). This is a genuine, actionable
+user failure (walltime underestimate), NOT a benign "could not run" abort, so it
+maps to walltime_killed and is included in the real-failure set that drives Slack
+alerts. Unlike 143 (ambiguous SIGTERM), -29 needs no runtime refinement — the code
+alone is definitive.
+
 NOTE: active jobs (state in Q/R/H/W/T/E/S) are NOT passed to this function;
 the caller is responsible for filtering them out before calling classify_exit.
-Negative codes and 271 are mapped provisionally — confirm semantics with
+Other negative codes and 271 are mapped provisionally — confirm semantics with
 ALCF/Aurora PBS admins before surfacing in user-facing labels (plan §9).
 """
+
+# PBS exit code for "job exceeded its requested walltime and was killed".
+# Confirmed against real Aurora data: 100% of -29 jobs ran >= 95% of walltime.
+WALLTIME_EXCEEDED_CODE = -29
 
 from typing import Optional
 
@@ -48,6 +63,7 @@ def classify_exit(
         exit_status == 0                         -> success
         exit_status is None                      -> unknown
         exit_status == 271 (256+15)              -> requeued
+        exit_status == -29 (walltime exceeded)   -> walltime_killed
         exit_status < 0                          -> could_not_run
         128 < exit_status < 192                  -> signal_killed
         exit_status == 143 AND
@@ -85,6 +101,13 @@ def classify_exit(
 
     if exit_status == 271:
         return "requeued"
+
+    # -29 is PBS's definitive "exceeded walltime, killed" code. It MUST be
+    # checked before the generic `exit_status < 0 -> could_not_run` rule below,
+    # otherwise the single most common failure on Aurora (11.6% of jobs) gets
+    # mislabeled as could_not_run and silently dropped from failure alerting.
+    if exit_status == WALLTIME_EXCEEDED_CODE:
+        return "walltime_killed"
 
     if exit_status < 0:
         return "could_not_run"
