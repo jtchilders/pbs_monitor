@@ -23,6 +23,10 @@ Threshold config lives under ``slack.rules.<rule_key>`` in the YAML, e.g.::
           enabled: true
           min_repeats: 3
           window_hours: 6
+          # Real-failure classes to EXCLUDE from the trigger. Default excludes
+          # walltime_killed (many users deliberately code to the wall via
+          # checkpoint/restart). Set to [] to count every real-failure class.
+          exclude_outcome_classes: ["walltime_killed"]
         down_node_surge:
           enabled: true
           min_unavailable: 30
@@ -260,6 +264,16 @@ def queue_drying(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessage]
 # scheduler admins before this drives actual user outreach. Safe for channel testing.
 _REAL_FAILURE_CLASSES = ("signal_killed", "walltime_killed", "error")
 
+# Outcome classes excluded from the repeated-crash TRIGGER by default. walltime_killed
+# (PBS -29 / SIGTERM-at-wall) is excluded because many ALCF users deliberately request
+# LESS walltime than their job needs and checkpoint/restart to maximize allocation
+# utilization -- for them a walltime kill is expected per-cycle behavior, not a stuck
+# loop, so counting it toward "repeated failures" produces alarm fatigue. This is
+# TRIGGER-only: walltime kills are still classified and still shown in the web exit
+# taxonomy; they just don't drive the Slack alert. Override per cluster via
+# `slack.rules.repeated_crash.exclude_outcome_classes` (a list; [] to count everything).
+_REPEATED_CRASH_DEFAULT_EXCLUDE = ("walltime_killed",)
+
 
 def repeated_crash(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessage]:
     """Fire when one user re-runs the same-named job and it keeps failing.
@@ -268,10 +282,16 @@ def repeated_crash(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessag
     >= min_repeats times within window_hours. Unambiguous "stuck in a loop"
     signal -- a strong candidate for UX outreach.
 
+    Excluded classes (default ``walltime_killed``) do NOT count toward the
+    trigger: many users deliberately under-request walltime and checkpoint/restart
+    to maximize utilization, so a walltime kill is expected behavior, not a stuck
+    loop. Tune via ``slack.rules.repeated_crash.exclude_outcome_classes`` (a list;
+    pass ``[]`` to count every real-failure class including walltime).
+
     The message reports, for each offending (owner, job_name) signature, the
     failure outcome class(es), the raw PBS exit code(s) behind them, and the
-    count -- so the reader immediately sees *why* the jobs died (e.g. exit -29 =
-    walltime exceeded, 137 = SIGKILL/OOM) without opening the dashboard.
+    count -- so the reader immediately sees *why* the jobs died (e.g. 137 =
+    SIGKILL/OOM, 1 = user error) without opening the dashboard.
 
     Returns a message describing up to ``max_report`` distinct offending
     (owner, job_name) signatures.
@@ -281,8 +301,17 @@ def repeated_crash(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessag
     window_hours = float(rc.get("window_hours", 6.0))
     max_report = int(rc.get("max_report", 3))
 
+    # Which real-failure classes count toward the trigger. Start from the full
+    # real-failure set, then drop the configured exclusions (default: walltime_killed).
+    exclude_cfg = rc.get("exclude_outcome_classes", list(_REPEATED_CRASH_DEFAULT_EXCLUDE))
+    exclude = {str(c) for c in exclude_cfg} if isinstance(exclude_cfg, (list, tuple, set)) else set()
+    trigger_classes = [c for c in _REAL_FAILURE_CLASSES if c not in exclude]
+    if not trigger_classes:
+        # Everything excluded -> nothing can fire. Bail cheaply.
+        return None
+
     cutoff = now - timedelta(hours=window_hours)
-    placeholders = ",".join(f"'{c}'" for c in _REAL_FAILURE_CLASSES)
+    placeholders = ",".join(f"'{c}'" for c in trigger_classes)
 
     # Group by (owner, job_name, outcome_class, exit_status) so we can both count
     # per-signature failures AND surface the distinct raw exit codes. Rolling the

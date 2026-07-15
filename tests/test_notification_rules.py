@@ -116,10 +116,9 @@ def test_queue_drying_ignores_routing_queue_own_counts(db):
 # ---- repeated_crash -------------------------------------------------------- #
 
 def test_repeated_crash_fires_on_looping_user(db):
-    # 5 identical failures, all walltime-exceeded (-29) -> fires and reports the
-    # exit code with its human label.
+    # 5 identical REAL failures (error / exit 1) -> fires and reports the exit code.
     for i in range(5):
-        _job(db, f"job{i}", "kaiyuyue", "gpt_synth", "walltime_killed", -29,
+        _job(db, f"job{i}", "kaiyuyue", "gpt_synth", "error", 1,
              "2026-06-04 1%d:00:00" % (i + 3))
     db.commit()
     cfg = SlackConfig(enabled=True, cluster_label="Aurora",
@@ -129,17 +128,67 @@ def test_repeated_crash_fires_on_looping_user(db):
     assert msg is not None
     assert "kaiyuyue" in msg.text
     assert "gpt_synth" in msg.text
-    # The exit code and its walltime-exceeded label must be in the message.
-    assert "-29" in msg.text
-    assert "walltime exceeded" in msg.text
-    assert "walltime_killed" in msg.text
+    # The exit code and its class must be in the message.
+    assert "exit 1 x5" in msg.text
+    assert "error x5" in msg.text
 
 
-def test_repeated_crash_reports_mixed_exit_codes(db):
-    # Same job fails with a mix of codes across classes; total >= min_repeats.
-    _job(db, "j1", "alice", "train", "walltime_killed", -29, "2026-06-04 18:00:00")
-    _job(db, "j2", "alice", "train", "walltime_killed", -29, "2026-06-04 19:00:00")
-    _job(db, "j3", "alice", "train", "error", 1, "2026-06-04 20:00:00")
+def test_repeated_crash_excludes_walltime_by_default(db):
+    # 5 walltime kills (-29) with NO other failure -> does NOT fire by default,
+    # because many users deliberately code to the wall (checkpoint/restart).
+    for i in range(5):
+        _job(db, f"job{i}", "codes_to_wall", "long_run", "walltime_killed", -29,
+             "2026-06-04 1%d:00:00" % (i + 3))
+    db.commit()
+    cfg = SlackConfig(enabled=True, cluster_label="Aurora",
+                      rules={"repeated_crash": {"enabled": True, "min_repeats": 3,
+                                                "window_hours": 24}})
+    assert rules.repeated_crash(db, cfg, NOW) is None
+
+
+def test_repeated_crash_can_include_walltime_via_config(db):
+    # With exclude_outcome_classes=[] walltime kills DO count again (opt-in).
+    for i in range(5):
+        _job(db, f"job{i}", "codes_to_wall", "long_run", "walltime_killed", -29,
+             "2026-06-04 1%d:00:00" % (i + 3))
+    db.commit()
+    cfg = SlackConfig(enabled=True, cluster_label="Aurora",
+                      rules={"repeated_crash": {"enabled": True, "min_repeats": 3,
+                                                "window_hours": 24,
+                                                "exclude_outcome_classes": []}})
+    msg = rules.repeated_crash(db, cfg, NOW)
+    assert msg is not None
+    assert "long_run" in msg.text
+    assert "-29 (walltime exceeded) x5" in msg.text
+    assert "walltime_killed x5" in msg.text
+
+
+def test_repeated_crash_walltime_does_not_count_toward_threshold(db):
+    # A job with 4 walltime kills + only 2 real errors: the 4 walltime kills are
+    # excluded, leaving 2 errors -> BELOW the min_repeats=3 threshold -> no fire.
+    for i in range(4):
+        _job(db, f"w{i}", "mixed", "solver", "walltime_killed", -29,
+             "2026-06-04 1%d:00:00" % (i + 3))
+    for i in range(2):
+        _job(db, f"e{i}", "mixed", "solver", "error", 1,
+             "2026-06-04 1%d:30:00" % (i + 3))
+    db.commit()
+    cfg = SlackConfig(enabled=True, cluster_label="Aurora",
+                      rules={"repeated_crash": {"enabled": True, "min_repeats": 3,
+                                                "window_hours": 24}})
+    assert rules.repeated_crash(db, cfg, NOW) is None
+
+
+def test_repeated_crash_reports_only_non_excluded_codes(db):
+    # 3 errors + 2 walltime kills for the same job. Errors (3) meet the threshold
+    # and fire; the message reports ONLY the non-excluded (error) codes, not the
+    # walltime kills (which would reintroduce the noise we deliberately dropped).
+    for i in range(3):
+        _job(db, f"e{i}", "alice", "train", "error", 1,
+             "2026-06-04 1%d:00:00" % (i + 3))
+    for i in range(2):
+        _job(db, f"w{i}", "alice", "train", "walltime_killed", -29,
+             "2026-06-04 1%d:30:00" % (i + 3))
     db.commit()
     cfg = SlackConfig(enabled=True, cluster_label="Aurora",
                       rules={"repeated_crash": {"enabled": True, "min_repeats": 3,
@@ -147,11 +196,11 @@ def test_repeated_crash_reports_mixed_exit_codes(db):
     msg = rules.repeated_crash(db, cfg, NOW)
     assert msg is not None
     assert "alice" in msg.text and "train" in msg.text
-    # Both classes and both codes appear; -29 (2x) sorts before exit 1 (1x).
-    assert "walltime_killed x2" in msg.text
-    assert "error x1" in msg.text
-    assert "-29 (walltime exceeded) x2" in msg.text
-    assert "exit 1 x1" in msg.text
+    assert "error x3" in msg.text
+    assert "exit 1 x3" in msg.text
+    # Walltime kills are excluded from the trigger AND the message.
+    assert "walltime_killed" not in msg.text
+    assert "-29" not in msg.text
 
 
 def test_repeated_crash_below_threshold_does_not_fire(db):
