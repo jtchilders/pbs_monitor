@@ -2586,6 +2586,16 @@ class DaemonCommand(BaseCommand):
       
       # Show configuration
       print(f"\nConfiguration:")
+      # Which config file was actually picked up (diagnostic: distinguishes a
+      # loaded file from the default path returned when no file exists).
+      config_file = getattr(self.config, 'config_file', None)
+      if config_file:
+         if os.path.exists(config_file):
+            print(f"  Config file: {config_file} (loaded)")
+         else:
+            print(f"  Config file: {config_file} (NOT FOUND - using built-in defaults)")
+      else:
+         print(f"  Config file: <unknown>")
       print(f"  Database enabled: {hasattr(self.config, 'database')}")
       if hasattr(self.config, 'database'):
          print(f"  Database URL: {self.config.database.url}")
