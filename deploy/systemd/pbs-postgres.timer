@@ -1,0 +1,13 @@
+[Unit]
+Description=Periodically ensure PBS Monitor Postgres is up (parton)
+
+[Timer]
+# Re-run the idempotent ensure-up check every 5 min to catch a mid-life Postgres
+# death (crash without a reboot). Drives pbs-postgres-check.service (plain oneshot).
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=pbs-postgres-check.service
+
+[Install]
+WantedBy=timers.target

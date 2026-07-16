@@ -1,0 +1,20 @@
+[Unit]
+Description=PBS Monitor Postgres ensure-up check (timer-driven, parton)
+
+[Service]
+Type=oneshot
+# RemainAfterExit + KillMode=process fix a cgroup-teardown race:
+#   start_postgres.sh calls `pg_ctl start`, which forks the postmaster; for a
+#   brief moment that postmaster is a member of THIS oneshot's control group.
+#   With the default RemainAfterExit=no + KillMode=control-group, the unit goes
+#   inactive the instant the script exits and systemd sweeps the cgroup with
+#   SIGTERM -- killing the just-forked postmaster before it reparents to init
+#   ("received smart shutdown request" ~40-95ms after PG becomes ready).
+#   RemainAfterExit=yes keeps the cgroup alive; KillMode=process makes systemd
+#   only ever signal the main PID, never sweep forked children. Either alone
+#   fixes it; both together make the whole class of teardown-kill impossible.
+RemainAfterExit=yes
+KillMode=process
+ExecStart=%h/pbs_monitor/systemd/start_postgres.sh %h/pbs_monitor /lus/flare/projects/datascience/parton/pbs-monitor-content/aurora/pgdata
+StandardOutput=append:%h/pbs_monitor/systemd/pbs-postgres.log
+StandardError=append:%h/pbs_monitor/systemd/pbs-postgres.log
