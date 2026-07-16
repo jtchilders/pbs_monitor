@@ -1,0 +1,23 @@
+[Unit]
+Description=PBS Monitor collector daemon (parton)
+Requires=pbs-postgres.service
+After=pbs-postgres.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/bash -lc 'export LD_LIBRARY_PATH=%h/pbs_monitor/venv/lib:$LD_LIBRARY_PATH; for i in $(seq 1 30); do %h/pbs_monitor/venv/bin/pg_isready -q && exit 0; sleep 2; done; echo "postgres not ready" >&2; exit 1'
+# --foreground so systemd tracks the process directly (no PID-file fork chase).
+ExecStart=%h/pbs_monitor/venv/bin/pbs-monitor daemon start --foreground
+WorkingDirectory=%h
+# systemd's clean env lacks the login-shell PATH: PBS tools live in /opt/pbs/bin,
+# and pg_isready/psql need the Intel runtime copied into venv/lib.
+Environment=LD_LIBRARY_PATH=%h/pbs_monitor/venv/lib
+Environment=PATH=%h/pbs_monitor/venv/bin:/opt/pbs/bin:/home/parton/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=always
+RestartSec=15
+StartLimitIntervalSec=0
+StandardOutput=append:%h/pbs_monitor/systemd/pbs-monitor-daemon.log
+StandardError=append:%h/pbs_monitor/systemd/pbs-monitor-daemon.log
+
+[Install]
+WantedBy=default.target

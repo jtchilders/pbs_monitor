@@ -1,0 +1,26 @@
+[Unit]
+Description=PBS Monitor PostgreSQL ensure-up (parton)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# oneshot: start_postgres.sh ENSURES Postgres is up (idempotent) then exits.
+# Postgres itself is daemonized by pg_ctl against Lustre PGDATA; systemd does not
+# try to own the postgres process (Type=forking mis-tracks pg_ctl's double fork).
+# RemainAfterExit keeps the unit "active" so the daemon unit's dependency holds.
+Type=oneshot
+RemainAfterExit=yes
+# KillMode=process: only signal the tracked main PID on stop, never sweep the
+# whole cgroup. The postmaster is forked by pg_ctl and reparents to init, so it
+# lives in this cgroup transiently; a control-group kill on unit stop would
+# SIGTERM it ("smart shutdown"). Belt-and-suspenders with the check service fix.
+KillMode=process
+ExecStart=%h/pbs_monitor/systemd/start_postgres.sh %h/pbs_monitor /lus/flare/projects/datascience/parton/pbs-monitor-content/aurora/pgdata
+ExecStop=/bin/bash -lc 'export LD_LIBRARY_PATH=%h/pbs_monitor/venv/lib:$LD_LIBRARY_PATH; %h/pbs_monitor/venv/bin/pg_ctl -D /lus/flare/projects/datascience/parton/pbs-monitor-content/aurora/pgdata -m fast stop || true'
+TimeoutStartSec=180
+# File logging (no journal access for this user).
+StandardOutput=append:%h/pbs_monitor/systemd/pbs-postgres.log
+StandardError=append:%h/pbs_monitor/systemd/pbs-postgres.log
+
+[Install]
+WantedBy=default.target
