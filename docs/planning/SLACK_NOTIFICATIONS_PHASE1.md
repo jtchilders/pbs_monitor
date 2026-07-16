@@ -1,0 +1,147 @@
+# Slack Notifications — Phase 1 (starter messages)
+
+**Status:** Built on branch `feature/slack-notifications`. Plumbing + 3 starter rules
+complete and **verified in dry-run against the real Aurora DB**. NOT wired into the
+daemon and NOT posting to Slack yet — deliberately held for calibration + credential.
+**Last updated:** 2026-07-12
+
+---
+
+## What this is
+
+A minimal, reversible first cut of daemon → Slack alerting. The daemon already collects
+fresh PBS data every cycle and has DB access; posting to Slack is just a hook at the end
+of a successful collection. **No new service** (respects the service-creep concern), no
+external reachability needed — these are *content* alerts, not liveness monitoring.
+
+## What was built (Phase A, no daemon wiring yet)
+
+- **`notifications/slack.py`** — `SlackNotifier`, credential-agnostic: supports an
+  incoming **webhook URL** OR a **bot token** (chat.postMessage), auto-detected from
+  config. Has a **dry-run mode** that renders + logs the exact message without posting.
+  Never raises on transport errors (a failed notification must not crash collection).
+  8 unit tests (`tests/test_slack_notifier.py`), all passing.
+- **`SlackConfig`** in `config.py` — `enabled`, `webhook_url`, `bot_token`, `channel`,
+  `dry_run`, `cluster_label`, `min_interval_seconds`, and a free-form `rules` dict so new
+  rules need no config-schema change. Wired into load/save like the other config sections.
+- **`notifications/rules.py`** — three starter rules as pure, testable functions
+  `(db, cfg, now) -> Optional[SlackMessage]`. Rules don't post and don't manage
+  cooldown/dedup (that's the engine's job, Phase B).
+
+## The three starter rules + real Aurora verification
+
+Evaluated against `pbs_monitor_aurora.db` (457,946 jobs, migrated, data → 2026-06-04),
+`now = 2026-06-04 21:10`.
+
+### U1 — `repeated_crash` (user-experience) — ✅ SHIP-READY
+Same owner + same job_name + real-failure `outcome_class` ≥ N times in a window.
+Verified output:
+> :repeat: *Aurora - repeated job failures (UX flag).* In the last 24h:
+> - `kaiyuyue` ran `gpt_commitpack2_synth` 22x, all *error*
+> - `eisenste` ran `iprof.sh` 12x, all *error* …
+
+Confirmed real: `kaiyuyue`'s 22 failures are distinct job IDs (8525779, 8525695, …), ~1/hr,
+all exit status 1. **This is a genuine stuck-user signal — exactly the intended outreach
+trigger.** Least ambiguous of the three; turn on first.
+- **Caveat:** exit-code / outcome-class semantics are site-specific. `_REAL_FAILURE_CLASSES`
+  = signal_killed / walltime_killed / error (excludes benign requeue/could_not_run).
+  **Confirm with scheduler admins before this drives actual user contact.** Fine for
+  channel testing now.
+
+### S1 — `queue_drying` (system) — ✅ CALIBRATED FOR AURORA (prod = routing queue)
+High utilization + thin **routed** backlog = idle-capacity risk soon.
+
+**Key correction (Taylor, 2026-07-12):** `prod` is a *routing* queue — it dispatches to
+execution queues `small`/`medium`/`large` and holds ~nothing itself (latest snapshot:
+prod = 1 queued). Watching prod's own counts is useless. The rule now aggregates queued
+backlog across the **execution queues** prod routes to.
+
+Config keys: `exec_queues` (default `["small","medium","large"]`), `routing_label`
+(default `"prod"`), `min_queued_jobs` (default **10**), `high_util_pct` (default 85).
+
+**Threshold grounded in real Aurora data** (aggregate queued across small+medium+large
+over 6,329 collection ticks): median 42, p25 24, p10 11, p5 8. Firing at **≤10** =
+bottom decile (~9% of ticks) — genuinely thin without being noisy (≤20 would trip 21% of
+the time; too chatty). Verified:
+- Latest healthy snapshot (109 queued, 94% util) → **does not fire** (correct).
+- Real drought ticks exist and match: e.g. 2026-05-26 19:39 had 10 queued at 97% util.
+  Reproduced → fires with:
+  > :chart_with_downwards_trend: *Aurora - prod backlog drying up.* Utilization 97% but
+  > only *10 queued* across prod's execution queues (`small` 4q/20r, `medium` 3q/5r,
+  > `large` 3q/2r). Idle-capacity risk if the backlog isn't refilled soon.
+
+4 unit tests lock this in (`tests/test_notification_rules.py`). **Per-cluster note:**
+Polaris' routing topology may differ — set `exec_queues` accordingly there.
+
+### S3 — `down_node_surge` (system) — ❌ CANNOT SHIP FROM system_snapshots
+**Real-data finding:** `system_snapshots.available_nodes` counts *idle/free* nodes, not
+*healthy* nodes. Latest snapshot: 666 available of 10,624 → the naive
+`unavailable = total − available` = 9,958, which is **busy nodes, not down nodes**. This
+rule as drafted would false-fire on any busy healthy machine. **Correct implementation
+needs true per-node down/offline state, which lives in the `node_snapshots.snapshot_data`
+TEXT blob and requires a parser first** (the diagnostics catalog already flagged this as
+the least-ready data source). Rule is left in the registry but should stay disabled until
+the node-state parser exists. Do NOT enable against system_snapshots.
+
+## Remaining work (Phase B — when Taylor is back)
+
+### Sample `~/.pbs_monitor.yaml` block (keep this file OUT of git — it holds the secret)
+```yaml
+slack:
+  enabled: true
+  webhook_url: "https://hooks.slack.com/services/XXX/YYY/ZZZ"   # <- your webhook
+  channel: "#alcf-pbs-monitor"      # informational for webhooks
+  dry_run: false                    # set true to render-only while testing
+  cluster_label: "Aurora"           # or "Polaris"
+  min_interval_seconds: 3600        # global anti-spam floor (once engine lands)
+  rules:
+    repeated_crash:
+      enabled: true
+      min_repeats: 3
+      window_hours: 6
+    queue_drying:
+      enabled: true
+      exec_queues: ["small", "medium", "large"]   # prod's routed exec queues
+      routing_label: "prod"
+      min_queued_jobs: 10           # bottom-decile of Aurora backlog
+      high_util_pct: 85
+    down_node_surge:
+      enabled: false                # keep OFF until node-state parser exists
+```
+
+1. **Provide a Slack credential** — ✅ Taylor uses an **incoming webhook**. Put it in the
+   local yaml above (not in git).
+3. **Notifier engine + cooldown/dedup** — ✅ DONE (`notifications/engine.py`). Edge-triggers
+   (posts once on entering a bad state, not every 5-min cycle), per-rule `cooldown_seconds`,
+   global `min_interval_seconds` floor, durable JSON state next to the DB. Verified against
+   real Aurora data: cycle1 posts → cycle2 (+5m) suppressed(cooldown) → cycle3 (+2h) posts
+   again. 8 engine tests (`tests/test_notification_engine.py`), incl. a regression test for
+   a global-floor bug that had blocked the very first post.
+4. **`pbs-monitor notify {test|send|status}` CLI** — ✅ DONE (`cli/notify_command.py`).
+   `test` = dry-run print of what would post (no post, no state); `send` = evaluate + post
+   through the engine (honors cooldown/state; `--dry-run` renders instead of posting);
+   `status` = show state file + last-fired times + config summary. No PBS connection needed.
+   Verified end-to-end against the migrated Aurora DB copy.
+5. **Daemon hook** — ✅ DONE (`data_collector.py::_run_notifications`, called on the SUCCESS
+   path of `collect_and_persist`). Best-effort + gated on `slack.enabled`; lazy-imports the
+   engine (no daemon circular-import regression — `DATABASE_AVAILABLE` stays True) and
+   swallows any error so a notify failure never disturbs collection. Verified through a real
+   DataCollector against the Aurora DB: builds the engine lazily, fires `repeated_crash`,
+   logs "Posted Slack notifications: repeated_crash". Inert until `slack.enabled: true`.
+6. **Replace `down_node_surge`** with a node-state-parser-backed implementation, or drop it.
+
+### How to go live (once the daemon hook lands)
+1. Put the webhook + `enabled: true` in the local `~/.pbs_monitor.yaml` (see block above).
+2. `pbs-monitor notify test` — eyeball what would post against current data.
+3. `pbs-monitor notify send --dry-run` — exercise the full engine (state/cooldown) without posting.
+4. `pbs-monitor notify send` — post for real once. Check the channel.
+5. Restart the daemon so its per-cycle hook takes over.
+
+## Design notes / pitfalls captured
+
+- `available_nodes` = FREE nodes, not HEALTHY nodes. Never infer down-nodes from it.
+- Aurora has no `prod` queue; load lives in `capacity`/`large`/`small`/`debug*`. Queue
+  lists are per-cluster config, not hardcoded.
+- Rules are pure + isolated: `evaluate_all` catches per-rule exceptions so one bad rule
+  can't block others or crash collection.
+- Notifier swallows transport errors by design — notifications are best-effort.

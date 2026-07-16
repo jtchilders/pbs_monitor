@@ -1716,6 +1716,10 @@ def create_app(config=None) -> FastAPI:
             return 'success'
         if code == 271:
             return 'requeued (PBS 271)'
+        if code == -29:
+            # Confirmed against Aurora data: -29 == job exceeded its walltime
+            # and was killed (100% of -29 jobs ran >=95% of requested walltime).
+            return 'walltime exceeded (PBS -29)'
         if code < 0:
             return f'PBS special ({code})'
         if 128 < code < 192:
@@ -1923,11 +1927,15 @@ def create_app(config=None) -> FastAPI:
                 else:
                     code_int = int(code)
                     label = _exit_code_label(code_int)
-                    # Infer outcome_class for this code
+                    # Infer outcome_class for this code (must mirror
+                    # analytics.outcome_classifier.classify_exit exactly).
                     if code_int == 0:
                         oc = 'success'
                     elif code_int == 271:
                         oc = 'requeued'
+                    elif code_int == -29:
+                        # -29 = walltime exceeded (checked before generic <0).
+                        oc = 'walltime_killed'
                     elif code_int < 0:
                         oc = 'could_not_run'
                     elif 128 < code_int < 192:

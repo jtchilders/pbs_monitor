@@ -113,6 +113,49 @@ class DatabaseConfig:
 
 
 @dataclass
+class SlackConfig:
+   """Slack notification configuration.
+
+   Supports two transports; provide whichever your Slack app gave you:
+     * webhook_url  -- incoming webhook (simplest; channel fixed at creation)
+     * bot_token    -- bot token (xoxb-...) used with chat.postMessage; requires
+                       'channel' (name like '#alcf-ops' or a channel ID)
+
+   If both are set, the webhook takes precedence. Keep secrets OUT of any
+   committed config; use a local ~/.pbs_monitor.yaml that is not in git.
+   """
+
+   # Master switch. When False, no notifications are ever posted.
+   enabled: bool = False
+
+   # Transport credentials (set exactly one)
+   webhook_url: Optional[str] = None
+   bot_token: Optional[str] = None
+
+   # Target channel (informational for webhook; required for bot_token)
+   channel: Optional[str] = None
+
+   # Dry-run: render + log messages but never actually POST. Safe for testing.
+   dry_run: bool = False
+
+   # HTTP timeout for posting
+   timeout_seconds: int = 10
+
+   # Label identifying which cluster this daemon runs on, prefixed to messages
+   # (e.g. "Aurora", "Polaris"). Falls back to database.schema if unset.
+   cluster_label: Optional[str] = None
+
+   # Global anti-spam floor: minimum seconds between ANY two posts from this
+   # daemon, regardless of how many rules fire. 0 disables the global floor.
+   min_interval_seconds: int = 0
+
+   # Per-rule enable flags + thresholds live under 'rules' as a free-form dict
+   # so new rules can be added without a config schema change. Each rule reads
+   # its own keys; see pbs_monitor/notifications/rules.py for the contract.
+   rules: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class LoggingConfig:
    """Logging configuration"""
    
@@ -147,6 +190,7 @@ class Config:
       self.display = DisplayConfig()
       self.logging = LoggingConfig()
       self.database = DatabaseConfig()
+      self.slack = SlackConfig()
       
       # Load configuration from file
       self._load_config()
@@ -196,6 +240,10 @@ class Config:
          # Update database configuration
          if 'database' in config_data:
             self._update_config_object(self.database, config_data['database'])
+
+         # Update Slack notification configuration
+         if 'slack' in config_data:
+            self._update_config_object(self.slack, config_data['slack'])
          
          self.logger.info(f"Configuration loaded from {self.config_file}")
          
@@ -220,7 +268,8 @@ class Config:
             'pbs': self._config_to_dict(self.pbs),
             'display': self._config_to_dict(self.display),
             'logging': self._config_to_dict(self.logging),
-            'database': self._config_to_dict(self.database)
+            'database': self._config_to_dict(self.database),
+            'slack': self._config_to_dict(self.slack)
          }
          
          with open(self.config_file, 'w') as f:

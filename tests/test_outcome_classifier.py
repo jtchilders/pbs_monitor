@@ -53,10 +53,18 @@ class TestClassifyExitRules:
     def test_271_is_requeued(self):
         assert _classify("F", 271) == "requeued"
 
-    # Rule: exit_status < 0  ->  could_not_run
-    def test_minus_29_is_could_not_run(self):
-        assert _classify("F", -29) == "could_not_run"
+    # Rule: exit_status == -29  ->  walltime_killed (PBS walltime-exceeded kill)
+    # Confirmed against real Aurora data: -29 is the walltime-exceeded code, the
+    # single most common non-zero exit code, 100% ran >=95% of requested walltime.
+    # It is checked BEFORE the generic `exit_status < 0 -> could_not_run` rule.
+    def test_minus_29_is_walltime_killed(self):
+        assert _classify("F", -29) == "walltime_killed"
 
+    def test_minus_29_walltime_killed_without_runtime_info(self):
+        """-29 alone is definitive — no runtime/walltime refinement required."""
+        assert _classify("F", -29, runtime=None, wt=None) == "walltime_killed"
+
+    # Rule: other exit_status < 0  ->  could_not_run
     def test_minus_1_is_could_not_run(self):
         assert _classify("F", -1) == "could_not_run"
 
@@ -65,6 +73,9 @@ class TestClassifyExitRules:
 
     def test_minus_3_is_could_not_run(self):
         assert _classify("F", -3) == "could_not_run"
+
+    def test_minus_14_is_could_not_run(self):
+        assert _classify("F", -14) == "could_not_run"
 
     # Rule: 128 < exit_status < 192  ->  signal_killed  (generic)
     def test_137_sigkill_is_signal_killed(self):
@@ -310,7 +321,8 @@ class TestBackfill:
             ("2.pbs", 0,    None, None, "success"),
             ("3.pbs", None, None, None, "unknown"),
             ("4.pbs", 271,  None, None, "requeued"),
-            ("5.pbs", -29,  None, None, "could_not_run"),
+            ("5.pbs", -29,  None, None, "walltime_killed"),
+            ("5b.pbs", -20, None, None, "could_not_run"),
             ("6.pbs", 137,  None, None, "signal_killed"),
             ("7.pbs", 143,  3420, 3600, "walltime_killed"),   # 95% of 3600
             ("8.pbs", 143,  1800, 3600, "signal_killed"),     # 50% of 3600
@@ -424,9 +436,16 @@ class TestJobConverterOutcomeClass:
 
     def test_converter_sets_could_not_run(self):
         from pbs_monitor.database.model_converters import JobConverter
-        job = self._make_pbs_job("F", -29)
+        job = self._make_pbs_job("F", -20)
         db_job = JobConverter.to_database(job)
         assert db_job.outcome_class == "could_not_run"
+
+    def test_converter_sets_walltime_killed_on_minus_29(self):
+        """-29 (walltime exceeded) -> walltime_killed, not could_not_run."""
+        from pbs_monitor.database.model_converters import JobConverter
+        job = self._make_pbs_job("F", -29)
+        db_job = JobConverter.to_database(job)
+        assert db_job.outcome_class == "walltime_killed"
 
     def test_converter_active_job_returns_unknown(self):
         """Running job gets outcome_class='unknown' (it's still active)."""

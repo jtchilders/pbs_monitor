@@ -370,8 +370,8 @@ createApp({
         // This visual ordering separates "system/requeue" from "user-fault" per plan §9.
         const OUTCOME_ORDER = [
             'requeued',       // purple  — often benign: preemption/maintenance
-            'could_not_run',  // grey    — PBS special (e.g. -29): often benign
-            'walltime_killed',// amber   — user may have underestimated
+            'could_not_run',  // grey    — PBS could-not-run aborts (-20/-3): often benign
+            'walltime_killed',// amber   — walltime exceeded (incl. PBS -29): user underestimated
             'signal_killed',  // red     — killed by signal
             'error',          // rose    — non-zero user errors
             'success',        // green   — good

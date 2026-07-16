@@ -54,9 +54,9 @@
     const OUTCOME_COLORS = {
         success:        '#10b981',  // green
         signal_killed:  '#ef4444',  // red
-        walltime_killed:'#f59e0b',  // amber
+        walltime_killed:'#f59e0b',  // amber  (walltime exceeded, incl. PBS -29)
         requeued:       '#8b5cf6',  // purple (often benign — system requeue)
-        could_not_run:  '#6b7280',  // grey   (PBS special, e.g. -29)
+        could_not_run:  '#6b7280',  // grey   (PBS could-not-run aborts, e.g. -20/-3)
         error:          '#f43f5e',  // rose   (non-zero, non-signal user errors)
         other:          '#94a3b8',  // muted  (unclassified / unknown)
         unknown:        '#94a3b8',  // alias
