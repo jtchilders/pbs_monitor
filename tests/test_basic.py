@@ -63,7 +63,38 @@ class TestPBSJob:
       assert job.walltime == "01:00:00"
       assert job.memory == "8gb"
       assert job.priority == 100
-   
+
+   def test_job_from_qstat_json_exit_status_zero(self):
+      """Regression: Exit_status == 0 (success) must survive parsing.
+
+      A finished job reports Exit_status == 0. The old
+      ``get('Exit_status') or get('exit_status')`` idiom discarded the 0
+      (falsy) and set exit_status to None, causing successful jobs to be
+      classified as 'unknown'. Verify all common exit codes round-trip.
+      """
+      base = {
+         "Job_Id": "12345.pbs01",
+         "Job_Name": "test_job",
+         "Job_Owner": "testuser@hostname",
+         "job_state": "F",
+         "queue": "default",
+      }
+
+      # Success: exit 0 must NOT be dropped to None.
+      j0 = PBSJob.from_qstat_json({**base, "Exit_status": 0})
+      assert j0.exit_status == 0
+
+      # Non-zero exit codes still parse.
+      assert PBSJob.from_qstat_json({**base, "Exit_status": 1}).exit_status == 1
+      assert PBSJob.from_qstat_json({**base, "Exit_status": -29}).exit_status == -29
+
+      # Lowercase fallback key with a falsy-zero value.
+      jl = PBSJob.from_qstat_json({**base, "exit_status": 0})
+      assert jl.exit_status == 0
+
+      # Genuinely absent exit code stays None (legitimately 'unknown').
+      assert PBSJob.from_qstat_json(base).exit_status is None
+
    def test_job_active_status(self):
       """Test job active status"""
       running_job = PBSJob("1", "test", "user", JobState.RUNNING, "default")

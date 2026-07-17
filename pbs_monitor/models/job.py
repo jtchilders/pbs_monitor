@@ -138,8 +138,13 @@ class PBSJob:
       # Additional attributes
       priority = int(job_data.get('Priority', '0'))
       execution_node = job_data.get('exec_host')
-      # For exit status: try 'Exit_status' first (capital E), then 'exit_status'
-      exit_status = job_data.get('Exit_status') or job_data.get('exit_status')
+      # For exit status: try 'Exit_status' first (capital E), then 'exit_status'.
+      # Use explicit `is None` checks — a successful job reports Exit_status == 0,
+      # which is falsy, so `get('Exit_status') or get('exit_status')` would wrongly
+      # discard it (0 -> None) and cause the job to be classified as 'unknown'.
+      exit_status = job_data.get('Exit_status')
+      if exit_status is None:
+         exit_status = job_data.get('exit_status')
       if exit_status is not None:
          try:
             exit_status = int(exit_status)
