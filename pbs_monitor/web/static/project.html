@@ -288,6 +288,36 @@
             gap: 1rem;
             color: var(--text-dim);
         }
+
+        /* Empty state (no jobs in selected window) */
+        .ctx-empty {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 4rem 1.5rem;
+            gap: 0.85rem;
+            background: var(--panel-bg);
+            border: 1px solid var(--accent-border);
+            border-radius: 8px;
+        }
+        .ctx-empty .ce-icon { font-size: 2.25rem; opacity: 0.6; }
+        .ctx-empty .ce-title { font-size: 1.05rem; font-weight: 600; color: var(--text-color); }
+        .ctx-empty .ce-msg { font-size: 0.85rem; color: var(--text-dim); max-width: 32rem; line-height: 1.5; }
+        .ctx-empty .ce-action {
+            margin-top: 0.4rem;
+            padding: 0.45rem 1.1rem;
+            border: 1px solid var(--accent-job-exclusive);
+            background: var(--accent-job-exclusive);
+            color: white;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-family: inherit;
+        }
+        .ctx-empty .ce-action:hover { filter: brightness(1.1); }
+        .ctx-empty .ce-action[disabled] { opacity: 0.5; cursor: default; }
     </style>
 </head>
 <body>
@@ -306,13 +336,36 @@
     </div>
 
     <!-- Loading -->
-    <div v-if="loading" class="ctx-loading">
+    <div v-if="loading || !summaryLoaded" class="ctx-loading">
         <div class="spinner"></div>
         <span>Loading…</span>
     </div>
 
     <div v-else class="ctx-body">
 
+        <!-- Empty state: no jobs in the selected window -->
+        <div v-if="showEmptyState" class="ctx-empty">
+            <div class="ce-icon">📭</div>
+            <template v-if="entityExists">
+                <div class="ce-title">No jobs for {{ entityName }} in the last {{ rangeDays }} days</div>
+                <div class="ce-msg">
+                    This project has <strong>{{ summary.all_time.total_jobs }}</strong>
+                    job{{ summary.all_time.total_jobs === 1 ? '' : 's' }} on record.
+                    Most recent activity: <strong>{{ fmtIso(summary.all_time.last_activity) }}</strong>
+                    ({{ timeSince(summary.all_time.last_activity) }}).
+                </div>
+                <button class="ce-action" @click="viewAllTime">View all time</button>
+            </template>
+            <template v-else>
+                <div class="ce-title">No data for “{{ entityName }}”</div>
+                <div class="ce-msg">
+                    There are no jobs on record for this project. The name may be
+                    misspelled, or no jobs have ever been charged to this project on this cluster.
+                </div>
+            </template>
+        </div>
+
+        <template v-else>
         <!-- Summary cards -->
         <div class="summary-cards">
             <div class="summary-card">
@@ -427,6 +480,7 @@
                 </table>
             </div>
         </div>
+        </template>
     </div>
 
     <!-- Job Detail Modal -->
@@ -650,6 +704,28 @@ createApp({
             jobs.value.filter(j => j.queue_time_seconds > 0 && parseWalltime(j.walltime) > 0).length >= 3
         );
 
+        // ── empty-state (no jobs in selected window) ──
+        const allTime = computed(() => summary.value.all_time || { total_jobs: 0, first_activity: null, last_activity: null });
+        // Only decide once the summary has actually loaded (all_time key present).
+        const summaryLoaded = computed(() => summary.value && 'all_time' in summary.value);
+        const showEmptyState = computed(() => summaryLoaded.value && (summary.value.total_jobs || 0) === 0);
+        const entityExists = computed(() => (allTime.value.total_jobs || 0) > 0);
+
+        async function viewAllTime() {
+            // Widen the window to span from first activity to now (+1 day of
+            // slack), capped to the endpoint max. Falls back to the cap if the
+            // first-activity date is missing for any reason.
+            const MAX = 3650;
+            let days = MAX;
+            const first = allTime.value.first_activity;
+            if (first) {
+                const ms = Date.now() - new Date(first).getTime();
+                days = Math.min(MAX, Math.max(1, Math.ceil(ms / 86400000) + 1));
+            }
+            rangeDays.value = days;
+            await fetchAll();
+        }
+
         // ── sort ──
         function sortBy(key) {
             if (sortKey.value === key) sortDesc.value = !sortDesc.value;
@@ -802,6 +878,7 @@ createApp({
             sortKey, sortDesc, filteredJobs, jobDetail,
             chartTab, chartOverview1, chartOverview2, chartDetail1, chartDetail2, chartDetail3,
             scatterHasData,
+            showEmptyState, entityExists, viewAllTime, summaryLoaded,
             setRange, fetchJobs, sortBy, sortArrow, switchChartTab,
             openJobDetail, closeJobDetail,
             queueColor, fmtDuration, fmtNodeHours, fmtScore, fmtIso, timeSince,

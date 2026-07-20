@@ -717,6 +717,33 @@ def create_app(config=None) -> FastAPI:
         """Return UTC datetime for range_days ago."""
         return datetime.now(timezone.utc) - timedelta(days=range_days)
 
+    def _all_time_stats(db: Session, column, value: str) -> dict:
+        """Entity-wide job totals ignoring any time window.
+
+        Cheap aggregate (COUNT + MIN/MAX submit_time) filtered only by the
+        owner/project column, so the detail page can tell the difference
+        between an unknown entity and one whose activity predates the window.
+        """
+        row = db.query(
+            func.count(Job.job_id),
+            func.min(Job.submit_time),
+            func.max(Job.submit_time),
+        ).filter(column == value).one()
+        total, first_ts, last_ts = row
+
+        def _iso(dt):
+            if dt is None:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.isoformat()
+
+        return {
+            "total_jobs": int(total or 0),
+            "first_activity": _iso(first_ts),
+            "last_activity": _iso(last_ts),
+        }
+
     def _fill_date_series(counts: dict, start: datetime, range_days: int) -> list[dict]:
         """Fill a date→count/value dict with zeros for missing days."""
         result = []
@@ -732,8 +759,14 @@ def create_app(config=None) -> FastAPI:
             result.append({"date": d, "node_hours": round(counts.get(d, 0.0), 2)})
         return result
 
-    def _build_summary(jobs: list, name: str, kind: str, range_days: int) -> dict:
-        """Build summary stats from a list of Job ORM objects."""
+    def _build_summary(jobs: list, name: str, kind: str, range_days: int,
+                       all_time: dict | None = None) -> dict:
+        """Build summary stats from a list of Job ORM objects.
+
+        ``all_time`` (optional) carries entity-wide totals that ignore the
+        time window — used by the frontend to render a helpful empty state
+        when the selected window has no jobs but the entity has history.
+        """
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=range_days)
 
@@ -792,6 +825,11 @@ def create_app(config=None) -> FastAPI:
             "state_counts": state_counts,
             "jobs_per_day": _fill_date_series(jobs_by_day, start, range_days),
             "node_hours_per_day": _fill_nh_series(nh_by_day, start, range_days),
+            # Entity-wide totals ignoring the time window. Lets the frontend
+            # distinguish "no such user/project" from "no jobs in this window"
+            # and offer a jump to the full history.
+            "all_time": all_time or {"total_jobs": 0, "first_activity": None,
+                                     "last_activity": None},
         }
 
     def _serialize_job(job, now: datetime) -> dict:
@@ -856,18 +894,19 @@ def create_app(config=None) -> FastAPI:
     @app.get("/api/user/{username}/summary")
     def api_user_summary(
         username: str,
-        range: int = Query(7, ge=1, le=90),
+        range: int = Query(7, ge=1, le=3650),
         db: Session = Depends(get_db),
     ):
         jobs = db.query(Job).filter(Job.owner == username).filter(
             Job.submit_time >= _date_range(range)
         ).all()
-        return _build_summary(jobs, username, "user", range)
+        all_time = _all_time_stats(db, Job.owner, username)
+        return _build_summary(jobs, username, "user", range, all_time)
 
     @app.get("/api/user/{username}/jobs")
     def api_user_jobs(
         username: str,
-        range: int = Query(7, ge=1, le=90),
+        range: int = Query(7, ge=1, le=3650),
         state: str = Query("ALL"),
         db: Session = Depends(get_db),
     ):
@@ -878,18 +917,19 @@ def create_app(config=None) -> FastAPI:
     @app.get("/api/project/{project}/summary")
     def api_project_summary(
         project: str,
-        range: int = Query(7, ge=1, le=90),
+        range: int = Query(7, ge=1, le=3650),
         db: Session = Depends(get_db),
     ):
         jobs = db.query(Job).filter(Job.project == project).filter(
             Job.submit_time >= _date_range(range)
         ).all()
-        return _build_summary(jobs, project, "project", range)
+        all_time = _all_time_stats(db, Job.project, project)
+        return _build_summary(jobs, project, "project", range, all_time)
 
     @app.get("/api/project/{project}/jobs")
     def api_project_jobs(
         project: str,
-        range: int = Query(7, ge=1, le=90),
+        range: int = Query(7, ge=1, le=3650),
         state: str = Query("ALL"),
         db: Session = Depends(get_db),
     ):
