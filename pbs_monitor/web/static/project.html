@@ -336,7 +336,7 @@
     </div>
 
     <!-- Loading -->
-    <div v-if="loading" class="ctx-loading">
+    <div v-if="loading || !summaryLoaded" class="ctx-loading">
         <div class="spinner"></div>
         <span>Loading…</span>
     </div>
@@ -878,7 +878,7 @@ createApp({
             sortKey, sortDesc, filteredJobs, jobDetail,
             chartTab, chartOverview1, chartOverview2, chartDetail1, chartDetail2, chartDetail3,
             scatterHasData,
-            showEmptyState, entityExists, viewAllTime,
+            showEmptyState, entityExists, viewAllTime, summaryLoaded,
             setRange, fetchJobs, sortBy, sortArrow, switchChartTab,
             openJobDetail, closeJobDetail,
             queueColor, fmtDuration, fmtNodeHours, fmtScore, fmtIso, timeSince,
