@@ -560,6 +560,25 @@
                             <span class="mf-label">Comment</span><span class="mf-value">{{ jobDetail.comment }}</span>
                         </div>
                     </div>
+                    <div class="modal-section" v-if="jobDetail.raw_pbs_data">
+                        <details class="raw-pbs">
+                            <summary class="raw-pbs-summary">
+                                <span class="modal-section-title" style="margin:0;">Raw PBS Attributes</span>
+                                <span class="raw-pbs-hint">click to expand &middot; {{ rawKeyCount(jobDetail.raw_pbs_data) }} fields</span>
+                                <button class="raw-pbs-copy" @click.stop.prevent="copyRaw(jobDetail.raw_pbs_data)">{{ rawCopyLabel }}</button>
+                            </summary>
+                            <div class="raw-pbs-body">
+                                <pre class="raw-pbs-json mono">{{ rawPretty(jobDetail.raw_pbs_data) }}</pre>
+                                <details v-for="ent in rawLongFields(jobDetail.raw_pbs_data)" :key="ent.key" class="raw-pbs raw-pbs-nested">
+                                    <summary class="raw-pbs-summary">
+                                        <span class="raw-pbs-longkey mono">{{ ent.key }}</span>
+                                        <span class="raw-pbs-hint">{{ ent.value.length.toLocaleString() }} chars</span>
+                                    </summary>
+                                    <pre class="raw-pbs-json mono wrap">{{ ent.value }}</pre>
+                                </details>
+                            </div>
+                        </details>
+                    </div>
                 </template>
             </div>
         </div>
@@ -850,7 +869,49 @@ createApp({
         });
 
         // ── job detail modal ──
+        const RAW_LONG_THRESHOLD = 200;   // chars — values this long get their own collapsible
+        const rawCopyLabel = ref('Copy JSON');
+        // Keys pulled out of the main JSON blob into their own nested collapsibles,
+        // either because they're known to be huge (node lists) or because their
+        // string value exceeds RAW_LONG_THRESHOLD.
+        const RAW_ALWAYS_LONG = ['exec_host', 'exec_vnode', 'Resource_List.select', 'schedselect'];
+        function rawKeyCount(raw) { return raw ? Object.keys(raw).length : 0; }
+        function rawLongFields(raw) {
+            if (!raw) return [];
+            const out = [];
+            for (const k of Object.keys(raw)) {
+                const v = raw[k];
+                if (typeof v === 'string' && (v.length > RAW_LONG_THRESHOLD || RAW_ALWAYS_LONG.includes(k))) {
+                    out.push({ key: k, value: v });
+                }
+            }
+            return out;
+        }
+        function rawPretty(raw) {
+            if (!raw) return '';
+            // Replace long string values with a placeholder; the full value is
+            // shown in its own nested <details> so the main blob stays readable.
+            const longKeys = new Set(rawLongFields(raw).map(e => e.key));
+            const shown = {};
+            for (const k of Object.keys(raw)) {
+                shown[k] = longKeys.has(k)
+                    ? `[${raw[k].length.toLocaleString()} chars — see below]`
+                    : raw[k];
+            }
+            try { return JSON.stringify(shown, null, 2); }
+            catch (e) { return String(raw); }
+        }
+        async function copyRaw(raw) {
+            try {
+                await navigator.clipboard.writeText(JSON.stringify(raw, null, 2));
+                rawCopyLabel.value = 'Copied!';
+            } catch (e) {
+                rawCopyLabel.value = 'Copy failed';
+            }
+            setTimeout(() => { rawCopyLabel.value = 'Copy JSON'; }, 1500);
+        }
         async function openJobDetail(jid) {
+            rawCopyLabel.value = 'Copy JSON';
             jobDetail.value = { job_id: jid, _loading: true };
             try {
                 const res = await fetch(`/api/jobs/${encodeURIComponent(jid)}`);
@@ -881,6 +942,7 @@ createApp({
             showEmptyState, entityExists, viewAllTime, summaryLoaded,
             setRange, fetchJobs, sortBy, sortArrow, switchChartTab,
             openJobDetail, closeJobDetail,
+            rawCopyLabel, rawKeyCount, rawLongFields, rawPretty, copyRaw,
             queueColor, fmtDuration, fmtNodeHours, fmtScore, fmtIso, timeSince,
         };
     }

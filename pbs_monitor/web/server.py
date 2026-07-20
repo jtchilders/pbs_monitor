@@ -695,6 +695,14 @@ def create_app(config=None) -> FastAPI:
             "exit_status": raw.get("Exit_status"),
             "array_index": raw.get("array_index"),
             "job_array_id": raw.get("array_id"),
+
+            # Full raw PBS attribute dict (already parsed above). Returned so the
+            # detail modal can render a collapsible "Raw PBS Attributes" section
+            # for the many fields that don't get a dedicated column/label. This
+            # rides the existing single-row per-click fetch, so it adds no cost
+            # to any list/analytics endpoint (those deliberately avoid
+            # raw_pbs_data via with_entities).
+            "raw_pbs_data": raw or None,
         }
 
     # ---- context page routes (must be before static mounts) ----
