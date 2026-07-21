@@ -155,6 +155,7 @@ createApp({
         const hoveredJobId   = ref(null);
         const jobDetail      = ref(null);   // detailed job data for modal
         const jobDetailLoading = ref(false);
+        const rawCopyLabel   = ref('Copy JSON');   // raw PBS attributes copy-button label
         const hoveredLegend  = ref(null);  // 'free'|'job'|'down'|null — mouse hover (no lock)
         const lockedLegend  = ref(null);  // 'free'|'job'|'down'|null — click-to-lock
         const resvFilter    = ref(false); // reservation overlay toggle
@@ -801,6 +802,7 @@ createApp({
             requestAnimationFrame(drawMap);
 
             // Show modal immediately with a loading stub
+            rawCopyLabel.value = 'Copy JSON';
             jobDetailLoading.value = true;
             jobDetail.value = { job_id: jid, _loading: true };
 
@@ -818,6 +820,43 @@ createApp({
 
         function closeJobDetail() {
             jobDetail.value = null;
+        }
+
+        // ── Raw PBS attributes helpers (shared shape with user/project pages) ──
+        const RAW_LONG_THRESHOLD = 200;   // chars — values this long get their own collapsible
+        const RAW_ALWAYS_LONG = ['exec_host', 'exec_vnode', 'Resource_List.select', 'schedselect'];
+        function rawKeyCount(raw) { return raw ? Object.keys(raw).length : 0; }
+        function rawLongFields(raw) {
+            if (!raw) return [];
+            const out = [];
+            for (const k of Object.keys(raw)) {
+                const v = raw[k];
+                if (typeof v === 'string' && (v.length > RAW_LONG_THRESHOLD || RAW_ALWAYS_LONG.includes(k))) {
+                    out.push({ key: k, value: v });
+                }
+            }
+            return out;
+        }
+        function rawPretty(raw) {
+            if (!raw) return '';
+            const longKeys = new Set(rawLongFields(raw).map(e => e.key));
+            const shown = {};
+            for (const k of Object.keys(raw)) {
+                shown[k] = longKeys.has(k)
+                    ? `[${raw[k].length.toLocaleString()} chars — see below]`
+                    : raw[k];
+            }
+            try { return JSON.stringify(shown, null, 2); }
+            catch (e) { return String(raw); }
+        }
+        async function copyRaw(raw) {
+            try {
+                await navigator.clipboard.writeText(JSON.stringify(raw, null, 2));
+                rawCopyLabel.value = 'Copied!';
+            } catch (e) {
+                rawCopyLabel.value = 'Copy failed';
+            }
+            setTimeout(() => { rawCopyLabel.value = 'Copy JSON'; }, 1500);
         }
 
         function fmtIso(isoStr) {
@@ -1023,6 +1062,7 @@ createApp({
             depthGroupBy, depthShowHeld, depthAxisTicks,
             nodeCanvas, mapContainer, jobsSection, tooltip, tooltipStyle,
             jobDetail, jobDetailLoading,
+            rawCopyLabel, rawKeyCount, rawLongFields, rawPretty, copyRaw,
             systemName, serverHost, utilization, busyNodes, totalComputeNodes, stateCounts, legendCounts, jobCounts, freshnessClass, timeSinceLastUpdate,
             lockedLegend, resvFilter,
             sortedRunningJobs, sortedQueuedJobs, sortedHeldJobs, filteredRunningJobs, filteredQueuedJobs, filteredHeldJobs, sortedDepthBuckets,
