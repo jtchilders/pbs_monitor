@@ -483,108 +483,11 @@
         </template>
     </div>
 
-    <!-- Job Detail Modal -->
-    <div v-if="jobDetail" class="modal-backdrop" @click.self="closeJobDetail">
-        <div class="modal-panel" role="dialog" aria-modal="true">
-            <div class="modal-header">
-                <div class="modal-title-group">
-                    <span class="modal-job-id">Job {{ jobDetail.job_id }}</span>
-                    <span class="modal-job-name">{{ jobDetail.job_name }}</span>
-                    <span class="modal-state-badge" :class="'state-' + jobDetail.state">{{ jobDetail.state }}</span>
-                </div>
-                <button class="modal-close" @click="closeJobDetail">✕</button>
-            </div>
-            <div class="modal-body">
-                <div v-if="jobDetail._loading" class="modal-loading">
-                    <div class="spinner"></div><span>Loading job details…</span>
-                </div>
-                <div v-else-if="jobDetail._error" class="modal-error">
-                    ⚠ Failed to load: {{ jobDetail._error }}
-                </div>
-                <template v-else>
-                    <div class="modal-section">
-                        <h3 class="modal-section-title">Ownership</h3>
-                        <div class="modal-grid">
-                            <div class="modal-field"><span class="mf-label">Owner</span><span class="mf-value">{{ jobDetail.owner || '—' }}</span></div>
-                            <div class="modal-field"><span class="mf-label">Project</span><span class="mf-value">{{ jobDetail.project || '—' }}</span></div>
-                            <div class="modal-field"><span class="mf-label">Allocation</span><span class="mf-value">{{ jobDetail.allocation_type || '—' }}</span></div>
-                            <div class="modal-field"><span class="mf-label">Queue</span><span class="mf-value"><span class="queue-badge" :style="{ backgroundColor: queueColor(jobDetail.queue) }">{{ jobDetail.queue }}</span></span></div>
-                            <div class="modal-field" v-if="jobDetail.score != null"><span class="mf-label">Score (WFP)</span><span class="mf-value">{{ fmtScore(jobDetail.score) }}</span></div>
-                        </div>
-                    </div>
-                    <div class="modal-section">
-                        <h3 class="modal-section-title">Resources Requested</h3>
-                        <div class="modal-grid">
-                            <div class="modal-field"><span class="mf-label">Nodes</span><span class="mf-value">{{ jobDetail.nodes || '—' }}</span></div>
-                            <div class="modal-field" v-if="jobDetail.total_cores"><span class="mf-label">Total CPUs</span><span class="mf-value">{{ jobDetail.total_cores }}</span></div>
-                            <div class="modal-field" v-if="jobDetail.ncpus_requested"><span class="mf-label">NCPUs</span><span class="mf-value">{{ jobDetail.ncpus_requested }}</span></div>
-                            <div class="modal-field" v-if="jobDetail.mpiprocs"><span class="mf-label">MPI Procs</span><span class="mf-value">{{ jobDetail.mpiprocs }}</span></div>
-                            <div class="modal-field"><span class="mf-label">Walltime</span><span class="mf-value">{{ jobDetail.walltime || '—' }}</span></div>
-                            <div class="modal-field" v-if="jobDetail.memory_requested"><span class="mf-label">Memory</span><span class="mf-value">{{ jobDetail.memory_requested }}</span></div>
-                        </div>
-                        <div v-if="jobDetail.select" class="modal-field-wide"><span class="mf-label">Select</span><span class="mf-value mono">{{ jobDetail.select }}</span></div>
-                    </div>
-                    <div class="modal-section">
-                        <h3 class="modal-section-title">Timing</h3>
-                        <div class="modal-grid">
-                            <div class="modal-field" v-if="jobDetail.submit_time"><span class="mf-label">Submitted</span><span class="mf-value">{{ fmtIso(jobDetail.submit_time) }}</span></div>
-                            <div class="modal-field" v-if="jobDetail.start_time"><span class="mf-label">Started</span><span class="mf-value">{{ fmtIso(jobDetail.start_time) }}</span></div>
-                            <div class="modal-field" v-if="jobDetail.end_time"><span class="mf-label">Ended</span><span class="mf-value">{{ fmtIso(jobDetail.end_time) }}</span></div>
-                            <div class="modal-field" v-if="jobDetail.queue_time_seconds != null"><span class="mf-label">Queue Wait</span><span class="mf-value">{{ fmtDuration(jobDetail.queue_time_seconds) }}</span></div>
-                            <div class="modal-field" v-if="jobDetail.elapsed_seconds != null"><span class="mf-label">Elapsed</span><span class="mf-value">{{ fmtDuration(jobDetail.elapsed_seconds) }}</span></div>
-                            <div class="modal-field" v-if="jobDetail.remaining_seconds != null"><span class="mf-label">Remaining</span><span class="mf-value" :class="{ 'text-danger': jobDetail.remaining_seconds <= 0 }">{{ jobDetail.remaining_seconds > 0 ? fmtDuration(jobDetail.remaining_seconds) : 'Overdue' }}</span></div>
-                            <div class="modal-field" v-if="jobDetail.actual_runtime_seconds != null"><span class="mf-label">Runtime</span><span class="mf-value">{{ fmtDuration(jobDetail.actual_runtime_seconds) }}</span></div>
-                        </div>
-                        <div v-if="jobDetail.elapsed_seconds != null && jobDetail.walltime_seconds" class="modal-progress-container">
-                            <div class="modal-progress-bar">
-                                <div class="modal-progress-fill"
-                                     :class="{ 'overdue': jobDetail.remaining_seconds <= 0 }"
-                                     :style="{ width: Math.min(100, jobDetail.elapsed_seconds / jobDetail.walltime_seconds * 100).toFixed(1) + '%' }"></div>
-                            </div>
-                            <span class="modal-progress-label">{{ (jobDetail.elapsed_seconds / jobDetail.walltime_seconds * 100).toFixed(1) }}% of walltime</span>
-                        </div>
-                    </div>
-                    <div class="modal-section" v-if="jobDetail.execution_nodes && jobDetail.execution_nodes.length">
-                        <h3 class="modal-section-title">Execution Nodes ({{ jobDetail.execution_node_count }})</h3>
-                        <div class="modal-nodes-list">
-                            <span v-for="n in jobDetail.execution_nodes" :key="n" class="modal-node-tag">{{ n }}</span>
-                        </div>
-                    </div>
-                    <div class="modal-section">
-                        <h3 class="modal-section-title">PBS Details</h3>
-                        <div class="modal-grid">
-                            <div class="modal-field"><span class="mf-label">Full Job ID</span><span class="mf-value mono small">{{ jobDetail.full_job_id }}</span></div>
-                            <div class="modal-field" v-if="jobDetail.exit_status != null"><span class="mf-label">Exit Status</span><span class="mf-value">{{ jobDetail.exit_status }}</span></div>
-                        </div>
-                        <div v-if="jobDetail.comment" class="modal-field-wide">
-                            <span class="mf-label">Comment</span><span class="mf-value">{{ jobDetail.comment }}</span>
-                        </div>
-                    </div>
-                    <div class="modal-section" v-if="jobDetail.raw_pbs_data">
-                        <details class="raw-pbs">
-                            <summary class="raw-pbs-summary">
-                                <span class="modal-section-title" style="margin:0;">Raw PBS Attributes</span>
-                                <span class="raw-pbs-hint">click to expand &middot; {{ rawKeyCount(jobDetail.raw_pbs_data) }} fields</span>
-                                <button class="raw-pbs-copy" @click.stop.prevent="copyRaw(jobDetail.raw_pbs_data)">{{ rawCopyLabel }}</button>
-                            </summary>
-                            <div class="raw-pbs-body">
-                                <pre class="raw-pbs-json mono">{{ rawPretty(jobDetail.raw_pbs_data) }}</pre>
-                                <details v-for="ent in rawLongFields(jobDetail.raw_pbs_data)" :key="ent.key" class="raw-pbs raw-pbs-nested">
-                                    <summary class="raw-pbs-summary">
-                                        <span class="raw-pbs-longkey mono">{{ ent.key }}</span>
-                                        <span class="raw-pbs-hint">{{ ent.value.length.toLocaleString() }} chars</span>
-                                    </summary>
-                                    <pre class="raw-pbs-json mono wrap">{{ ent.value }}</pre>
-                                </details>
-                            </div>
-                        </details>
-                    </div>
-                </template>
-            </div>
-        </div>
-    </div>
+    <!-- Job Detail Modal — shared component (see js/job-modal.js) -->
+    <job-detail-modal ref="jobModal"></job-detail-modal>
 
 </div>
+<script src="/js/job-modal.js?v=2"></script>
 <script>
 const { createApp, ref, computed, onMounted, onUnmounted, watch, nextTick } = Vue;
 
@@ -681,7 +584,7 @@ function makeHBarOpts() {
 function destroyCharts(...instances) { instances.forEach(i => { if (i) i.destroy(); }); }
 
 // ── Vue app ───────────────────────────────────────────────────────────────────
-createApp({
+const app = createApp({
     setup() {
         const pathParts = window.location.pathname.split('/');
         const entityName = decodeURIComponent(pathParts[pathParts.length - 1] || '');
@@ -694,7 +597,7 @@ createApp({
         const stateOptions = ['ALL', 'RUNNING', 'QUEUED', 'FINISHED', 'HELD', 'UNKNOWN_END'];
         const sortKey      = ref('submit_time');
         const sortDesc     = ref(true);
-        const jobDetail    = ref(null);
+        const jobModal     = ref(null);   // template ref to <job-detail-modal>
         const chartTab     = ref('overview');
 
         // Canvas refs
@@ -869,84 +772,35 @@ createApp({
         });
 
         // ── job detail modal ──
-        const RAW_LONG_THRESHOLD = 200;   // chars — values this long get their own collapsible
-        const rawCopyLabel = ref('Copy JSON');
-        // Keys pulled out of the main JSON blob into their own nested collapsibles,
-        // either because they're known to be huge (node lists) or because their
-        // string value exceeds RAW_LONG_THRESHOLD.
-        const RAW_ALWAYS_LONG = ['exec_host', 'exec_vnode', 'Resource_List.select', 'schedselect'];
-        function rawKeyCount(raw) { return raw ? Object.keys(raw).length : 0; }
-        function rawLongFields(raw) {
-            if (!raw) return [];
-            const out = [];
-            for (const k of Object.keys(raw)) {
-                const v = raw[k];
-                if (typeof v === 'string' && (v.length > RAW_LONG_THRESHOLD || RAW_ALWAYS_LONG.includes(k))) {
-                    out.push({ key: k, value: v });
-                }
-            }
-            return out;
-        }
-        function rawPretty(raw) {
-            if (!raw) return '';
-            // Replace long string values with a placeholder; the full value is
-            // shown in its own nested <details> so the main blob stays readable.
-            const longKeys = new Set(rawLongFields(raw).map(e => e.key));
-            const shown = {};
-            for (const k of Object.keys(raw)) {
-                shown[k] = longKeys.has(k)
-                    ? `[${raw[k].length.toLocaleString()} chars — see below]`
-                    : raw[k];
-            }
-            try { return JSON.stringify(shown, null, 2); }
-            catch (e) { return String(raw); }
-        }
-        async function copyRaw(raw) {
-            try {
-                await navigator.clipboard.writeText(JSON.stringify(raw, null, 2));
-                rawCopyLabel.value = 'Copied!';
-            } catch (e) {
-                rawCopyLabel.value = 'Copy failed';
-            }
-            setTimeout(() => { rawCopyLabel.value = 'Copy JSON'; }, 1500);
-        }
-        async function openJobDetail(jid) {
-            rawCopyLabel.value = 'Copy JSON';
-            jobDetail.value = { job_id: jid, _loading: true };
-            try {
-                const res = await fetch(`/api/jobs/${encodeURIComponent(jid)}`);
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                jobDetail.value = await res.json();
-            } catch(e) {
-                jobDetail.value = { job_id: jid, _error: e.message };
-            }
-        }
-        function closeJobDetail() { jobDetail.value = null; }
-        function onKeyDown(e) { if (e.key === 'Escape' && jobDetail.value) closeJobDetail(); }
+        // The modal is now the shared <job-detail-modal> component
+        // (js/job-modal.js), which owns the fetch, markup and raw-attribute
+        // rendering (incl. Escape-to-close). We only delegate open/close via a
+        // template ref.
+        function openJobDetail(jid) { if (jobModal.value) jobModal.value.open(jid); }
+        function closeJobDetail()   { if (jobModal.value) jobModal.value.close(); }
 
         onMounted(async () => {
             document.title = `PBS Monitor — User: ${entityName}`;
             await fetchAll();
-            window.addEventListener('keydown', onKeyDown);
         });
         onUnmounted(() => {
-            window.removeEventListener('keydown', onKeyDown);
             destroyCharts(co1, co2, cd1, cd2, cd3);
         });
 
         return {
             entityName, rangeDays, loading, summary, jobs, stateFilter, stateOptions,
-            sortKey, sortDesc, filteredJobs, jobDetail,
+            sortKey, sortDesc, filteredJobs, jobModal,
             chartTab, chartOverview1, chartOverview2, chartDetail1, chartDetail2, chartDetail3,
             scatterHasData,
             showEmptyState, entityExists, viewAllTime, summaryLoaded,
             setRange, fetchJobs, sortBy, sortArrow, switchChartTab,
             openJobDetail, closeJobDetail,
-            rawCopyLabel, rawKeyCount, rawLongFields, rawPretty, copyRaw,
             queueColor, fmtDuration, fmtNodeHours, fmtScore, fmtIso, timeSince,
         };
     }
-}).mount('#app');
+});
+app.component('job-detail-modal', window.JobDetailModal);
+app.mount('#app');
 </script>
 </body>
 </html>
