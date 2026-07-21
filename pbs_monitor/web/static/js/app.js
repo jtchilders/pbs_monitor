@@ -120,7 +120,7 @@ function timeSince(isoStr) {
 
 const { createApp, ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } = Vue;
 
-createApp({
+const app = createApp({
     setup() {
         const systemInfo   = ref(null);
         const snapshot     = ref(null);
@@ -153,9 +153,7 @@ createApp({
         const queuedSortDesc = ref(true);
         const selectedJobId  = ref(null);
         const hoveredJobId   = ref(null);
-        const jobDetail      = ref(null);   // detailed job data for modal
-        const jobDetailLoading = ref(false);
-        const rawCopyLabel   = ref('Copy JSON');   // raw PBS attributes copy-button label
+        const jobModal       = ref(null);   // template ref to <job-detail-modal> component
         const hoveredLegend  = ref(null);  // 'free'|'job'|'down'|null — mouse hover (no lock)
         const lockedLegend  = ref(null);  // 'free'|'job'|'down'|null — click-to-lock
         const resvFilter    = ref(false); // reservation overlay toggle
@@ -796,67 +794,17 @@ createApp({
         function clearHighlight()   { hoveredJobId.value = null; requestAnimationFrame(drawMap); }
         function selectJob(jid)     { selectedJobId.value = (selectedJobId.value === jid) ? null : jid; requestAnimationFrame(drawMap); }
 
-        async function openJobDetail(jid) {
-            // Highlight on node map
-            selectedJobId.value = jid;
+        // Job detail modal is now the shared <job-detail-modal> component
+        // (js/job-modal.js). It owns the fetch, markup, and raw-attribute
+        // rendering; we only keep the node-map highlight side-effect here and
+        // delegate the actual open/close to the component via a template ref.
+        function openJobDetail(jid) {
+            selectedJobId.value = jid;         // highlight on node map
             requestAnimationFrame(drawMap);
-
-            // Show modal immediately with a loading stub
-            rawCopyLabel.value = 'Copy JSON';
-            jobDetailLoading.value = true;
-            jobDetail.value = { job_id: jid, _loading: true };
-
-            try {
-                const res = await fetch(`/api/jobs/${encodeURIComponent(jid)}`);
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                jobDetail.value = await res.json();
-            } catch (e) {
-                console.error('Job detail fetch failed:', e);
-                jobDetail.value = { job_id: jid, _error: e.message };
-            } finally {
-                jobDetailLoading.value = false;
-            }
+            if (jobModal.value) jobModal.value.open(jid);
         }
-
         function closeJobDetail() {
-            jobDetail.value = null;
-        }
-
-        // ── Raw PBS attributes helpers (shared shape with user/project pages) ──
-        const RAW_LONG_THRESHOLD = 200;   // chars — values this long get their own collapsible
-        const RAW_ALWAYS_LONG = ['exec_host', 'exec_vnode', 'Resource_List.select', 'schedselect'];
-        function rawKeyCount(raw) { return raw ? Object.keys(raw).length : 0; }
-        function rawLongFields(raw) {
-            if (!raw) return [];
-            const out = [];
-            for (const k of Object.keys(raw)) {
-                const v = raw[k];
-                if (typeof v === 'string' && (v.length > RAW_LONG_THRESHOLD || RAW_ALWAYS_LONG.includes(k))) {
-                    out.push({ key: k, value: v });
-                }
-            }
-            return out;
-        }
-        function rawPretty(raw) {
-            if (!raw) return '';
-            const longKeys = new Set(rawLongFields(raw).map(e => e.key));
-            const shown = {};
-            for (const k of Object.keys(raw)) {
-                shown[k] = longKeys.has(k)
-                    ? `[${raw[k].length.toLocaleString()} chars — see below]`
-                    : raw[k];
-            }
-            try { return JSON.stringify(shown, null, 2); }
-            catch (e) { return String(raw); }
-        }
-        async function copyRaw(raw) {
-            try {
-                await navigator.clipboard.writeText(JSON.stringify(raw, null, 2));
-                rawCopyLabel.value = 'Copied!';
-            } catch (e) {
-                rawCopyLabel.value = 'Copy failed';
-            }
-            setTimeout(() => { rawCopyLabel.value = 'Copy JSON'; }, 1500);
+            if (jobModal.value) jobModal.value.close();
         }
 
         function fmtIso(isoStr) {
@@ -870,10 +818,9 @@ createApp({
             });
         }
 
-        // Close modal on Escape key
-        function onKeyDown(e) {
-            if (e.key === 'Escape' && jobDetail.value) closeJobDetail();
-        }
+        // Escape-to-close is handled inside the shared <job-detail-modal>
+        // component; no page-level key handler needed for the modal anymore.
+        function onKeyDown(e) { /* reserved for future page-level shortcuts */ }
         function hoverLegend(key) {
             // Only apply hover effect when that state isn't already locked
             if (lockedLegend.value !== key) hoveredLegend.value = key;
@@ -1061,8 +1008,7 @@ createApp({
             hideBlocked, blockedQueuedCount,
             depthGroupBy, depthShowHeld, depthAxisTicks,
             nodeCanvas, mapContainer, jobsSection, tooltip, tooltipStyle,
-            jobDetail, jobDetailLoading,
-            rawCopyLabel, rawKeyCount, rawLongFields, rawPretty, copyRaw,
+            jobModal,
             systemName, serverHost, utilization, busyNodes, totalComputeNodes, stateCounts, legendCounts, jobCounts, freshnessClass, timeSinceLastUpdate,
             lockedLegend, resvFilter,
             sortedRunningJobs, sortedQueuedJobs, sortedHeldJobs, filteredRunningJobs, filteredQueuedJobs, filteredHeldJobs, sortedDepthBuckets,
@@ -1074,4 +1020,6 @@ createApp({
             waitOpen, waitDistLoading, waitDistEmpty, waitCanvas, fetchWaitDist, waitShowHeld,
         };
     }
-}).mount('#app');
+});
+app.component('job-detail-modal', window.JobDetailModal);
+app.mount('#app');
