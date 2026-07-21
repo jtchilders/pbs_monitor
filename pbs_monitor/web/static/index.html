@@ -527,6 +527,27 @@
                     </div>
                 </div>
 
+                <!-- Raw PBS Attributes -->
+                <div class="modal-section" v-if="jobDetail.raw_pbs_data">
+                    <details class="raw-pbs">
+                        <summary class="raw-pbs-summary">
+                            <span class="modal-section-title" style="margin:0;">Raw PBS Attributes</span>
+                            <span class="raw-pbs-hint">click to expand &middot; {{ rawKeyCount(jobDetail.raw_pbs_data) }} fields</span>
+                            <button class="raw-pbs-copy" @click.stop.prevent="copyRaw(jobDetail.raw_pbs_data)">{{ rawCopyLabel }}</button>
+                        </summary>
+                        <div class="raw-pbs-body">
+                            <pre class="raw-pbs-json mono">{{ rawPretty(jobDetail.raw_pbs_data) }}</pre>
+                            <details v-for="ent in rawLongFields(jobDetail.raw_pbs_data)" :key="ent.key" class="raw-pbs raw-pbs-nested">
+                                <summary class="raw-pbs-summary">
+                                    <span class="raw-pbs-longkey mono">{{ ent.key }}</span>
+                                    <span class="raw-pbs-hint">{{ ent.value.length.toLocaleString() }} chars</span>
+                                </summary>
+                                <pre class="raw-pbs-json mono wrap">{{ ent.value }}</pre>
+                            </details>
+                        </div>
+                    </details>
+                </div>
+
                 </template><!-- end v-else full detail -->
             </div>
         </div>
@@ -535,6 +556,6 @@
 </div>
 
 <script src="js/colors.js"></script>
-<script src="js/app.js?v=10"></script>
+<script src="js/app.js?v=11"></script>
 </body>
 </html>
