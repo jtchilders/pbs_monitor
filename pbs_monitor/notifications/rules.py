@@ -36,6 +36,12 @@ Threshold config lives under ``slack.rules.<rule_key>`` in the YAML, e.g.::
           queues: ["prod"]
           min_queued_jobs: 20
           high_util_pct: 85.0
+        repeated_rerun_held:
+          enabled: true
+          min_run_count: 5       # PBS run attempts before we care
+          window_hours: 24
+          require_failure: true  # only jobs that failed/held (not clean requeues)
+          max_report: 5
 
 All thresholds have safe defaults so a rule works before it is tuned.
 """
@@ -382,6 +388,118 @@ def repeated_crash(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessag
 
 
 # --------------------------------------------------------------------------- #
+# repeated auto-rerun then held/failed  (UX flag, per-job requeue loop)
+# --------------------------------------------------------------------------- #
+
+def repeated_rerun_held(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessage]:
+    """Fire when PBS auto-requeues a SINGLE job many times and it then fails/held.
+
+    This is distinct from ``repeated_crash``. ``repeated_crash`` catches a *user*
+    resubmitting the same-named job N times (N distinct job_ids). This rule
+    catches PBS *auto-requeuing one job* (one job_id) via ``run_count`` until it
+    gave up -- the ``comment: "job held, too many failed attempts to run and
+    terminated"`` pattern. ``repeated_crash`` cannot see this: it's a single row,
+    so nothing repeats at the (owner, job_name) level.
+
+    A high ``run_count`` that ended in a terminal failure is a strong signal the
+    user needs help (bad submit script, unsatisfiable resource request, a node
+    the job keeps landing on and dying). It also badly distorts naive
+    run/request efficiency, which is what surfaced this rule in the first place.
+
+    Trigger: a finished job with ``run_count >= min_run_count`` whose end_time is
+    within ``window_hours``. By default only genuinely-failed outcomes count
+    (``require_failure: true``) so a job that was preempted many times but
+    ultimately succeeded doesn't page; set ``require_failure: false`` to alert on
+    ANY heavily-requeued job.
+
+    Config (``slack.rules.repeated_rerun_held``):
+        enabled          : bool  (default true)
+        min_run_count    : int   (default 5)   -- attempts before we care
+        window_hours     : float (default 24)
+        require_failure  : bool  (default true) -- only failed/held outcomes
+        max_report       : int   (default 5)    -- jobs listed in the message
+    """
+    rc = _rule_cfg(cfg, "repeated_rerun_held")
+    min_run_count = int(rc.get("min_run_count", 5))
+    window_hours = float(rc.get("window_hours", 24.0))
+    require_failure = bool(rc.get("require_failure", True))
+    max_report = int(rc.get("max_report", 5))
+
+    cutoff = now - timedelta(hours=window_hours)
+
+    # Finished states: the job has reached a terminal record so run_count is
+    # final. SQLAlchemy stores SQLEnum(JobState) as the enum NAME, so the DB
+    # holds 'FINISHED'/'COMPLETED' (uppercase), NOT the enum values 'F'/'C'.
+    sql = (
+        "SELECT owner, job_name, run_count, outcome_class, exit_status, end_time "
+        "FROM jobs "
+        "WHERE run_count >= :minrc "
+        "  AND end_time >= :cut "
+        "  AND state IN ('FINISHED', 'COMPLETED') "
+    )
+    if require_failure:
+        # Only jobs that ultimately failed/held. For THIS rule, "failure" is
+        # broader than repeated_crash's _REAL_FAILURE_CLASSES: the dominant
+        # outcome for a job PBS requeues to death is `could_not_run` (exit -3 /
+        # "job held, too many failed attempts to run and terminated") -- verified
+        # on real Aurora data, ~all of the top offenders are could_not_run/-3.
+        # That class is deliberately EXCLUDED from repeated_crash (it's not a
+        # user-code crash) but IS the point here. Include it plus the real-
+        # failure classes; a non-zero exit code also counts as a backstop.
+        trigger_classes = list(_REAL_FAILURE_CLASSES) + ["could_not_run"]
+        placeholders = ",".join(f"'{c}'" for c in trigger_classes)
+        sql += (
+            f"  AND (outcome_class IN ({placeholders}) "
+            "       OR (exit_status IS NOT NULL AND exit_status != 0)) "
+        )
+    sql += "ORDER BY run_count DESC, end_time DESC"
+
+    rows = db.execute(text(sql), {"minrc": min_run_count, "cut": cutoff}).fetchall()
+    if not rows:
+        return None
+
+    # Dedupe by (owner, job_name, run_count, exit_status): the jobs table can
+    # hold several rows for the same logical job (requeue history / re-collection
+    # of the same job_id family), and listing the same offender five times is
+    # noise. Keep first occurrence (already ordered by run_count DESC).
+    seen = set()
+    distinct = []
+    for row in rows:
+        owner, job_name, run_count, outcome_class, exit_status, _end = row
+        key = (owner, job_name, int(run_count), exit_status)
+        if key in seen:
+            continue
+        seen.add(key)
+        distinct.append(row)
+
+    total_distinct = len(distinct)
+    offenders = distinct[:max_report]
+    cluster = _cluster(cfg)
+    lines = []
+    for owner, job_name, run_count, outcome_class, exit_status, _end in offenders:
+        name = job_name or "(unnamed)"
+        code = _fmt_exit_code(exit_status)
+        cls = outcome_class or "unknown"
+        lines.append(
+            f"- `{owner}` job `{name}` was re-run *{int(run_count)}x* then "
+            f"{cls} — last exit {code}"
+        )
+    body = "\n".join(lines)
+    extra = ""
+    if total_distinct > max_report:
+        extra = f"\n_…and {total_distinct - max_report} more._"
+    text_msg = (
+        f":recycle: *{cluster} - jobs auto-requeued repeatedly then failed "
+        f"(UX flag).* In the last {window_hours:g}h, {total_distinct} job(s) hit "
+        f">={min_run_count} run attempts and did not succeed:\n{body}{extra}\n"
+        f"_PBS kept retrying and gave up — likely a bad submit script, "
+        f"unsatisfiable request, or a recurring node/launch failure. "
+        f"Candidate(s) for outreach._"
+    )
+    return SlackMessage(text=text_msg)
+
+
+# --------------------------------------------------------------------------- #
 # registry
 # --------------------------------------------------------------------------- #
 
@@ -391,6 +509,7 @@ ALL_RULES = {
     "down_node_surge": down_node_surge,
     "queue_drying": queue_drying,
     "repeated_crash": repeated_crash,
+    "repeated_rerun_held": repeated_rerun_held,
 }
 
 

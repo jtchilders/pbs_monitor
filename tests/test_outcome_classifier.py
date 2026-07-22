@@ -236,13 +236,13 @@ class TestMigration:
         m.migrate_to_v1_2_outcome_class()  # Should not raise
 
     def test_schema_version_detection(self, initialized_db):
-        """check_schema_version returns 1.3.0 when occupied_seconds column is present."""
+        """check_schema_version returns 1.4.0 when run_count column is present."""
         from pbs_monitor.database.migrations import DatabaseMigration
 
         m = DatabaseMigration(initialized_db)
-        # A fresh DB initialized from current models already has occupied_seconds.
+        # A fresh DB initialized from current models already has run_count.
         version = m.check_schema_version()
-        assert version == "1.3.0"
+        assert version == "1.4.0"
 
 
 class TestBackfill:

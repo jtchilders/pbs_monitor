@@ -83,6 +83,8 @@ class DatabaseMigration:
             # Check jobs-table columns (v1.2 = outcome_class, v1.3 = occupied_seconds)
             if 'jobs' in existing:
                 job_cols = [c['name'] for c in inspector.get_columns('jobs')]
+                if 'run_count' in job_cols:
+                    return "1.4.0"
                 if 'occupied_seconds' in job_cols:
                     return "1.3.0"
                 if 'outcome_class' in job_cols:
@@ -136,10 +138,16 @@ class DatabaseMigration:
         if current_version == "1.2.0":
             logger.info("Migrating from v1.2.0 to v1.3.0 (adding occupied_seconds column)")
             self.migrate_to_v1_3_occupied_seconds()
+            current_version = "1.3.0"
+
+        # Migration path from 1.3.0 to 1.4.0 (add run_count column)
+        if current_version == "1.3.0":
+            logger.info("Migrating from v1.3.0 to v1.4.0 (adding run_count column)")
+            self.migrate_to_v1_4_run_count()
             return
 
         # Already at latest version
-        if current_version == "1.3.0":
+        if current_version == "1.4.0":
             logger.info("Database schema is up to date")
             return
         
@@ -305,6 +313,71 @@ class DatabaseMigration:
 
         except Exception as e:
             logger.error(f"Failed to migrate to v1.3.0: {str(e)}")
+            raise
+
+    # ------------------------------------------------------------------
+    # v1.4.0 – run_count column (PBS run-attempt count)
+    # ------------------------------------------------------------------
+
+    def migrate_to_v1_4_run_count(self) -> None:
+        """Add ``run_count`` INTEGER column to the jobs table (v1.4).
+
+        ``run_count`` holds PBS's ``run_count`` attribute — the number of times
+        the scheduler attempted to run the job. A value > 1 means the job was
+        requeued/rerun (preemption, node failure, or repeated launch failure).
+        It is used to normalize walltime-efficiency denominators
+        (``requested_walltime x run_count``) so a requeued job's efficiency stays
+        interpretable, and to drive the ``repeated_rerun_held`` Slack alert.
+
+        The migration only adds the (nullable) column plus an index. Existing
+        rows are left NULL and populated separately by
+        :meth:`backfill_run_count`. New collections populate it automatically
+        via ``JobConverter.to_database``.
+
+        **IMPORTANT – DB BACKUP:** alters a potentially large table (~450 k rows
+        on Aurora). On SQLite run ``pbs-monitor database backup`` first; on
+        Postgres use ``pg_dump`` (the CLI backup is SQLite-only).
+
+        The migration is idempotent — safe to run more than once.
+        """
+        logger.info("Migrating to v1.4 – adding run_count column to jobs table")
+        logger.warning(
+            "v1.4 migration: back up the database before running on production data "
+            "(SQLite: pbs-monitor database backup; Postgres: pg_dump)."
+        )
+
+        try:
+            inspector = inspect(self.db_manager.engine)
+            job_cols = [c['name'] for c in inspector.get_columns('jobs')]
+
+            if 'run_count' not in job_cols:
+                logger.info("Adding run_count column to jobs table")
+                with self.db_manager.get_session() as session:
+                    session.execute(text(
+                        "ALTER TABLE jobs ADD COLUMN run_count INTEGER"
+                    ))
+                    session.commit()
+                logger.info("run_count column added successfully")
+            else:
+                logger.info("run_count column already exists")
+
+            # Add an index on run_count for the repeated-rerun alert query
+            # (idempotent via IF NOT EXISTS, supported on both SQLite and Postgres).
+            try:
+                with self.db_manager.get_session() as session:
+                    session.execute(text(
+                        "CREATE INDEX IF NOT EXISTS ix_jobs_run_count "
+                        "ON jobs (run_count)"
+                    ))
+                    session.commit()
+                logger.info("ix_jobs_run_count index ensured")
+            except Exception as idx_err:  # index is an optimization, not required
+                logger.warning(f"Could not create ix_jobs_run_count index: {idx_err}")
+
+            logger.info("Migration to v1.4.0 completed successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to migrate to v1.4.0: {str(e)}")
             raise
 
     # ------------------------------------------------------------------
@@ -585,6 +658,127 @@ class DatabaseMigration:
         logger.info(f"v1.3 occupied_seconds backfill complete: {stats}")
         return stats
 
+    # ------------------------------------------------------------------
+    # v1.4 Backfill – populate run_count for existing rows
+    # ------------------------------------------------------------------
+
+    def backfill_run_count(
+        self, batch_size: int = 5000, dry_run: bool = False
+    ) -> Dict[str, Any]:
+        """Backfill ``run_count`` for existing jobs rows.
+
+        Reads PBS ``run_count`` from ``raw_pbs_data``. When the key is absent but
+        the job has a run record (``resources_used``/``exec_host``/``exec_vnode``)
+        it defaults to 1 (ran at least once). Jobs with no run signal at all are
+        left NULL.
+
+        **IMPORTANT – DB BACKUP:** updates up to ~458 k rows. Back up first
+        (SQLite: ``pbs-monitor database backup``; Postgres: ``pg_dump``).
+
+        Batched (default 5 000 rows/txn) and **idempotent** — only rows whose
+        ``run_count`` is currently NULL are considered, so re-running touches
+        nothing already populated.
+
+        Args:
+            batch_size: Rows per transaction.
+            dry_run:    When True, scan and compute but write nothing.
+
+        Returns:
+            Dict with keys: ``updated``, ``skipped``, ``errors``, ``dry_run``.
+        """
+        import json as _json
+
+        logger.info(
+            f"Starting v1.4 backfill: run_count "
+            f"(batch_size={batch_size}, dry_run={dry_run})"
+        )
+        if dry_run:
+            logger.info("DRY RUN – no rows will be written")
+
+        stats: Dict[str, Any] = {"updated": 0, "skipped": 0, "errors": 0, "dry_run": dry_run}
+
+        with self.db_manager.get_session() as session:
+            offset = 0
+            while True:
+                rows = session.execute(
+                    text(
+                        "SELECT job_id, raw_pbs_data "
+                        "FROM jobs "
+                        "WHERE run_count IS NULL "
+                        "ORDER BY job_id "
+                        f"LIMIT {batch_size} OFFSET {offset}"
+                    )
+                ).fetchall()
+
+                if not rows:
+                    break
+
+                batch_updated = 0
+                batch_skipped = 0
+                for row in rows:
+                    job_id = row[0]
+                    raw_pbs_data = row[1]
+
+                    rc: Optional[int] = None
+                    if raw_pbs_data:
+                        try:
+                            raw = (
+                                raw_pbs_data
+                                if isinstance(raw_pbs_data, dict)
+                                else _json.loads(raw_pbs_data)
+                            )
+                            rc_raw = raw.get("run_count")
+                            if rc_raw is not None:
+                                rc = int(rc_raw)
+                            elif (
+                                raw.get("resources_used")
+                                or raw.get("exec_host")
+                                or raw.get("exec_vnode")
+                            ):
+                                # Ran at least once but PBS didn't record an
+                                # explicit run_count → single attempt.
+                                rc = 1
+                        except (ValueError, TypeError, _json.JSONDecodeError):
+                            stats["errors"] += 1
+                            logger.debug(f"job_id={job_id}: failed to parse run_count from raw_pbs_data")
+
+                    if rc is None:
+                        # No run signal at all; leave NULL. Skipped rows stay in
+                        # the NULL filter, so we page past them via offset.
+                        batch_skipped += 1
+                        continue
+
+                    if not dry_run:
+                        session.execute(
+                            text(
+                                "UPDATE jobs SET run_count = :rc "
+                                "WHERE job_id = :job_id"
+                            ),
+                            {"rc": int(rc), "job_id": job_id},
+                        )
+                    batch_updated += 1
+
+                if not dry_run and batch_updated:
+                    session.commit()
+
+                stats["updated"] += batch_updated
+                stats["skipped"] += batch_skipped
+
+                # In dry-run nothing is written, so NO rows leave the filter →
+                # advance past the whole batch. In a real run, updated rows drop
+                # out of the filter, so only skipped rows remain → advance by
+                # batch_skipped.
+                offset += len(rows) if dry_run else batch_skipped
+
+                logger.info(
+                    f"run_count backfill progress: "
+                    f"updated={stats['updated']}, skipped={stats['skipped']}, "
+                    f"errors={stats['errors']}"
+                )
+
+        logger.info(f"v1.4 run_count backfill complete: {stats}")
+        return stats
+
     def validate_schema(self) -> Dict[str, Any]:
         """Validate database schema"""
         validation_results = {
@@ -853,5 +1047,24 @@ def backfill_occupied_seconds(
     """
     migration = DatabaseMigration(config)
     return migration.backfill_occupied_seconds(
+        batch_size=batch_size, dry_run=dry_run
+    )
+
+
+def backfill_run_count(
+    batch_size: int = 5000,
+    dry_run: bool = False,
+    config: Optional[Config] = None,
+) -> Dict[str, Any]:
+    """Run v1.4 backfill: populate run_count for existing jobs rows.
+
+    Reads PBS ``run_count`` from ``raw_pbs_data``. Requires the v1.4 migration
+    (run_count column) to have run first.
+
+    **IMPORTANT – DB BACKUP FIRST:** updates up to ~458 k rows. Back up first
+    (SQLite: ``pbs-monitor database backup``; Postgres: ``pg_dump``).
+    """
+    migration = DatabaseMigration(config)
+    return migration.backfill_run_count(
         batch_size=batch_size, dry_run=dry_run
     )
