@@ -154,6 +154,13 @@ class Job(Base):
     # actual_runtime_seconds by utilization + walltime-efficiency analytics.
     occupied_seconds = Column(Integer)
     queue_time_seconds = Column(Integer)
+    # Number of times PBS attempted to run this job (raw_pbs_data.run_count),
+    # v1.4. >1 means the job was requeued/rerun (preemption, node failure, or
+    # repeated launch failure). Used to normalize walltime-efficiency denominators
+    # (requested_walltime x run_count) and to drive the repeated-rerun alert.
+    # NULL for rows collected before the column existed and not yet backfilled;
+    # defaults to 1 for jobs seen at least once.
+    run_count = Column(Integer)
     
     # System tracking
     first_seen = Column(DateTime(timezone=True), default=func.now())

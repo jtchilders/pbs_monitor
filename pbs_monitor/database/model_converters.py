@@ -86,6 +86,28 @@ def _compute_occupied_seconds(pbs_job: PBSJob) -> Optional[int]:
     return None
 
 
+def _extract_run_count(pbs_job: PBSJob) -> Optional[int]:
+    """Extract PBS ``run_count`` (number of run attempts) from raw attributes.
+
+    ``run_count`` > 1 means the job was requeued/rerun. Returns the integer
+    value when present; falls back to 1 for a job that has an execution record
+    (it ran at least once) but no explicit ``run_count``; returns None only when
+    there is no signal at all (leaves the column NULL rather than guessing).
+    """
+    raw = getattr(pbs_job, "raw_attributes", None) or {}
+    rc = raw.get("run_count")
+    if rc is not None:
+        try:
+            return int(rc)
+        except (ValueError, TypeError):
+            pass
+    # No explicit run_count: if the job ran at least once, treat as a single
+    # attempt; otherwise leave unknown (None).
+    if raw.get("resources_used") or raw.get("exec_host") or raw.get("exec_vnode"):
+        return 1
+    return None
+
+
 class JobConverter:
     """Converter between PBSJob and database Job models"""
     
@@ -141,6 +163,7 @@ class JobConverter:
             actual_runtime_seconds=pbs_job.actual_runtime_seconds,
             occupied_seconds=_compute_occupied_seconds(pbs_job),
             queue_time_seconds=pbs_job.queue_time_seconds,
+            run_count=_extract_run_count(pbs_job),
             
             # Metadata
             last_updated=datetime.now(),

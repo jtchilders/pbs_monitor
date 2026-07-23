@@ -89,7 +89,7 @@ class TestMigrationV13:
         insp = inspect(m.db_manager.engine)
         cols = [c["name"] for c in insp.get_columns("jobs")]
         assert "occupied_seconds" in cols
-        assert m.check_schema_version() == "1.3.0"
+        assert m.check_schema_version() == "1.4.0"
 
         # Running the explicit migration again must not raise (idempotent).
         m.migrate_to_v1_3_occupied_seconds()

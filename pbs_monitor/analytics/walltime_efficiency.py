@@ -186,29 +186,17 @@ class WalltimeEfficiencyAnalyzer:
       
       efficiency_data = []
       for job in jobs:
-         # Calculate actual runtime
-         actual_runtime_seconds = self._get_actual_runtime_seconds(job)
-         if actual_runtime_seconds is None or actual_runtime_seconds <= 0:
+         eff = self._compute_job_efficiency(job)
+         if eff is None:
             continue
-         
-         # Parse requested walltime
-         requested_walltime_seconds = self._parse_walltime_to_seconds(job.walltime)
-         if requested_walltime_seconds <= 0:
-            continue
-         
-         # Calculate efficiency as percentage
-         efficiency = (actual_runtime_seconds / requested_walltime_seconds) * 100
-         
-         # Cap efficiency at 100% (jobs can't use more time than requested)
-         efficiency = min(efficiency, 100.0)
-         
          efficiency_data.append({
             'job_id': job.job_id,
             'owner': job.owner,
             'project': job.project if job.project else 'No Project',
-            'efficiency': efficiency,
-            'actual_runtime': actual_runtime_seconds,
-            'requested_walltime': requested_walltime_seconds
+            'efficiency': eff['efficiency'],
+            'actual_runtime': eff['actual_runtime'],
+            'requested_walltime': eff['requested_walltime'],
+            'run_count': eff['run_count']
          })
       
       return efficiency_data
@@ -265,33 +253,95 @@ class WalltimeEfficiencyAnalyzer:
       
       efficiency_data = []
       for job in jobs:
-         # Calculate actual runtime
-         actual_runtime_seconds = self._get_actual_runtime_seconds(job)
-         if actual_runtime_seconds is None or actual_runtime_seconds <= 0:
+         eff = self._compute_job_efficiency(job)
+         if eff is None:
             continue
-         
-         # Parse requested walltime
-         requested_walltime_seconds = self._parse_walltime_to_seconds(job.walltime)
-         if requested_walltime_seconds <= 0:
-            continue
-         
-         # Calculate efficiency as percentage
-         efficiency = (actual_runtime_seconds / requested_walltime_seconds) * 100
-         
-         # Cap efficiency at 100% (jobs can't use more time than requested)
-         efficiency = min(efficiency, 100.0)
-         
          efficiency_data.append({
             'job_id': job.job_id,
             'owner': job.owner,
             'project': job.project if job.project else 'Unknown',
-            'efficiency': efficiency,
-            'actual_runtime': actual_runtime_seconds,
-            'requested_walltime': requested_walltime_seconds
+            'efficiency': eff['efficiency'],
+            'actual_runtime': eff['actual_runtime'],
+            'requested_walltime': eff['requested_walltime'],
+            'run_count': eff['run_count']
          })
       
       return efficiency_data
    
+   def _compute_job_efficiency(self, job: Job) -> Optional[Dict[str, Any]]:
+      """Compute rerun-aware walltime efficiency for a single job.
+
+      Efficiency = occupied_seconds / (requested_walltime * run_count), so that
+      a job requeued N times is measured against the N reservations it consumed,
+      not a single one. This keeps the ratio interpretable (<=100%) for
+      requeued jobs instead of relying on a blind cap that laundered a failed,
+      never-useful job into "100% efficient".
+
+      DUPLICATED-LOGIC WARNING — the same rerun-aware efficiency policy
+      (numerator = occupied_seconds w/ actual_runtime_seconds fallback;
+      denominator = requested_walltime * run_count with NULL run_count -> 1;
+      exclude never-ran jobs; cap at 100%) is reimplemented in TWO other
+      places because their input shapes differ (raw tuples / weighted sums):
+        - web/server.py :: api_analytics_walltime_efficiency  (Walltime
+          Accuracy scorecard tab)
+        - web/server.py :: api_leaderboard  (leaderboard efficiency ranking)
+      If you change the definition of efficiency here (e.g. what counts as
+      occupancy, how run_count factors in, the cap), update those two too or
+      the views will silently disagree. (See PR history: the leaderboard once
+      showed >100% because only this function was fixed first.)
+
+      Returns None (job excluded from the distribution) when:
+        - the job never actually occupied nodes (no occupied_seconds / no run
+          record) — e.g. a job held after too many failed launch attempts. Such
+          a job has NO meaningful run/request efficiency; folding it in as 0% or
+          100% both distort the picture, so it is tracked by the repeated-rerun
+          alert instead.
+        - the requested walltime cannot be parsed / is non-positive.
+
+      Args:
+         job: Job database model
+
+      Returns:
+         Dict with keys efficiency, actual_runtime, requested_walltime,
+         run_count — or None to exclude the job.
+      """
+      # Actual node-occupancy time. _get_actual_runtime_seconds prefers
+      # occupied_seconds (PBS-measured), which is None/0 for jobs that never ran.
+      actual_runtime_seconds = self._get_actual_runtime_seconds(job)
+      if actual_runtime_seconds is None or actual_runtime_seconds <= 0:
+         # Never occupied nodes (held/failed-to-launch job). Exclude — no
+         # meaningful efficiency; surfaced via the repeated-rerun alert.
+         return None
+
+      # Requested walltime for a single reservation.
+      requested_walltime_seconds = self._parse_walltime_to_seconds(job.walltime)
+      if requested_walltime_seconds <= 0:
+         return None
+
+      # Rerun-aware denominator: each run attempt consumed a full reservation.
+      # run_count may be NULL on rows collected before v1.4 / not yet
+      # backfilled; treat unknown as a single attempt so we never inflate the
+      # denominator on missing data.
+      run_count = getattr(job, 'run_count', None)
+      if run_count is None or run_count < 1:
+         run_count = 1
+
+      denom = requested_walltime_seconds * run_count
+      efficiency = (actual_runtime_seconds / denom) * 100.0
+
+      # Safety cap for residual outliers (e.g. occupied_seconds slightly past a
+      # single walltime on a run_count==1 job that ran a hair past the wall).
+      # With the rerun-normalized denominator this now only trims genuine small
+      # overruns rather than masking multi-attempt failures.
+      efficiency = min(efficiency, 100.0)
+
+      return {
+         'efficiency': efficiency,
+         'actual_runtime': actual_runtime_seconds,
+         'requested_walltime': requested_walltime_seconds,
+         'run_count': run_count,
+      }
+
    def _get_actual_runtime_seconds(self, job: Job) -> Optional[int]:
       """
       Get actual node-occupancy runtime in seconds.

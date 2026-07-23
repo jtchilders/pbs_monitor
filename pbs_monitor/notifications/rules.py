@@ -36,6 +36,12 @@ Threshold config lives under ``slack.rules.<rule_key>`` in the YAML, e.g.::
           queues: ["prod"]
           min_queued_jobs: 20
           high_util_pct: 85.0
+        repeated_rerun_held:
+          enabled: true
+          min_run_count: 5       # PBS run attempts before we care
+          window_hours: 24
+          require_failure: true  # only jobs that failed/held (not clean requeues)
+          max_report: 5
 
 All thresholds have safe defaults so a rule works before it is tuned.
 """
@@ -104,6 +110,21 @@ def _fmt_exit_code(code: Any) -> str:
         return str(code)
     note = _EXIT_CODE_NOTES.get(ci)
     return f"{ci} ({note})" if note else str(ci)
+
+
+def _short_job_id(job_id: Any) -> str:
+    """Shorten a PBS job id for display in an alert.
+
+    PBS ids are fully-qualified, e.g.
+    ``7257550.polaris-pbs-01.hsn.cm.polaris.alcf.anl.gov``. The numeric prefix
+    before the first dot is the sequence number admins actually use with
+    ``qstat``/``qstat -x``, so keep that and drop the host suffix. Returns the
+    id unchanged if it has no dot or isn't a string.
+    """
+    if job_id is None:
+        return "?"
+    s = str(job_id)
+    return s.split(".", 1)[0] if "." in s else s
 
 
 # --------------------------------------------------------------------------- #
@@ -316,15 +337,17 @@ def repeated_crash(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessag
     # Group by (owner, job_name, outcome_class, exit_status) so we can both count
     # per-signature failures AND surface the distinct raw exit codes. Rolling the
     # exit codes up in Python keeps this portable across SQLite (test copies) and
-    # Postgres (production) -- no GROUP_CONCAT/STRING_AGG dialect split.
+    # Postgres (production) -- no GROUP_CONCAT/STRING_AGG dialect split. We also
+    # pull job_id so the message can show a few sample ids per offender (these
+    # are DISTINCT job_ids -- the user resubmitting the same-named job N times).
     rows = db.execute(
         text(
-            "SELECT owner, job_name, outcome_class, exit_status, COUNT(*) AS n "
+            "SELECT owner, job_name, outcome_class, exit_status, job_id, end_time "
             "FROM jobs "
             "WHERE end_time >= :cut "
             f"  AND outcome_class IN ({placeholders}) "
             "  AND job_name IS NOT NULL AND job_name != '' "
-            "GROUP BY owner, job_name, outcome_class, exit_status"
+            "ORDER BY end_time DESC"
         ),
         {"cut": cutoff},
     ).fetchall()
@@ -332,18 +355,22 @@ def repeated_crash(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessag
     if not rows:
         return None
 
-    # Roll up per (owner, job_name): total failures, per-class counts, exit codes.
+    # Roll up per (owner, job_name): total failures, per-class counts, exit codes,
+    # and a few sample job_ids (most recent first, thanks to ORDER BY end_time).
     from collections import defaultdict
 
     sig_total: Dict[tuple, int] = defaultdict(int)
     sig_classes: Dict[tuple, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
     sig_codes: Dict[tuple, Dict[Any, int]] = defaultdict(lambda: defaultdict(int))
-    for owner, job_name, outcome_class, exit_status, n in rows:
+    sig_job_ids: Dict[tuple, list] = defaultdict(list)
+    _MAX_SAMPLE_IDS = 3
+    for owner, job_name, outcome_class, exit_status, job_id, _end in rows:
         key = (owner, job_name)
-        n = int(n)
-        sig_total[key] += n
-        sig_classes[key][outcome_class] += n
-        sig_codes[key][exit_status] += n
+        sig_total[key] += 1
+        sig_classes[key][outcome_class] += 1
+        sig_codes[key][exit_status] += 1
+        if len(sig_job_ids[key]) < _MAX_SAMPLE_IDS:
+            sig_job_ids[key].append(_short_job_id(job_id))
 
     # Keep only signatures whose TOTAL failures across classes/codes >= min_repeats.
     offenders = [(k, t) for k, t in sig_total.items() if t >= min_repeats]
@@ -368,8 +395,16 @@ def repeated_crash(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessag
             for code, n in sorted(sig_codes[(owner, job_name)].items(), key=lambda x: -x[1])
         ]
         code_summary = ", ".join(code_parts)
+        # A few sample job ids (distinct submissions) so the reader can look one
+        # up directly (e.g. qstat -x <id>) without hunting in the dashboard.
+        ids = sig_job_ids[(owner, job_name)]
+        total_ids = sig_total[(owner, job_name)]
+        ids_str = ", ".join(f"`{i}`" for i in ids)
+        if total_ids > len(ids):
+            ids_str += ", …"
         lines.append(
-            f"- `{owner}` ran `{job_name}` {total}x: *{cls_summary}* — {code_summary}"
+            f"- `{owner}` ran `{job_name}` {total}x: *{cls_summary}* — "
+            f"{code_summary} (ids: {ids_str})"
         )
     body = "\n".join(lines)
     text_msg = (
@@ -377,6 +412,119 @@ def repeated_crash(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessag
         f"In the last {window_hours:g}h:\n{body}\n"
         f"_Likely stuck - candidate(s) for outreach. "
         f"Verify exit-code semantics before contacting users._"
+    )
+    return SlackMessage(text=text_msg)
+
+
+# --------------------------------------------------------------------------- #
+# repeated auto-rerun then held/failed  (UX flag, per-job requeue loop)
+# --------------------------------------------------------------------------- #
+
+def repeated_rerun_held(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessage]:
+    """Fire when PBS auto-requeues a SINGLE job many times and it then fails/held.
+
+    This is distinct from ``repeated_crash``. ``repeated_crash`` catches a *user*
+    resubmitting the same-named job N times (N distinct job_ids). This rule
+    catches PBS *auto-requeuing one job* (one job_id) via ``run_count`` until it
+    gave up -- the ``comment: "job held, too many failed attempts to run and
+    terminated"`` pattern. ``repeated_crash`` cannot see this: it's a single row,
+    so nothing repeats at the (owner, job_name) level.
+
+    A high ``run_count`` that ended in a terminal failure is a strong signal the
+    user needs help (bad submit script, unsatisfiable resource request, a node
+    the job keeps landing on and dying). It also badly distorts naive
+    run/request efficiency, which is what surfaced this rule in the first place.
+
+    Trigger: a finished job with ``run_count >= min_run_count`` whose end_time is
+    within ``window_hours``. By default only genuinely-failed outcomes count
+    (``require_failure: true``) so a job that was preempted many times but
+    ultimately succeeded doesn't page; set ``require_failure: false`` to alert on
+    ANY heavily-requeued job.
+
+    Config (``slack.rules.repeated_rerun_held``):
+        enabled          : bool  (default true)
+        min_run_count    : int   (default 5)   -- attempts before we care
+        window_hours     : float (default 24)
+        require_failure  : bool  (default true) -- only failed/held outcomes
+        max_report       : int   (default 5)    -- jobs listed in the message
+    """
+    rc = _rule_cfg(cfg, "repeated_rerun_held")
+    min_run_count = int(rc.get("min_run_count", 5))
+    window_hours = float(rc.get("window_hours", 24.0))
+    require_failure = bool(rc.get("require_failure", True))
+    max_report = int(rc.get("max_report", 5))
+
+    cutoff = now - timedelta(hours=window_hours)
+
+    # Finished states: the job has reached a terminal record so run_count is
+    # final. SQLAlchemy stores SQLEnum(JobState) as the enum NAME, so the DB
+    # holds 'FINISHED'/'COMPLETED' (uppercase), NOT the enum values 'F'/'C'.
+    sql = (
+        "SELECT job_id, owner, job_name, run_count, outcome_class, exit_status, end_time "
+        "FROM jobs "
+        "WHERE run_count >= :minrc "
+        "  AND end_time >= :cut "
+        "  AND state IN ('FINISHED', 'COMPLETED') "
+    )
+    if require_failure:
+        # Only jobs that ultimately failed/held. For THIS rule, "failure" is
+        # broader than repeated_crash's _REAL_FAILURE_CLASSES: the dominant
+        # outcome for a job PBS requeues to death is `could_not_run` (exit -3 /
+        # "job held, too many failed attempts to run and terminated") -- verified
+        # on real Aurora data, ~all of the top offenders are could_not_run/-3.
+        # That class is deliberately EXCLUDED from repeated_crash (it's not a
+        # user-code crash) but IS the point here. Include it plus the real-
+        # failure classes; a non-zero exit code also counts as a backstop.
+        trigger_classes = list(_REAL_FAILURE_CLASSES) + ["could_not_run"]
+        placeholders = ",".join(f"'{c}'" for c in trigger_classes)
+        sql += (
+            f"  AND (outcome_class IN ({placeholders}) "
+            "       OR (exit_status IS NOT NULL AND exit_status != 0)) "
+        )
+    sql += "ORDER BY run_count DESC, end_time DESC"
+
+    rows = db.execute(text(sql), {"minrc": min_run_count, "cut": cutoff}).fetchall()
+    if not rows:
+        return None
+
+    # Dedupe by (owner, job_name, run_count, exit_status): the jobs table can
+    # hold several rows for the same logical job (requeue history / re-collection
+    # of the same job_id family), and listing the same offender five times is
+    # noise. Keep first occurrence (already ordered by run_count DESC).
+    seen = set()
+    distinct = []
+    for row in rows:
+        job_id, owner, job_name, run_count, outcome_class, exit_status, _end = row
+        key = (owner, job_name, int(run_count), exit_status)
+        if key in seen:
+            continue
+        seen.add(key)
+        distinct.append(row)
+
+    total_distinct = len(distinct)
+    offenders = distinct[:max_report]
+    cluster = _cluster(cfg)
+    lines = []
+    for job_id, owner, job_name, run_count, outcome_class, exit_status, _end in offenders:
+        name = job_name or "(unnamed)"
+        code = _fmt_exit_code(exit_status)
+        cls = outcome_class or "unknown"
+        jid = _short_job_id(job_id)
+        lines.append(
+            f"- `{owner}` job `{name}` (`{jid}`) was re-run *{int(run_count)}x* "
+            f"then {cls} — last exit {code}"
+        )
+    body = "\n".join(lines)
+    extra = ""
+    if total_distinct > max_report:
+        extra = f"\n_…and {total_distinct - max_report} more._"
+    text_msg = (
+        f":recycle: *{cluster} - jobs auto-requeued repeatedly then failed "
+        f"(UX flag).* In the last {window_hours:g}h, {total_distinct} job(s) hit "
+        f">={min_run_count} run attempts and did not succeed:\n{body}{extra}\n"
+        f"_PBS kept retrying and gave up — likely a bad submit script, "
+        f"unsatisfiable request, or a recurring node/launch failure. "
+        f"Candidate(s) for outreach._"
     )
     return SlackMessage(text=text_msg)
 
@@ -391,6 +539,7 @@ ALL_RULES = {
     "down_node_surge": down_node_surge,
     "queue_drying": queue_drying,
     "repeated_crash": repeated_crash,
+    "repeated_rerun_held": repeated_rerun_held,
 }
 
 

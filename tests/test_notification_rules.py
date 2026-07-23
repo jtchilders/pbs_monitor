@@ -58,6 +58,18 @@ def _job(db, job_id, owner, job_name, outcome_class, exit_status, end_time):
 NOW = datetime(2026, 6, 4, 21, 10)
 
 
+# ---- _short_job_id helper -------------------------------------------------- #
+
+def test_short_job_id_strips_host_suffix():
+    assert rules._short_job_id(
+        "7257550.polaris-pbs-01.hsn.cm.polaris.alcf.anl.gov") == "7257550"
+    # No dot -> unchanged.
+    assert rules._short_job_id("12345") == "12345"
+    # Non-string / None handled gracefully.
+    assert rules._short_job_id(None) == "?"
+    assert rules._short_job_id(98765) == "98765"
+
+
 # ---- queue_drying: routing-queue aggregation ------------------------------- #
 
 def test_queue_drying_healthy_backlog_does_not_fire(db):
@@ -131,6 +143,9 @@ def test_repeated_crash_fires_on_looping_user(db):
     # The exit code and its class must be in the message.
     assert "exit 1 x5" in msg.text
     assert "error x5" in msg.text
+    # Sample job ids are surfaced (bare ids here have no host suffix).
+    assert "ids:" in msg.text
+    assert "job0" in msg.text or "job4" in msg.text
 
 
 def test_repeated_crash_excludes_walltime_by_default(db):
@@ -222,3 +237,111 @@ def test_disabled_rule_skipped_by_evaluate_all(db):
                       rules={"queue_drying": {"enabled": False}})
     res = rules.evaluate_all(db, cfg, NOW)
     assert res["queue_drying"] is None
+
+
+# ---- repeated_rerun_held: single-job PBS auto-requeue loop ------------------ #
+#
+# This rule needs run_count + state columns the shared `db` fixture lacks, so it
+# uses its own fixture/table.
+
+@pytest.fixture
+def rerun_db():
+    eng = create_engine("sqlite:///:memory:")
+    with eng.begin() as cx:
+        cx.execute(text(
+            "CREATE TABLE jobs("
+            "job_id TEXT, owner TEXT, job_name TEXT, state TEXT, "
+            "run_count INT, outcome_class TEXT, exit_status INT, end_time TEXT)"
+        ))
+    session = sessionmaker(bind=eng)()
+    yield session
+    session.close()
+
+
+def _rjob(db, job_id, owner, job_name, state, run_count, outcome_class,
+          exit_status, end_time):
+    db.execute(
+        text("INSERT INTO jobs VALUES(:j,:o,:n,:s,:rc,:c,:e,:t)"),
+        {"j": job_id, "o": owner, "n": job_name, "s": state, "rc": run_count,
+         "c": outcome_class, "e": exit_status, "t": end_time},
+    )
+
+
+def test_repeated_rerun_held_fires_on_held_after_retries(rerun_db):
+    # The classic case: one job PBS requeued 21x then held (could_not_run/-3).
+    _rjob(rerun_db, "7257550.polaris-pbs-01.hsn.cm.polaris.alcf.anl.gov",
+          "vaseline555", "gpt2m", "FINISHED", 21,
+          "could_not_run", -3, "2026-06-04 19:21:15")
+    rerun_db.commit()
+    cfg = SlackConfig(enabled=True, cluster_label="Polaris",
+                      rules={"repeated_rerun_held":
+                             {"enabled": True, "min_run_count": 5,
+                              "window_hours": 24}})
+    msg = rules.repeated_rerun_held(rerun_db, cfg, NOW)
+    assert msg is not None
+    assert "vaseline555" in msg.text and "gpt2m" in msg.text
+    assert "21x" in msg.text
+    assert "Polaris" in msg.text
+    # The job id is shown, shortened to the numeric prefix (host suffix dropped).
+    assert "7257550" in msg.text
+    assert "polaris-pbs-01" not in msg.text
+
+
+def test_repeated_rerun_held_ignores_low_run_count(rerun_db):
+    # run_count below threshold -> no alert, even though it failed.
+    _rjob(rerun_db, "j1", "bob", "run", "FINISHED", 3, "error", 1,
+          "2026-06-04 20:00:00")
+    rerun_db.commit()
+    cfg = SlackConfig(enabled=True, cluster_label="Aurora",
+                      rules={"repeated_rerun_held":
+                             {"enabled": True, "min_run_count": 5,
+                              "window_hours": 24}})
+    assert rules.repeated_rerun_held(rerun_db, cfg, NOW) is None
+
+
+def test_repeated_rerun_held_ignores_successful_requeue_by_default(rerun_db):
+    # Requeued many times but ultimately SUCCEEDED (preemption, not a stuck loop)
+    # -> excluded by default (require_failure=True).
+    _rjob(rerun_db, "j2", "carol", "run", "FINISHED", 12, "success", 0,
+          "2026-06-04 20:00:00")
+    rerun_db.commit()
+    cfg = SlackConfig(enabled=True, cluster_label="Aurora",
+                      rules={"repeated_rerun_held":
+                             {"enabled": True, "min_run_count": 5,
+                              "window_hours": 24}})
+    assert rules.repeated_rerun_held(rerun_db, cfg, NOW) is None
+    # ...but with require_failure=False it DOES fire.
+    cfg2 = SlackConfig(enabled=True, cluster_label="Aurora",
+                       rules={"repeated_rerun_held":
+                              {"enabled": True, "min_run_count": 5,
+                               "window_hours": 24, "require_failure": False}})
+    assert rules.repeated_rerun_held(rerun_db, cfg2, NOW) is not None
+
+
+def test_repeated_rerun_held_dedupes_duplicate_rows(rerun_db):
+    # Same logical job present as several rows -> listed once, counted once.
+    for i in range(4):
+        _rjob(rerun_db, f"dup{i}", "dave", "same_job", "FINISHED", 21,
+              "could_not_run", -3, "2026-06-04 19:00:00")
+    rerun_db.commit()
+    cfg = SlackConfig(enabled=True, cluster_label="Aurora",
+                      rules={"repeated_rerun_held":
+                             {"enabled": True, "min_run_count": 5,
+                              "window_hours": 24, "max_report": 5}})
+    msg = rules.repeated_rerun_held(rerun_db, cfg, NOW)
+    assert msg is not None
+    # Only one distinct offender -> "1 job(s)" and a single bullet line.
+    assert "1 job(s)" in msg.text
+    assert msg.text.count("`dave`") == 1
+
+
+def test_repeated_rerun_held_outside_window_does_not_fire(rerun_db):
+    # Failed 21x but ended long before the window -> no alert.
+    _rjob(rerun_db, "old", "erin", "run", "FINISHED", 21, "could_not_run", -3,
+          "2026-05-01 00:00:00")
+    rerun_db.commit()
+    cfg = SlackConfig(enabled=True, cluster_label="Aurora",
+                      rules={"repeated_rerun_held":
+                             {"enabled": True, "min_run_count": 5,
+                              "window_hours": 24}})
+    assert rules.repeated_rerun_held(rerun_db, cfg, NOW) is None

@@ -27,6 +27,7 @@ from ..database.migrations import (
     backup_database, restore_database, clean_old_data, get_database_info,
     backfill_exit_status_and_outcome_class,
     backfill_occupied_seconds,
+    backfill_run_count,
 )
 from ..utils.formatters import (
    format_duration, format_timestamp, format_memory,
@@ -1755,6 +1756,25 @@ class DatabaseCommand(BaseCommand):
       print(f"  Skipped : {occ_result.get('skipped', 0):,}  (never-ran jobs left NULL)")
       print(f"  Errors  : {occ_result.get('errors', 0):,}")
       print(f"  Dry-run : {occ_result.get('dry_run', dry_run)}")
+
+      print(f"\nRunning run_count backfill (batch_size={batch_size}, dry_run={dry_run})…")
+      try:
+         rc_result = backfill_run_count(
+            batch_size=batch_size,
+            dry_run=dry_run,
+            config=self.config,
+         )
+      except Exception as e:
+         print(f"run_count backfill failed: {e}")
+         print("(Did the v1.4 migration run? Try: pbs-monitor database migrate)")
+         return 1
+
+      print()
+      print("run_count backfill complete:")
+      print(f"  Updated : {rc_result.get('updated', 0):,}")
+      print(f"  Skipped : {rc_result.get('skipped', 0):,}  (no run signal, left NULL)")
+      print(f"  Errors  : {rc_result.get('errors', 0):,}")
+      print(f"  Dry-run : {rc_result.get('dry_run', dry_run)}")
       return 0
 
 
