@@ -2170,6 +2170,16 @@ def create_app(config=None) -> FastAPI:
 
         Implements WalltimeEfficiencyAnalyzer logic directly against the shared db session.
         Returns ranked table rows (plan §5.3, reuse WalltimeEfficiencyAnalyzer patterns).
+
+        DUPLICATED-LOGIC WARNING — the rerun-aware efficiency policy here
+        (numerator = occupied_seconds w/ actual_runtime_seconds fallback;
+        denominator = requested_walltime * run_count, NULL run_count -> 1;
+        exclude never-ran; cap at 100%) is ALSO implemented in:
+          - analytics/walltime_efficiency.py :: _compute_job_efficiency (CLI)
+          - web/server.py :: api_leaderboard (leaderboard efficiency ranking)
+        Kept separate because input shapes differ (this uses with_entities
+        tuples). If you change the efficiency definition, change all three or
+        the views will silently disagree.
         """
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=days)
@@ -2312,6 +2322,16 @@ def create_app(config=None) -> FastAPI:
         denominator is multiplied by run_count so a job requeued N times is
         measured against the N reservations it consumed. This prevents a job PBS
         re-ran many times from reading far above 100%.
+
+        DUPLICATED-LOGIC WARNING — the rerun-aware efficiency policy here
+        (numerator = occupied_seconds w/ actual_runtime_seconds fallback;
+        denominator = requested_walltime * run_count, NULL run_count -> 1;
+        exclude never-ran; cap at 100%) is ALSO implemented in:
+          - analytics/walltime_efficiency.py :: _compute_job_efficiency (CLI)
+          - web/server.py :: api_analytics_walltime_efficiency (scorecard tab)
+        Kept separate because this one is a node-hour-WEIGHTED sum, not a
+        per-job mean. If you change the efficiency definition, change all
+        three or the views will silently disagree.
         """
         MIN_RUNTIME_SEC = 1800  # 30 minutes
         now = datetime.now(timezone.utc)

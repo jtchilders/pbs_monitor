@@ -58,6 +58,18 @@ def _job(db, job_id, owner, job_name, outcome_class, exit_status, end_time):
 NOW = datetime(2026, 6, 4, 21, 10)
 
 
+# ---- _short_job_id helper -------------------------------------------------- #
+
+def test_short_job_id_strips_host_suffix():
+    assert rules._short_job_id(
+        "7257550.polaris-pbs-01.hsn.cm.polaris.alcf.anl.gov") == "7257550"
+    # No dot -> unchanged.
+    assert rules._short_job_id("12345") == "12345"
+    # Non-string / None handled gracefully.
+    assert rules._short_job_id(None) == "?"
+    assert rules._short_job_id(98765) == "98765"
+
+
 # ---- queue_drying: routing-queue aggregation ------------------------------- #
 
 def test_queue_drying_healthy_backlog_does_not_fire(db):
@@ -131,6 +143,9 @@ def test_repeated_crash_fires_on_looping_user(db):
     # The exit code and its class must be in the message.
     assert "exit 1 x5" in msg.text
     assert "error x5" in msg.text
+    # Sample job ids are surfaced (bare ids here have no host suffix).
+    assert "ids:" in msg.text
+    assert "job0" in msg.text or "job4" in msg.text
 
 
 def test_repeated_crash_excludes_walltime_by_default(db):
@@ -254,7 +269,8 @@ def _rjob(db, job_id, owner, job_name, state, run_count, outcome_class,
 
 def test_repeated_rerun_held_fires_on_held_after_retries(rerun_db):
     # The classic case: one job PBS requeued 21x then held (could_not_run/-3).
-    _rjob(rerun_db, "7257550", "vaseline555", "gpt2m", "FINISHED", 21,
+    _rjob(rerun_db, "7257550.polaris-pbs-01.hsn.cm.polaris.alcf.anl.gov",
+          "vaseline555", "gpt2m", "FINISHED", 21,
           "could_not_run", -3, "2026-06-04 19:21:15")
     rerun_db.commit()
     cfg = SlackConfig(enabled=True, cluster_label="Polaris",
@@ -266,6 +282,9 @@ def test_repeated_rerun_held_fires_on_held_after_retries(rerun_db):
     assert "vaseline555" in msg.text and "gpt2m" in msg.text
     assert "21x" in msg.text
     assert "Polaris" in msg.text
+    # The job id is shown, shortened to the numeric prefix (host suffix dropped).
+    assert "7257550" in msg.text
+    assert "polaris-pbs-01" not in msg.text
 
 
 def test_repeated_rerun_held_ignores_low_run_count(rerun_db):

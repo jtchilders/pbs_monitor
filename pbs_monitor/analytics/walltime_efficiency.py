@@ -277,6 +277,19 @@ class WalltimeEfficiencyAnalyzer:
       requeued jobs instead of relying on a blind cap that laundered a failed,
       never-useful job into "100% efficient".
 
+      DUPLICATED-LOGIC WARNING — the same rerun-aware efficiency policy
+      (numerator = occupied_seconds w/ actual_runtime_seconds fallback;
+      denominator = requested_walltime * run_count with NULL run_count -> 1;
+      exclude never-ran jobs; cap at 100%) is reimplemented in TWO other
+      places because their input shapes differ (raw tuples / weighted sums):
+        - web/server.py :: api_analytics_walltime_efficiency  (Walltime
+          Accuracy scorecard tab)
+        - web/server.py :: api_leaderboard  (leaderboard efficiency ranking)
+      If you change the definition of efficiency here (e.g. what counts as
+      occupancy, how run_count factors in, the cap), update those two too or
+      the views will silently disagree. (See PR history: the leaderboard once
+      showed >100% because only this function was fixed first.)
+
       Returns None (job excluded from the distribution) when:
         - the job never actually occupied nodes (no occupied_seconds / no run
           record) — e.g. a job held after too many failed launch attempts. Such

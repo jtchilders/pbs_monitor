@@ -112,6 +112,21 @@ def _fmt_exit_code(code: Any) -> str:
     return f"{ci} ({note})" if note else str(ci)
 
 
+def _short_job_id(job_id: Any) -> str:
+    """Shorten a PBS job id for display in an alert.
+
+    PBS ids are fully-qualified, e.g.
+    ``7257550.polaris-pbs-01.hsn.cm.polaris.alcf.anl.gov``. The numeric prefix
+    before the first dot is the sequence number admins actually use with
+    ``qstat``/``qstat -x``, so keep that and drop the host suffix. Returns the
+    id unchanged if it has no dot or isn't a string.
+    """
+    if job_id is None:
+        return "?"
+    s = str(job_id)
+    return s.split(".", 1)[0] if "." in s else s
+
+
 # --------------------------------------------------------------------------- #
 # S3 -- Down / offline node surge  (system-level, no exit-code semantics)
 # --------------------------------------------------------------------------- #
@@ -322,15 +337,17 @@ def repeated_crash(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessag
     # Group by (owner, job_name, outcome_class, exit_status) so we can both count
     # per-signature failures AND surface the distinct raw exit codes. Rolling the
     # exit codes up in Python keeps this portable across SQLite (test copies) and
-    # Postgres (production) -- no GROUP_CONCAT/STRING_AGG dialect split.
+    # Postgres (production) -- no GROUP_CONCAT/STRING_AGG dialect split. We also
+    # pull job_id so the message can show a few sample ids per offender (these
+    # are DISTINCT job_ids -- the user resubmitting the same-named job N times).
     rows = db.execute(
         text(
-            "SELECT owner, job_name, outcome_class, exit_status, COUNT(*) AS n "
+            "SELECT owner, job_name, outcome_class, exit_status, job_id, end_time "
             "FROM jobs "
             "WHERE end_time >= :cut "
             f"  AND outcome_class IN ({placeholders}) "
             "  AND job_name IS NOT NULL AND job_name != '' "
-            "GROUP BY owner, job_name, outcome_class, exit_status"
+            "ORDER BY end_time DESC"
         ),
         {"cut": cutoff},
     ).fetchall()
@@ -338,18 +355,22 @@ def repeated_crash(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessag
     if not rows:
         return None
 
-    # Roll up per (owner, job_name): total failures, per-class counts, exit codes.
+    # Roll up per (owner, job_name): total failures, per-class counts, exit codes,
+    # and a few sample job_ids (most recent first, thanks to ORDER BY end_time).
     from collections import defaultdict
 
     sig_total: Dict[tuple, int] = defaultdict(int)
     sig_classes: Dict[tuple, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
     sig_codes: Dict[tuple, Dict[Any, int]] = defaultdict(lambda: defaultdict(int))
-    for owner, job_name, outcome_class, exit_status, n in rows:
+    sig_job_ids: Dict[tuple, list] = defaultdict(list)
+    _MAX_SAMPLE_IDS = 3
+    for owner, job_name, outcome_class, exit_status, job_id, _end in rows:
         key = (owner, job_name)
-        n = int(n)
-        sig_total[key] += n
-        sig_classes[key][outcome_class] += n
-        sig_codes[key][exit_status] += n
+        sig_total[key] += 1
+        sig_classes[key][outcome_class] += 1
+        sig_codes[key][exit_status] += 1
+        if len(sig_job_ids[key]) < _MAX_SAMPLE_IDS:
+            sig_job_ids[key].append(_short_job_id(job_id))
 
     # Keep only signatures whose TOTAL failures across classes/codes >= min_repeats.
     offenders = [(k, t) for k, t in sig_total.items() if t >= min_repeats]
@@ -374,8 +395,16 @@ def repeated_crash(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessag
             for code, n in sorted(sig_codes[(owner, job_name)].items(), key=lambda x: -x[1])
         ]
         code_summary = ", ".join(code_parts)
+        # A few sample job ids (distinct submissions) so the reader can look one
+        # up directly (e.g. qstat -x <id>) without hunting in the dashboard.
+        ids = sig_job_ids[(owner, job_name)]
+        total_ids = sig_total[(owner, job_name)]
+        ids_str = ", ".join(f"`{i}`" for i in ids)
+        if total_ids > len(ids):
+            ids_str += ", …"
         lines.append(
-            f"- `{owner}` ran `{job_name}` {total}x: *{cls_summary}* — {code_summary}"
+            f"- `{owner}` ran `{job_name}` {total}x: *{cls_summary}* — "
+            f"{code_summary} (ids: {ids_str})"
         )
     body = "\n".join(lines)
     text_msg = (
@@ -431,7 +460,7 @@ def repeated_rerun_held(db: Session, cfg: Any, now: datetime) -> Optional[SlackM
     # final. SQLAlchemy stores SQLEnum(JobState) as the enum NAME, so the DB
     # holds 'FINISHED'/'COMPLETED' (uppercase), NOT the enum values 'F'/'C'.
     sql = (
-        "SELECT owner, job_name, run_count, outcome_class, exit_status, end_time "
+        "SELECT job_id, owner, job_name, run_count, outcome_class, exit_status, end_time "
         "FROM jobs "
         "WHERE run_count >= :minrc "
         "  AND end_time >= :cut "
@@ -465,7 +494,7 @@ def repeated_rerun_held(db: Session, cfg: Any, now: datetime) -> Optional[SlackM
     seen = set()
     distinct = []
     for row in rows:
-        owner, job_name, run_count, outcome_class, exit_status, _end = row
+        job_id, owner, job_name, run_count, outcome_class, exit_status, _end = row
         key = (owner, job_name, int(run_count), exit_status)
         if key in seen:
             continue
@@ -476,13 +505,14 @@ def repeated_rerun_held(db: Session, cfg: Any, now: datetime) -> Optional[SlackM
     offenders = distinct[:max_report]
     cluster = _cluster(cfg)
     lines = []
-    for owner, job_name, run_count, outcome_class, exit_status, _end in offenders:
+    for job_id, owner, job_name, run_count, outcome_class, exit_status, _end in offenders:
         name = job_name or "(unnamed)"
         code = _fmt_exit_code(exit_status)
         cls = outcome_class or "unknown"
+        jid = _short_job_id(job_id)
         lines.append(
-            f"- `{owner}` job `{name}` was re-run *{int(run_count)}x* then "
-            f"{cls} — last exit {code}"
+            f"- `{owner}` job `{name}` (`{jid}`) was re-run *{int(run_count)}x* "
+            f"then {cls} — last exit {code}"
         )
     body = "\n".join(lines)
     extra = ""
