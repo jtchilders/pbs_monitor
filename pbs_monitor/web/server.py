@@ -2206,23 +2206,33 @@ def create_app(config=None) -> FastAPI:
                 Job.state == JobState.FINISHED,
                 Job.end_time >= cutoff,
                 Job.walltime.isnot(None),
-                Job.actual_runtime_seconds.isnot(None),
-                Job.actual_runtime_seconds > 0,
             )
             group_col_attr = Job.owner if group_by != "project" else Job.project
             q = q.with_entities(
-                Job.walltime, Job.actual_runtime_seconds, group_col_attr
+                Job.walltime, Job.actual_runtime_seconds, Job.occupied_seconds,
+                Job.run_count, group_col_attr
             )
             rows_raw = q.all()
 
             # Aggregate by group
             stats: dict[str, dict] = {}
-            for wt_val, actual_val, grp_val in rows_raw:
+            for wt_val, actual_val, occ_val, run_count_val, grp_val in rows_raw:
                 req_sec = _parse_wt_sec(wt_val)
                 if req_sec <= 0:
                     continue
-                actual = actual_val or 0
-                eff = min((actual / req_sec) * 100.0, 100.0)
+                # Rerun-safe node-occupancy: prefer occupied_seconds (excludes
+                # requeue gaps), fall back to actual_runtime_seconds for rows not
+                # yet backfilled. A job that never occupied nodes (both absent/0)
+                # is EXCLUDED -- it has no meaningful run/request efficiency and
+                # must not be laundered into 100% by the cap.
+                occ = occ_val if (occ_val is not None and occ_val > 0) else (actual_val or 0)
+                if occ <= 0:
+                    continue
+                # Rerun-aware denominator: walltime * run_count (NULL -> 1).
+                run_count = run_count_val or 1
+                if run_count < 1:
+                    run_count = 1
+                eff = min((occ / (req_sec * run_count)) * 100.0, 100.0)
                 name = grp_val or "unknown"
                 if name not in stats:
                     stats[name] = {"effs": [], "jobs": 0}
@@ -2293,9 +2303,15 @@ def create_app(config=None) -> FastAPI:
     ):
         """Leaderboard: top/bottom 10 by node-hours and efficiency.
 
-        Node-hours: RUNNING (elapsed so far) + FINISHED jobs where runtime > 30min.
-        Efficiency: FINISHED jobs only, runtime > 30min. Weighted by node-hours:
-            efficiency = sum(actual_runtime * nodes) / sum(walltime_seconds * nodes)
+        Node-hours: RUNNING (elapsed so far) + FINISHED jobs where occupancy > 30min.
+        Efficiency: FINISHED jobs only, occupancy > 30min. Rerun-aware and weighted
+        by node-hours:
+            efficiency = sum(occupied * nodes) / sum(walltime_seconds * run_count * nodes)
+        where `occupied` is PBS-measured node-occupancy time (occupied_seconds),
+        which excludes HELD/QUEUED gaps for requeued/preempted jobs, and the
+        denominator is multiplied by run_count so a job requeued N times is
+        measured against the N reservations it consumed. This prevents a job PBS
+        re-ran many times from reading far above 100%.
         """
         MIN_RUNTIME_SEC = 1800  # 30 minutes
         now = datetime.now(timezone.utc)
@@ -2303,8 +2319,21 @@ def create_app(config=None) -> FastAPI:
 
         group_col = Job.owner if group_by == "user" else Job.project
 
+        def _occupancy_seconds(job) -> int:
+            """PBS-measured node-occupancy seconds, rerun-safe.
+
+            Prefer occupied_seconds (resources_used.walltime, excludes requeue
+            gaps). Fall back to actual_runtime_seconds (elapsed start..end span)
+            only when occupied_seconds is unpopulated (pre-v1.3 rows / not yet
+            backfilled). Never-ran jobs have neither -> 0.
+            """
+            occ = getattr(job, "occupied_seconds", None)
+            if occ is not None and occ > 0:
+                return occ
+            return job.actual_runtime_seconds or 0
+
         def _fetch():
-            # ── node-hours: RUNNING (elapsed) + FINISHED (actual runtime > 30min) ──
+            # ── node-hours: RUNNING (elapsed) + FINISHED (occupancy > 30min) ──
             nh_map: dict[str, float] = {}
 
             # Running jobs – elapsed node-hours so far
@@ -2328,33 +2357,46 @@ def create_app(config=None) -> FastAPI:
                 nodes = job.nodes or 1
                 nh_map[key] = nh_map.get(key, 0.0) + elapsed * nodes / 3600.0
 
-            # Finished jobs – actual_runtime_seconds, runtime > 30min
+            # Finished jobs – measured node-occupancy, occupancy > 30min.
+            # Filter on end_time in window; the occupancy threshold is applied in
+            # Python against occupied_seconds (with actual_runtime fallback) so a
+            # requeued job's inflated start..end span no longer sneaks past a
+            # SQL actual_runtime_seconds filter.
             finished = (
                 db.query(Job)
                 .filter(
                     Job.state == JobState.FINISHED,
                     Job.end_time >= cutoff,
-                    Job.actual_runtime_seconds > MIN_RUNTIME_SEC,
                 )
                 .all()
             )
 
             # ── efficiency: finished jobs only ──
-            # Weighted: sum(actual * nodes) / sum(walltime * nodes)
-            eff_actual: dict[str, float] = {}   # sum of actual_runtime * nodes
-            eff_requested: dict[str, float] = {}  # sum of walltime_seconds * nodes
+            # Rerun-aware weighted efficiency:
+            #   sum(occupied * nodes) / sum(walltime * run_count * nodes)
+            eff_actual: dict[str, float] = {}     # sum of occupied * nodes
+            eff_requested: dict[str, float] = {}  # sum of walltime * run_count * nodes
 
             for job in finished:
+                occ = _occupancy_seconds(job)
+                if occ <= MIN_RUNTIME_SEC:
+                    # Never ran, or ran < 30 min: excluded from both node-hours
+                    # and efficiency (a never-ran requeued job occupied nothing).
+                    continue
                 key = (job.owner if group_by == "user" else job.project) or "unknown"
                 nodes = job.nodes or 1
-                actual = job.actual_runtime_seconds or 0
-                nh_map[key] = nh_map.get(key, 0.0) + actual * nodes / 3600.0
+                nh_map[key] = nh_map.get(key, 0.0) + occ * nodes / 3600.0
 
-                # Efficiency denominator: walltime_seconds
+                # Efficiency denominator: walltime_seconds * run_count. run_count
+                # may be NULL on rows not yet backfilled -> treat as 1 so missing
+                # data never inflates the denominator.
                 wall = _parse_walltime(job.walltime)
                 if wall and wall > 0:
-                    eff_actual[key]     = eff_actual.get(key, 0.0)     + actual * nodes
-                    eff_requested[key]  = eff_requested.get(key, 0.0)  + wall   * nodes
+                    run_count = getattr(job, "run_count", None) or 1
+                    if run_count < 1:
+                        run_count = 1
+                    eff_actual[key]    = eff_actual.get(key, 0.0)    + occ * nodes
+                    eff_requested[key] = eff_requested.get(key, 0.0) + wall * run_count * nodes
 
             # Build unified records
             all_keys = set(nh_map) | set(eff_actual)
@@ -2363,7 +2405,10 @@ def create_app(config=None) -> FastAPI:
                 nh = nh_map.get(key, 0.0)
                 req = eff_requested.get(key, 0.0)
                 act = eff_actual.get(key, 0.0)
-                eff = round(act / req * 100, 1) if req > 0 else None
+                # Cap at 100%: with the rerun-normalized denominator this only
+                # trims genuine small overruns (a job that ran a hair past its
+                # single wall), not the multi-attempt inflation.
+                eff = round(min(act / req * 100, 100.0), 1) if req > 0 else None
                 records.append({
                     "name": key,
                     "node_hours": round(nh, 1),
