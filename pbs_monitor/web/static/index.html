@@ -250,14 +250,14 @@
                         <thead>
                             <tr>
                                 <th class="status-col"></th>
-                                <th>ID</th>
-                                <th>Owner</th>
-                                <th>Project</th>
-                                <th>Allocation</th>
-                                <th>Queue</th>
-                                <th>Nodes</th>
-                                <th>Walltime</th>
-                                <th>Queued Time</th>
+                                <th @click="sortHeldJobs('job_id')">ID<span v-if="heldSortKey==='job_id'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
+                                <th @click="sortHeldJobs('owner')">Owner<span v-if="heldSortKey==='owner'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
+                                <th @click="sortHeldJobs('project')">Project<span v-if="heldSortKey==='project'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
+                                <th @click="sortHeldJobs('allocation_type')">Allocation<span v-if="heldSortKey==='allocation_type'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
+                                <th @click="sortHeldJobs('queue')">Queue<span v-if="heldSortKey==='queue'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
+                                <th @click="sortHeldJobs('nodes')">Nodes<span v-if="heldSortKey==='nodes'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
+                                <th @click="sortHeldJobs('walltime')">Walltime<span v-if="heldSortKey==='walltime'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
+                                <th @click="sortHeldJobs('queue_time_seconds')">Queued Time<span v-if="heldSortKey==='queue_time_seconds'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
                             </tr>
                         </thead>
                         <tbody>
@@ -431,6 +431,6 @@
 
 <script src="js/colors.js"></script>
 <script src="/js/job-modal.js?v=2"></script>
-<script src="js/app.js?v=13"></script>
+<script src="js/app.js?v=14"></script>
 </body>
 </html>
