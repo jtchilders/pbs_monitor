@@ -1126,6 +1126,7 @@ canvas {
 .bl-item { display: flex; align-items: center; gap: 0.3rem; }
 .bl-never { color: #ef4444; }
 .bl-misc  { color: #f59e0b; }
+.bl-failed { color: #ef4444; }
 
 /* Left border stripe on blocked rows */
 .job-blocked-never {
@@ -1133,6 +1134,15 @@ canvas {
 }
 .job-blocked-misc {
     border-left: 4px solid #f59e0b;
+}
+/* Held jobs PBS gave up on (too many failed run attempts) — will not run
+   without manual intervention. Highlighted red + tinted background. */
+.job-blocked-failed {
+    border-left: 4px solid #ef4444;
+    background-color: rgba(239, 68, 68, 0.10);
+}
+.job-blocked-failed:hover {
+    background-color: rgba(239, 68, 68, 0.18);
 }
 
 /* Status icon column */

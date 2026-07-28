@@ -555,6 +555,7 @@ def create_app(config=None) -> FastAPI:
                 "walltime": job.walltime or "",
                 "queue_time_seconds": queue_time,
                 "score": _extract_job_score(job, _get_job_formula()),
+                "comment": (job.raw_pbs_data or {}).get("comment", ""),
             })
 
         all_queue_names = set(nh_running) | set(nh_queued) | set(nh_held)

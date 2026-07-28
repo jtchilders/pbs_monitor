@@ -146,6 +146,16 @@ const app = createApp({
             return null;  // normal — waiting its turn
         }
 
+        // Classify a held job based on its PBS comment.
+        // Flags jobs PBS has given up on (too many failed run attempts) — these
+        // will not run without manual intervention (e.g. qrls / resubmit).
+        // Returns: 'failed' | null
+        function classifyHeldJob(job) {
+            const comment = (job.comment || '').toLowerCase();
+            if (comment.includes('job held, too many failed attempts to run')) return 'failed';
+            return null;  // normal hold — user hold, dependency, etc.
+        }
+
         const activeTab    = ref('running');
         const sortKey      = ref('nodes');
         const sortDesc     = ref(true);
@@ -343,8 +353,15 @@ const app = createApp({
 
         const sortedHeldJobs = computed(() => {
             const list = snapshot.value?.jobs?.held || [];
-            return [...list].sort((a, b) => (b.queue_time_seconds ?? 0) - (a.queue_time_seconds ?? 0));
+            return [...list]
+                .map(j => ({ ...j, _classification: classifyHeldJob(j) }))
+                .sort((a, b) => (b.queue_time_seconds ?? 0) - (a.queue_time_seconds ?? 0));
         });
+
+        const blockedHeldCount = computed(() =>
+            sortedHeldJobs.value.filter(j => j._classification != null).length
+        );
+
 
         const filteredHeldJobs = computed(() => {
             const parsed = parseFilter(filterText.value);
@@ -1005,7 +1022,7 @@ const app = createApp({
         return {
             systemInfo, snapshot, loading, error,
             activeTab, sortKey, sortDesc, queuedSortKey, queuedSortDesc, selectedJobId, hoveredJobId, filterText,
-            hideBlocked, blockedQueuedCount,
+            hideBlocked, blockedQueuedCount, blockedHeldCount,
             depthGroupBy, depthShowHeld, depthAxisTicks,
             nodeCanvas, mapContainer, jobsSection, tooltip, tooltipStyle,
             jobModal,
