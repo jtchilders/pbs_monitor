@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PBS Monitor Dashboard</title>
-    <link rel="stylesheet" href="css/dashboard.css">
+    <link rel="stylesheet" href="css/dashboard.css?v=2">
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 </head>
@@ -241,23 +241,35 @@
                     </table>
 
                     <!-- Held Jobs Table -->
+                    <div v-if="activeTab === 'held'" class="queued-table-controls">
+                        <div class="blocked-legend">
+                            <span class="bl-item bl-failed">&#9632; Held &#8212; too many failed run attempts</span>
+                        </div>
+                    </div>
                     <table v-if="activeTab === 'held'" class="jobs-table">
                         <thead>
                             <tr>
-                                <th>ID</th>
-                                <th>Owner</th>
-                                <th>Project</th>
-                                <th>Allocation</th>
-                                <th>Queue</th>
-                                <th>Nodes</th>
-                                <th>Walltime</th>
-                                <th>Queued Time</th>
+                                <th class="status-col"></th>
+                                <th @click="sortHeldJobs('job_id')">ID<span v-if="heldSortKey==='job_id'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
+                                <th @click="sortHeldJobs('owner')">Owner<span v-if="heldSortKey==='owner'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
+                                <th @click="sortHeldJobs('project')">Project<span v-if="heldSortKey==='project'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
+                                <th @click="sortHeldJobs('allocation_type')">Allocation<span v-if="heldSortKey==='allocation_type'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
+                                <th @click="sortHeldJobs('queue')">Queue<span v-if="heldSortKey==='queue'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
+                                <th @click="sortHeldJobs('nodes')">Nodes<span v-if="heldSortKey==='nodes'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
+                                <th @click="sortHeldJobs('walltime')">Walltime<span v-if="heldSortKey==='walltime'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
+                                <th @click="sortHeldJobs('queue_time_seconds')">Queued Time<span v-if="heldSortKey==='queue_time_seconds'" class="sort-arrow">{{ heldSortDesc ? '▼' : '▲' }}</span></th>
                             </tr>
                         </thead>
                         <tbody>
                             <tr v-for="job in filteredHeldJobs" :key="job.job_id"
                                 @click="openJobDetail(job.job_id)"
-                                style="cursor:pointer">
+                                style="cursor:pointer"
+                                :class="{ 'job-blocked-failed': job._classification === 'failed' }">
+                                <td class="status-col">
+                                    <span v-if="job._classification === 'failed'"
+                                          class="block-icon block-icon-failed"
+                                          :title="job.comment || 'Held: too many failed attempts to run'">&#9940;</span>
+                                </td>
                                 <td>{{ job.job_id }}</td>
                                 <td><a :href="'/page/user/' + job.owner" target="_blank" class="context-link" @click.stop>{{ job.owner }}</a></td>
                                 <td><a :href="'/page/project/' + job.project" target="_blank" class="context-link" @click.stop>{{ job.project }}</a></td>
@@ -268,10 +280,10 @@
                                 <td>{{ fmtDuration(job.queue_time_seconds) }}</td>
                             </tr>
                             <tr v-if="sortedHeldJobs.length === 0">
-                                <td colspan="8" class="empty-row">No held jobs</td>
+                                <td colspan="9" class="empty-row">No held jobs</td>
                             </tr>
                             <tr v-else-if="filteredHeldJobs.length === 0">
-                                <td colspan="8" class="empty-row">No held jobs match the current filter</td>
+                                <td colspan="9" class="empty-row">No held jobs match the current filter</td>
                             </tr>
                         </tbody>
                     </table>
@@ -419,6 +431,6 @@
 
 <script src="js/colors.js"></script>
 <script src="/js/job-modal.js?v=2"></script>
-<script src="js/app.js?v=12"></script>
+<script src="js/app.js?v=14"></script>
 </body>
 </html>

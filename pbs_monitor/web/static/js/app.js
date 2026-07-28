@@ -146,11 +146,23 @@ const app = createApp({
             return null;  // normal — waiting its turn
         }
 
+        // Classify a held job based on its PBS comment.
+        // Flags jobs PBS has given up on (too many failed run attempts) — these
+        // will not run without manual intervention (e.g. qrls / resubmit).
+        // Returns: 'failed' | null
+        function classifyHeldJob(job) {
+            const comment = (job.comment || '').toLowerCase();
+            if (comment.includes('job held, too many failed attempts to run')) return 'failed';
+            return null;  // normal hold — user hold, dependency, etc.
+        }
+
         const activeTab    = ref('running');
         const sortKey      = ref('nodes');
         const sortDesc     = ref(true);
         const queuedSortKey  = ref('score');
         const queuedSortDesc = ref(true);
+        const heldSortKey    = ref('queue_time_seconds');
+        const heldSortDesc   = ref(true);
         const selectedJobId  = ref(null);
         const hoveredJobId   = ref(null);
         const jobModal       = ref(null);   // template ref to <job-detail-modal> component
@@ -343,8 +355,28 @@ const app = createApp({
 
         const sortedHeldJobs = computed(() => {
             const list = snapshot.value?.jobs?.held || [];
-            return [...list].sort((a, b) => (b.queue_time_seconds ?? 0) - (a.queue_time_seconds ?? 0));
+            const key = heldSortKey.value;
+            return [...list]
+                .map(j => ({ ...j, _classification: classifyHeldJob(j) }))
+                .sort((a, b) => {
+                    let va = a[key] ?? '';
+                    let vb = b[key] ?? '';
+                    // nulls last
+                    if (va == null && vb == null) return 0;
+                    if (va == null) return 1;
+                    if (vb == null) return -1;
+                    if (typeof va === 'string') va = va.toLowerCase();
+                    if (typeof vb === 'string') vb = vb.toLowerCase();
+                    if (va < vb) return heldSortDesc.value ? 1 : -1;
+                    if (va > vb) return heldSortDesc.value ? -1 : 1;
+                    return 0;
+                });
         });
+
+        const blockedHeldCount = computed(() =>
+            sortedHeldJobs.value.filter(j => j._classification != null).length
+        );
+
 
         const filteredHeldJobs = computed(() => {
             const parsed = parseFilter(filterText.value);
@@ -777,6 +809,10 @@ const app = createApp({
             if (queuedSortKey.value === key) queuedSortDesc.value = !queuedSortDesc.value;
             else { queuedSortKey.value = key; queuedSortDesc.value = true; }
         }
+        function sortHeldJobs(key) {
+            if (heldSortKey.value === key) heldSortDesc.value = !heldSortDesc.value;
+            else { heldSortKey.value = key; heldSortDesc.value = true; }
+        }
         function fmtScore(score) {
             if (score == null) return '--';
             // Score is a dimensionless WFP priority value; display as plain number
@@ -1004,15 +1040,15 @@ const app = createApp({
 
         return {
             systemInfo, snapshot, loading, error,
-            activeTab, sortKey, sortDesc, queuedSortKey, queuedSortDesc, selectedJobId, hoveredJobId, filterText,
-            hideBlocked, blockedQueuedCount,
+            activeTab, sortKey, sortDesc, queuedSortKey, queuedSortDesc, heldSortKey, heldSortDesc, selectedJobId, hoveredJobId, filterText,
+            hideBlocked, blockedQueuedCount, blockedHeldCount,
             depthGroupBy, depthShowHeld, depthAxisTicks,
             nodeCanvas, mapContainer, jobsSection, tooltip, tooltipStyle,
             jobModal,
             systemName, serverHost, utilization, busyNodes, totalComputeNodes, stateCounts, legendCounts, jobCounts, freshnessClass, timeSinceLastUpdate,
             lockedLegend, resvFilter,
             sortedRunningJobs, sortedQueuedJobs, sortedHeldJobs, filteredRunningJobs, filteredQueuedJobs, filteredHeldJobs, sortedDepthBuckets,
-            fetchData, sortJobs, sortQueuedJobs, selectJob, highlightJob, clearHighlight, hoverLegend, clearLegend, clickLegend, toggleResv, isOverdue,
+            fetchData, sortJobs, sortQueuedJobs, sortHeldJobs, selectJob, highlightJob, clearHighlight, hoverLegend, clearLegend, clickLegend, toggleResv, isOverdue,
             openJobDetail, closeJobDetail, drillDownBar, drillDownWaitBin,
             onCanvasMove, onCanvasLeave, onCanvasClick,
             fmtDuration, fmtScore, fmtSysHours, fmtIso, queueColor,
