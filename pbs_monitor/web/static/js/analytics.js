@@ -131,6 +131,7 @@ createApp({
         const days         = ref(30);
         const freqOverride = ref('auto');   // 'auto' | 'h' | 'd' | 'w'
         const groupBy      = ref('queue');  // 'queue' | 'allocation_type' | 'project'
+        const depthShowHeld = ref(false);   // Queue Depth: include HELD jobs (default: exclude)
         const loading      = ref(false);
         const error        = ref(null);
         const lastRefresh  = ref(null);
@@ -285,7 +286,9 @@ createApp({
 
         // ── Trends-tab data fetch & render ────────────────────────────────
         async function fetchTrends() {
-            const key = cacheKey('trends');
+            // depthShowHeld affects only the queue-depth chart, but it must be
+            // part of the cache key so toggling it serves/fetches the right data.
+            const key = cacheKey('trends') + `|held=${depthShowHeld.value}`;
 
             // Cache hit: re-render from stored data (no network needed)
             if (tabData[key]) {
@@ -301,9 +304,12 @@ createApp({
 
             try {
                 const qs = buildParams();
+                const depthQs = buildParams(
+                    depthShowHeld.value ? { include_held: 'true' } : {}
+                );
                 const [uRes, dRes] = await Promise.all([
                     fetch(`/api/analytics/utilization?${qs}`),
-                    fetch(`/api/analytics/queue-depth?${qs}`),
+                    fetch(`/api/analytics/queue-depth?${depthQs}`),
                 ]);
                 if (!uRes.ok || !dRes.ok) throw new Error('API error');
                 const uData = await uRes.json();
@@ -1043,6 +1049,11 @@ createApp({
         // Note: analytics.html calls invalidateAndReload() directly via @click.
         function reload() { invalidateAndReload(); }
 
+        // Queue-depth "Include Held" toggle: only the depth chart depends on it,
+        // so just re-run the trends fetch. The trends cache key encodes
+        // depthShowHeld, so a previously-fetched variant renders from cache.
+        function reloadDepth() { fetchTrends(); }
+
         // ── Chart renderers ───────────────────────────────────────────────
         // ── Task B: Walltime Accuracy ─────────────────────────────────────
         const loadingWalltime  = ref(false);
@@ -1267,6 +1278,7 @@ createApp({
         return {
             // state
             systemName, days, freqOverride, groupBy,
+            depthShowHeld,
             loading, loadingAny, error, lastRefresh, collectBanner,
             utilMeta, depthMeta,
             freqChoices, effectiveFreq, effectiveFreqLabel,
@@ -1296,7 +1308,7 @@ createApp({
             loadingReservations, reservationsError,
             reservationsSummary, reservationsData,
             // actions
-            setDays, reload, invalidateAndReload,
+            setDays, reload, invalidateAndReload, reloadDepth,
         };
     }
 }).mount('#app');
