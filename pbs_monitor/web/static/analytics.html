@@ -165,11 +165,23 @@
                 <section class="panel" id="tab-trends-depth">
                     <div class="panel-header">
                         <h2>Queue Depth &#x2014; system-hours backlog</h2>
+                        <label class="held-toggle" style="margin-left:auto">
+                            <input type="checkbox" v-model="depthShowHeld" @change="reloadDepth()">
+                            Include Held
+                        </label>
                         <span class="panel-meta" v-if="depthMeta">{{ depthMeta }}</span>
                     </div>
                     <div class="chart-wrap">
                         <canvas ref="depthCanvas"></canvas>
                     </div>
+                    <p class="panel-note">
+                        Backlog counts each job&#x2019;s node-hours while it is waiting
+                        in the queue. By default jobs currently in the <strong>HELD</strong>
+                        state that have not yet started are <em>excluded</em>. Enable
+                        <em>Include Held</em> to count them. This affects only jobs that
+                        have not started; a job that was held, later ran, and started
+                        within the window is always counted on its run history.
+                    </p>
                 </section>
 
             </template>
@@ -488,6 +500,6 @@
 </div>
 
 <!-- colors.js is already loaded in <head> — loads before analytics.js -->
-<script src="js/analytics.js"></script>
+<script src="js/analytics.js?v=2"></script>
 </body>
 </html>

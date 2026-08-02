@@ -1616,6 +1616,7 @@ def create_app(config=None) -> FastAPI:
         days: int = 30,
         freq: Optional[str] = None,
         group_by: str = 'queue',
+        include_held: bool = False,
         db: Session = Depends(get_db),
         queue: List[str] = Query(default=[]),
         queue_exclude: List[str] = Query(default=[]),
@@ -1639,6 +1640,7 @@ def create_app(config=None) -> FastAPI:
             "window_start": window_start.isoformat(),
             "last_complete": last_complete.isoformat(),
             "group_by": group_by,
+            "include_held": include_held,
             "queue": sorted(queue), "queue_exclude": sorted(queue_exclude),
             "owner": sorted(owner), "owner_exclude": sorted(owner_exclude),
             "project": sorted(project), "project_exclude": sorted(project_exclude),
@@ -1658,10 +1660,19 @@ def create_app(config=None) -> FastAPI:
             # Exclude cancelled/finished jobs that never got a start_time
             # — those would be treated as queued from submission to now,
             # massively inflating the backlog.
-            _active_states = (
-                JobState.QUEUED, JobState.HELD, JobState.WAITING,
+            #
+            # ``include_held`` (default False) controls only branch (2): whether
+            # jobs that have NOT yet started and are currently in the HELD state
+            # count toward the backlog.  Branch (1) is history-based — a job that
+            # was held, later ran, and started inside the window is always counted
+            # on its run history regardless of this flag.
+            _active_states = [
+                JobState.QUEUED, JobState.WAITING,
                 JobState.TRANSITIONING,
-            )
+            ]
+            if include_held:
+                _active_states.append(JobState.HELD)
+            _active_states = tuple(_active_states)
             q = db.query(Job).filter(
                 Job.submit_time.isnot(None),
                 Job.walltime.isnot(None),
