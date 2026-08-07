@@ -42,15 +42,32 @@ Threshold config lives under ``slack.rules.<rule_key>`` in the YAML, e.g.::
           window_hours: 24
           require_failure: true  # only jobs that failed/held (not clean requeues)
           max_report: 5
+          # A walltime kill isn't a "requeued to death" loop -- excluded by
+          # default (many users deliberately code to the wall). [] counts all.
+          exclude_outcome_classes: ["walltime_killed"]
+          # Re-post cadence for the SAME set of offenders. The engine now
+          # re-posts immediately when the offender set CHANGES (content
+          # signature), so this only paces re-alerts of an UNCHANGED finding.
+          # Match it to window_hours (86400 = 24h) so a persistent finding
+          # alerts at most once/day instead of every collection cycle.
+          cooldown_seconds: 86400
 
 All thresholds have safe defaults so a rule works before it is tuned.
+
+Anti-spam note: rules that report a *set of offenders* (repeated_rerun_held,
+repeated_crash) attach a content ``signature`` to their SlackMessage. The
+NotificationEngine re-posts as soon as that signature changes (a new offender
+appears or one ages out) but suppresses an unchanged finding until
+``cooldown_seconds`` elapses -- so a stuck job that lingers in the 24h window is
+reported once, not once per cycle.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -58,6 +75,24 @@ from sqlalchemy.orm import Session
 from .slack import SlackMessage
 
 logger = logging.getLogger(__name__)
+
+
+def _signature(rule_key: str, items: Sequence[Any]) -> str:
+    """Build a stable content signature for an alert.
+
+    ``items`` is an iterable of the facts that define WHAT the alert reports
+    (e.g. per-offender tuples). We sort them so ordering differences between
+    cycles don't change the signature, join into a canonical string, and hash.
+    The rule key is folded in so two rules can never collide.
+
+    The NotificationEngine compares this signature across cycles: an unchanged
+    signature within the cooldown is treated as "same finding, stay quiet";
+    a changed signature (a new/different offender appeared or one dropped off)
+    is treated as a fresh edge and posts immediately. See engine.py.
+    """
+    canon = "|".join(sorted(str(i) for i in items))
+    digest = hashlib.sha1(f"{rule_key}::{canon}".encode("utf-8")).hexdigest()
+    return f"{rule_key}:{digest[:16]}"
 
 
 # --------------------------------------------------------------------------- #
@@ -413,7 +448,13 @@ def repeated_crash(db: Session, cfg: Any, now: datetime) -> Optional[SlackMessag
         f"_Likely stuck - candidate(s) for outreach. "
         f"Verify exit-code semantics before contacting users._"
     )
-    return SlackMessage(text=text_msg)
+    # Content signature = every offender (owner, job_name, total-failure-count)
+    # across ALL offenders, not just the max_report shown. The engine re-posts
+    # only when this set changes (a new offender appears, or a count moves)
+    # rather than re-alerting the same offenders each cooldown tick.
+    sig_items = [(k[0], k[1], t) for k, t in sig_total.items() if t >= min_repeats]
+    signature = _signature("repeated_crash", sig_items)
+    return SlackMessage(text=text_msg, signature=signature)
 
 
 # --------------------------------------------------------------------------- #
@@ -447,12 +488,27 @@ def repeated_rerun_held(db: Session, cfg: Any, now: datetime) -> Optional[SlackM
         window_hours     : float (default 24)
         require_failure  : bool  (default true) -- only failed/held outcomes
         max_report       : int   (default 5)    -- jobs listed in the message
+        exclude_outcome_classes : list (default ["walltime_killed"]) -- outcome
+                          classes that do NOT count toward the trigger even when
+                          ``require_failure`` is set. Mirrors repeated_crash:
+                          many ALCF users deliberately under-request walltime and
+                          checkpoint/restart, so a walltime kill is expected
+                          per-cycle behavior, not a stuck requeue loop. Pass ``[]``
+                          to count every failure class (incl. walltime_killed).
     """
     rc = _rule_cfg(cfg, "repeated_rerun_held")
     min_run_count = int(rc.get("min_run_count", 5))
     window_hours = float(rc.get("window_hours", 24.0))
     require_failure = bool(rc.get("require_failure", True))
     max_report = int(rc.get("max_report", 5))
+    # By default a walltime kill does not count as a "requeued to death" loop
+    # (see repeated_crash's exclusion rationale). Configurable per cluster.
+    exclude_cfg = rc.get("exclude_outcome_classes", ["walltime_killed"])
+    exclude_classes = (
+        {str(c) for c in exclude_cfg}
+        if isinstance(exclude_cfg, (list, tuple, set))
+        else set()
+    )
 
     cutoff = now - timedelta(hours=window_hours)
 
@@ -491,15 +547,25 @@ def repeated_rerun_held(db: Session, cfg: Any, now: datetime) -> Optional[SlackM
     # hold several rows for the same logical job (requeue history / re-collection
     # of the same job_id family), and listing the same offender five times is
     # noise. Keep first occurrence (already ordered by run_count DESC).
+    # Also drop excluded outcome classes here rather than in SQL: the
+    # require_failure clause has an `exit_status != 0` backstop, and an excluded
+    # class like walltime_killed carries a non-zero exit (-29) that would slip
+    # through that backstop -- filtering in Python guarantees the exclusion holds
+    # regardless of exit code.
     seen = set()
     distinct = []
     for row in rows:
         job_id, owner, job_name, run_count, outcome_class, exit_status, _end = row
+        if outcome_class in exclude_classes:
+            continue
         key = (owner, job_name, int(run_count), exit_status)
         if key in seen:
             continue
         seen.add(key)
         distinct.append(row)
+
+    if not distinct:
+        return None
 
     total_distinct = len(distinct)
     offenders = distinct[:max_report]
@@ -526,7 +592,18 @@ def repeated_rerun_held(db: Session, cfg: Any, now: datetime) -> Optional[SlackM
         f"unsatisfiable request, or a recurring node/launch failure. "
         f"Candidate(s) for outreach._"
     )
-    return SlackMessage(text=text_msg)
+    # Content signature = the full set of distinct offenders (ALL of them, not
+    # just the max_report shown), keyed by (owner, job_name, run_count,
+    # exit_status). The engine re-posts only when this set changes -- a new
+    # heavily-requeued job appears, or one ages out of the window -- instead of
+    # re-alerting the identical finding on every cooldown tick. Independent of
+    # the cluster label / wording so cosmetic changes don't re-fire.
+    sig_items = [
+        (owner, job_name, int(run_count), exit_status)
+        for _jid, owner, job_name, run_count, _oc, exit_status, _end in distinct
+    ]
+    signature = _signature("repeated_rerun_held", sig_items)
+    return SlackMessage(text=text_msg, signature=signature)
 
 
 # --------------------------------------------------------------------------- #

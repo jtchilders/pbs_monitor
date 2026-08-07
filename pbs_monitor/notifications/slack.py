@@ -42,10 +42,21 @@ class SlackMessage:
     ``text`` is always required (Slack uses it as the notification fallback and
     accessibility text even when ``blocks`` are present). ``blocks`` is optional
     Block Kit structure for richer formatting.
+
+    ``signature`` is an optional stable identifier for the *content* of the alert
+    -- a hash of the facts that define WHAT is being reported (e.g. the set of
+    offending jobs), deliberately independent of cosmetic wording. The
+    NotificationEngine uses it for content-aware dedupe: an unchanged signature
+    within the cooldown window stays suppressed (don't re-post the identical
+    finding on every cooldown tick), while a CHANGED signature counts as a fresh
+    edge and posts immediately (a genuinely new/different offender should not
+    wait out a timer). Rules that leave this ``None`` get the classic
+    time-only edge-trigger + cooldown behavior.
     """
 
     text: str
     blocks: Optional[List[Dict[str, Any]]] = None
+    signature: Optional[str] = None
 
     def to_payload(self, channel: Optional[str] = None) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"text": self.text}

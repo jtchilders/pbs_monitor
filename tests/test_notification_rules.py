@@ -345,3 +345,113 @@ def test_repeated_rerun_held_outside_window_does_not_fire(rerun_db):
                              {"enabled": True, "min_run_count": 5,
                               "window_hours": 24}})
     assert rules.repeated_rerun_held(rerun_db, cfg, NOW) is None
+
+
+# ---- repeated_rerun_held: walltime exclusion ------------------------------- #
+
+def test_repeated_rerun_held_excludes_walltime_by_default(rerun_db):
+    # A job requeued 5x that ended in a walltime kill (-29) is NOT a
+    # "requeued to death" loop -- excluded by default, exactly like repeated_crash.
+    # This is the Aurora `jdtun Up_30.r3` false-positive from the alert dump.
+    _rjob(rerun_db, "8724481", "jdtun", "Up_30.r3", "FINISHED", 5,
+          "walltime_killed", -29, "2026-06-04 19:00:00")
+    rerun_db.commit()
+    cfg = SlackConfig(enabled=True, cluster_label="Aurora",
+                      rules={"repeated_rerun_held":
+                             {"enabled": True, "min_run_count": 5,
+                              "window_hours": 24}})
+    assert rules.repeated_rerun_held(rerun_db, cfg, NOW) is None
+
+
+def test_repeated_rerun_held_can_include_walltime_via_config(rerun_db):
+    # Opt back in with exclude_outcome_classes=[] -> the walltime kill counts.
+    _rjob(rerun_db, "8724481", "jdtun", "Up_30.r3", "FINISHED", 5,
+          "walltime_killed", -29, "2026-06-04 19:00:00")
+    rerun_db.commit()
+    cfg = SlackConfig(enabled=True, cluster_label="Aurora",
+                      rules={"repeated_rerun_held":
+                             {"enabled": True, "min_run_count": 5,
+                              "window_hours": 24,
+                              "exclude_outcome_classes": []}})
+    msg = rules.repeated_rerun_held(rerun_db, cfg, NOW)
+    assert msg is not None
+    assert "jdtun" in msg.text and "Up_30.r3" in msg.text
+
+
+def test_repeated_rerun_held_walltime_excluded_but_held_still_fires(rerun_db):
+    # Mixed batch: one walltime kill (excluded) + one genuine could_not_run loop
+    # (kept). Only the real offender should appear.
+    _rjob(rerun_db, "8724481", "jdtun", "Up_30.r3", "FINISHED", 5,
+          "walltime_killed", -29, "2026-06-04 19:00:00")
+    _rjob(rerun_db, "7366765", "shudson", "qaoa_bench_pol", "FINISHED", 21,
+          "could_not_run", -3, "2026-06-04 19:05:00")
+    rerun_db.commit()
+    cfg = SlackConfig(enabled=True, cluster_label="Polaris",
+                      rules={"repeated_rerun_held":
+                             {"enabled": True, "min_run_count": 5,
+                              "window_hours": 24}})
+    msg = rules.repeated_rerun_held(rerun_db, cfg, NOW)
+    assert msg is not None
+    assert "1 job(s)" in msg.text
+    assert "shudson" in msg.text and "qaoa_bench_pol" in msg.text
+    assert "jdtun" not in msg.text
+
+
+# ---- content signatures (anti-spam dedupe) --------------------------------- #
+
+def test_repeated_rerun_held_attaches_signature(rerun_db):
+    _rjob(rerun_db, "7366765", "shudson", "qaoa_bench_pol", "FINISHED", 21,
+          "could_not_run", -3, "2026-06-04 19:00:00")
+    rerun_db.commit()
+    cfg = SlackConfig(enabled=True, cluster_label="Polaris",
+                      rules={"repeated_rerun_held":
+                             {"enabled": True, "min_run_count": 5,
+                              "window_hours": 24}})
+    msg = rules.repeated_rerun_held(rerun_db, cfg, NOW)
+    assert msg is not None
+    assert msg.signature is not None
+    assert msg.signature.startswith("repeated_rerun_held:")
+
+
+def test_repeated_rerun_held_signature_stable_and_offender_dependent(rerun_db):
+    # Same offender set -> same signature (independent of row insertion order).
+    # A new offender -> different signature (the engine will then re-post).
+    _rjob(rerun_db, "7365090", "purnavindhyak", "flops_metrics", "FINISHED", 21,
+          "could_not_run", -3, "2026-06-04 19:00:00")
+    _rjob(rerun_db, "7366765", "shudson", "qaoa_bench_pol", "FINISHED", 21,
+          "could_not_run", -3, "2026-06-04 19:01:00")
+    rerun_db.commit()
+    cfg = SlackConfig(enabled=True, cluster_label="Polaris",
+                      rules={"repeated_rerun_held":
+                             {"enabled": True, "min_run_count": 5,
+                              "window_hours": 24}})
+    msg1 = rules.repeated_rerun_held(rerun_db, cfg, NOW)
+    assert msg1 is not None
+    sig1 = msg1.signature
+
+    # Re-evaluating the SAME data yields the SAME signature (stable across runs).
+    msg1b = rules.repeated_rerun_held(rerun_db, cfg, NOW)
+    assert msg1b is not None
+    assert sig1 == msg1b.signature
+
+    # A genuinely NEW stuck job appears -> signature must change.
+    _rjob(rerun_db, "7365080", "purnavindhyak", "flops_metrics", "FINISHED", 15,
+          "could_not_run", -3, "2026-06-04 19:02:00")
+    rerun_db.commit()
+    msg2 = rules.repeated_rerun_held(rerun_db, cfg, NOW)
+    assert msg2 is not None
+    assert msg2.signature != sig1
+
+
+def test_repeated_crash_attaches_signature(db):
+    for i in range(5):
+        _job(db, f"job{i}", "kaiyuyue", "gpt_synth", "error", 1,
+             "2026-06-04 1%d:00:00" % (i + 3))
+    db.commit()
+    cfg = SlackConfig(enabled=True, cluster_label="Aurora",
+                      rules={"repeated_crash": {"enabled": True, "min_repeats": 3,
+                                                "window_hours": 24}})
+    msg = rules.repeated_crash(db, cfg, NOW)
+    assert msg is not None
+    assert msg.signature is not None
+    assert msg.signature.startswith("repeated_crash:")

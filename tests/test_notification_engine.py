@@ -171,3 +171,141 @@ def test_default_state_path_postgres_home():
     p = default_state_path("postgresql://localhost/pbs_monitor_dev")
     assert p.endswith(".pbs_monitor_alert_state.json")
     assert "/tmp/foo" not in p
+
+
+# --------------------------------------------------------------------------- #
+# Content-aware dedupe (SlackMessage.signature)
+# --------------------------------------------------------------------------- #
+
+def test_same_signature_within_cooldown_suppresses(monkeypatch, statefile):
+    """The core anti-spam fix: an identical finding (same signature) is posted
+    once, then stays quiet on every subsequent cycle while WITHIN the cooldown
+    -- even though the rule keeps firing. This is the '3 jobs re-run 21x' alert
+    that was re-posting every hour for 24h."""
+    clk = FakeClock()
+    msg = SlackMessage(text="3 jobs stuck", signature="repeated_rerun_held:abc123")
+    engine, notifier = _make_engine(monkeypatch, statefile, msg, clk)
+
+    engine.run_once()               # cycle 1: fresh edge -> post
+    assert len(notifier.posts) == 1
+
+    # 6 more cycles at 300s (5 min) each = 1800s total, all inside the 3600s
+    # cooldown. Same signature every time -> all suppressed.
+    for _ in range(6):
+        clk.t += 300
+        engine.run_once()
+    assert len(notifier.posts) == 1
+
+
+def test_same_signature_reposts_once_per_cooldown(monkeypatch, statefile):
+    """A persistent finding (unchanged signature) is not silenced forever: once
+    the cooldown elapses it re-surfaces ONCE as a reminder, then goes quiet again
+    for another cooldown period. With cooldown_seconds=86400 that's ~1/day for a
+    job that stays stuck in the 24h window -- a big improvement over hourly, but
+    not total silence on a still-broken job."""
+    clk = FakeClock()
+    msg = SlackMessage(text="still stuck", signature="rrh:same")
+    engine, notifier = _make_engine(monkeypatch, statefile, msg, clk)  # 3600s cd
+
+    engine.run_once()               # post 1
+    assert len(notifier.posts) == 1
+
+    clk.t += 1800                    # within cooldown
+    engine.run_once()
+    assert len(notifier.posts) == 1  # suppressed
+
+    clk.t += 2000                    # now 3800s since last post > 3600 cooldown
+    engine.run_once()
+    assert len(notifier.posts) == 2  # re-surfaces once
+
+
+def test_changed_signature_posts_within_cooldown(monkeypatch, statefile):
+    """A genuinely NEW finding (different signature) must surface immediately,
+    NOT wait out the cooldown timer -- a new heavily-requeued job appearing
+    mid-day should page right away."""
+    clk = FakeClock()
+    import pbs_monitor.notifications.engine as eng
+
+    state = {"msg": SlackMessage(text="job A stuck", signature="rrh:sigA")}
+
+    def fake_eval(db, cfg_):
+        return {"repeated_rerun_held": state["msg"]}
+
+    monkeypatch.setattr(eng, "evaluate_all", fake_eval)
+    cfg = SlackConfig(enabled=True, cluster_label="Polaris",
+                      rules={"repeated_rerun_held": {"enabled": True,
+                                                     "cooldown_seconds": 86400}})
+    notifier = RecordingNotifier()
+    engine = NotificationEngine(cfg, _session_getter(None), notifier=notifier,
+                                state_path=statefile, clock=clk)
+
+    engine.run_once()                       # post 1 (edge)
+    assert len(notifier.posts) == 1
+
+    clk.t += 300                            # +5 min, well within 24h cooldown
+    engine.run_once()                       # same signature -> suppressed
+    assert len(notifier.posts) == 1
+
+    # A new/different offender set -> signature changes -> post despite cooldown.
+    state["msg"] = SlackMessage(text="job A + job B stuck", signature="rrh:sigB")
+    clk.t += 300
+    engine.run_once()
+    assert len(notifier.posts) == 2
+    assert "job B" in notifier.posts[-1]
+
+
+def test_no_signature_keeps_classic_time_behavior(monkeypatch, statefile):
+    """A rule that supplies no signature must behave exactly as before:
+    edge-trigger + time-based cooldown, no content awareness."""
+    clk = FakeClock()
+    msg = SlackMessage(text="legacy rule")   # signature defaults to None
+    engine, notifier = _make_engine(monkeypatch, statefile, msg, clk)
+
+    engine.run_once()               # edge -> post
+    assert len(notifier.posts) == 1
+    clk.t += 300
+    engine.run_once()               # within cooldown, no signature -> suppress
+    assert len(notifier.posts) == 1
+    clk.t += 7200                    # past cooldown -> re-post
+    engine.run_once()
+    assert len(notifier.posts) == 2
+
+
+def test_changed_signature_still_respects_global_floor(monkeypatch, statefile):
+    """A changed signature bypasses the per-rule cooldown but NOT the global
+    anti-flood floor -- two different rules firing in one cycle still yield at
+    most one post per min_interval_seconds."""
+    clk = FakeClock()
+    import pbs_monitor.notifications.engine as eng
+
+    def fake_eval(db, cfg_):
+        return {
+            "rule_a": SlackMessage(text="A", signature="a:1"),
+            "rule_b": SlackMessage(text="B", signature="b:1"),
+        }
+
+    monkeypatch.setattr(eng, "evaluate_all", fake_eval)
+    cfg = SlackConfig(enabled=True, min_interval_seconds=3600,
+                      rules={"rule_a": {"enabled": True},
+                             "rule_b": {"enabled": True}})
+    notifier = RecordingNotifier()
+    engine = NotificationEngine(cfg, _session_getter(None), notifier=notifier,
+                                state_path=statefile, clock=clk)
+    engine.run_once()
+    assert len(notifier.posts) == 1  # global floor caps to one
+
+
+def test_signature_persists_across_restart(monkeypatch, statefile):
+    """last_signature must survive a daemon restart so the identical finding
+    isn't re-posted just because the process bounced."""
+    clk = FakeClock()
+    msg = SlackMessage(text="stuck", signature="rrh:persist")
+    engine1, notifier1 = _make_engine(monkeypatch, statefile, msg, clk)
+    engine1.run_once()
+    assert len(notifier1.posts) == 1
+
+    # Fresh engine (restart), same signature, within cooldown -> suppress.
+    engine2, notifier2 = _make_engine(monkeypatch, statefile, msg, clk)
+    clk.t += 300
+    engine2.run_once()
+    assert len(notifier2.posts) == 0
