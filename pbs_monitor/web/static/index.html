@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PBS Monitor Dashboard</title>
-    <link rel="stylesheet" href="css/dashboard.css?v=2">
+    <link rel="stylesheet" href="css/dashboard.css?v=3">
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 </head>
@@ -29,9 +29,13 @@
         <header class="header-bar">
             <div class="header-left">
                 <h1 :title="serverHost ? 'Served from: ' + serverHost : ''">{{ systemName }}</h1>
-                <div class="freshness-indicator" :class="freshnessClass">
+                <div class="freshness-indicator" :class="freshnessClass"
+                     :title="connected ? 'Age of the most recent data snapshot' : connectionStatus">
                     <span class="dot"></span>
-                    {{ timeSinceLastUpdate }}
+                    <template v-if="connected">{{ timeSinceLastUpdate }}</template>
+                    <template v-else>
+                        &#9888; Web server disconnected<span v-if="timeSinceLastUpdate"> &middot; data {{ timeSinceLastUpdate }}</span>
+                    </template>
                 </div>
             </div>
             <div class="header-stats">
@@ -431,6 +435,6 @@
 
 <script src="js/colors.js"></script>
 <script src="/js/job-modal.js?v=2"></script>
-<script src="js/app.js?v=14"></script>
+<script src="js/app.js?v=15"></script>
 </body>
 </html>
