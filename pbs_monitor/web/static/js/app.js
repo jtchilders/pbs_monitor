@@ -127,6 +127,15 @@ const app = createApp({
         const loading      = ref(true);
         const error        = ref(null);
 
+        // ── web-server connection tracking ──
+        // connected: did the most recent snapshot poll succeed?
+        // lastContact: epoch ms of the last successful snapshot fetch.
+        // nowTick: wall-clock epoch ms, updated every second, so freshness /
+        //   disconnect indicators recompute even when no new data arrives.
+        const connected    = ref(true);
+        const lastContact  = ref(null);
+        const nowTick      = ref(Date.now());
+
         // ── job classification ──
         const hideBlocked    = ref(false);
 
@@ -234,14 +243,33 @@ const app = createApp({
             };
         });
 
+        // freshnessClass / timeSinceLastUpdate depend on nowTick so they keep
+        // recomputing against the wall clock even when NO new snapshot arrives
+        // (e.g. the web server is down and polling is silently failing). Without
+        // this dependency Vue would only recompute when snapshot.value changes,
+        // so the "N ago" text would freeze at the last successful fetch and give
+        // no indication that the page has lost contact with the server.
         const freshnessClass = computed(() => {
+            // Losing contact with the web server takes priority over data age:
+            // if we can't reach the server we can't trust any age at all.
+            if (!connected.value && snapshot.value) return 'disconnected';
             if (!snapshot.value?.timestamp) return '';
-            const age = (Date.now() - new Date(snapshot.value.timestamp).getTime()) / 1000;
+            const age = (nowTick.value - new Date(snapshot.value.timestamp).getTime()) / 1000;
             if (age < 300)  return 'green';
             if (age < 900)  return 'yellow';
             return 'red';
         });
-        const timeSinceLastUpdate = computed(() => timeSince(snapshot.value?.timestamp));
+        const timeSinceLastUpdate = computed(() => {
+            nowTick.value; // establish reactive dependency on the clock
+            return timeSince(snapshot.value?.timestamp);
+        });
+        // Human-readable text describing the connection to the WEB SERVER
+        // (distinct from data age, which describes the collector daemon).
+        const connectionStatus = computed(() => {
+            if (connected.value) return '';
+            if (!lastContact.value) return 'No connection to web server';
+            return `Web server unreachable \u2014 no contact for ${timeSince(new Date(lastContact.value).toISOString())}`;
+        });
 
         function sortedList(list) {
             const key = sortKey.value;
@@ -551,9 +579,15 @@ const app = createApp({
                 await fetchSnapshot();
                 loading.value = false;
                 error.value = null;
+                connected.value = true;
+                lastContact.value = Date.now();
             } catch (e) {
                 console.error(e);
                 error.value = e.message;
+                // The web server is unreachable (or erroring). Keep any prior
+                // snapshot on screen but flip connected=false so the header shows
+                // an explicit "disconnected" state instead of a frozen age.
+                connected.value = false;
                 if (!snapshot.value) loading.value = false;
             }
         }
@@ -883,6 +917,7 @@ const app = createApp({
         // ── lifecycle ──
 
         let pollTimer = null;
+        let clockTimer = null;
 
         function onResize() { computeLayout(); requestAnimationFrame(drawMap); }
 
@@ -1028,12 +1063,16 @@ const app = createApp({
             fetchReservations();
             fetchWaitDist();
             pollTimer = setInterval(() => { fetchData(); fetchWaitDist(); fetchReservations(); }, 30000);
+            // Tick the wall clock every second so the freshness / disconnect
+            // indicators keep counting up even when polling is failing.
+            clockTimer = setInterval(() => { nowTick.value = Date.now(); }, 1000);
             window.addEventListener('resize', onResize);
             window.addEventListener('keydown', onKeyDown);
         });
 
         onUnmounted(() => {
             if (pollTimer) clearInterval(pollTimer);
+            if (clockTimer) clearInterval(clockTimer);
             window.removeEventListener('resize', onResize);
             window.removeEventListener('keydown', onKeyDown);
         });
@@ -1046,6 +1085,7 @@ const app = createApp({
             nodeCanvas, mapContainer, jobsSection, tooltip, tooltipStyle,
             jobModal,
             systemName, serverHost, utilization, busyNodes, totalComputeNodes, stateCounts, legendCounts, jobCounts, freshnessClass, timeSinceLastUpdate,
+            connected, connectionStatus,
             lockedLegend, resvFilter,
             sortedRunningJobs, sortedQueuedJobs, sortedHeldJobs, filteredRunningJobs, filteredQueuedJobs, filteredHeldJobs, sortedDepthBuckets,
             fetchData, sortJobs, sortQueuedJobs, sortHeldJobs, selectJob, highlightJob, clearHighlight, hoverLegend, clearLegend, clickLegend, toggleResv, isOverdue,

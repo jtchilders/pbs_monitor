@@ -127,6 +127,22 @@ body {
 .freshness-indicator.yellow .dot { background-color: var(--accent-busy); }
 .freshness-indicator.red .dot { background-color: var(--accent-down); }
 
+/* Web server unreachable: distinct from stale data (yellow/red age).
+   The whole indicator turns red and the dot pulses so it's obvious the
+   page has lost contact with the server rather than just showing old data. */
+.freshness-indicator.disconnected {
+    color: var(--accent-down);
+    font-weight: 600;
+}
+.freshness-indicator.disconnected .dot {
+    background-color: var(--accent-down);
+    animation: freshness-pulse 1.2s ease-in-out infinite;
+}
+@keyframes freshness-pulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 var(--accent-down); }
+    50%      { opacity: 0.35; box-shadow: 0 0 0 4px transparent; }
+}
+
 .header-stats, .header-right {
     display: flex;
     gap: 1.5rem;
