@@ -66,6 +66,8 @@ The command invokes the same service synchronously. Dry-run performs acquisition
 
 Each run writes a structured reconciliation result to logs. Add a dedicated `history_reconciliation_log` table rather than overloading `data_collection_log`, because reconciliation counters and semantics differ from snapshot collection. The table records start/end time, status, candidate/insert/repair/unchanged/error counts, oldest/newest terminal timestamps, and an error message. Logging failure must not roll back successfully reconciled job batches, but it must be emitted to the application log.
 
+The table is an **idempotently ensured auxiliary table**, not a new numbered schema version. Main is currently v1.4, while an existing pending multi-system branch already reserves v1.5 for `jobs.system`; consuming v1.5 here would create a migration collision. Fresh databases include the table through ORM metadata, and `migrate_to_latest()` always ensures it after the numbered migration ladder while `check_schema_version()` remains unchanged.
+
 ## Existing `UNKNOWN_END` rows
 
 Repair requires a matching retained `F` or `C` scheduler record. Current Aurora evidence:

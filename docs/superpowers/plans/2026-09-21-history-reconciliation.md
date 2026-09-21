@@ -64,9 +64,9 @@
 - Modify: `tests/test_database.py`
 - Modify: `tests/test_history_reconciliation.py`
 
-- [ ] Add failing SQLite migration/model tests for `history_reconciliation_log` and service tests for success/failure audit rows.
+- [ ] Add failing SQLite migration/model tests for idempotently ensuring `history_reconciliation_log` while leaving the numbered schema version at 1.4, plus service tests for success/failure audit rows.
 - [ ] Run tests and verify expected missing-table failures.
-- [ ] Add an additive migration and model containing timestamps, status, counts, terminal range, duration, and bounded error text.
+- [ ] Add the model and an additive `ensure_history_reconciliation_log_table()` invoked after the numbered migration ladder; do not consume v1.5 because the pending system-column branch already reserves it.
 - [ ] Keep audit-write failure best-effort and explicitly logged without rolling back completed job batches.
 - [ ] Run migration and service tests until green.
 - [ ] Commit with `feat: persist history reconciliation audit results`.
