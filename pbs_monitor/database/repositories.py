@@ -4,20 +4,26 @@ Database repositories for PBS Monitor
 Provides data access layer for database operations.
 """
 
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union, TYPE_CHECKING
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import desc, func, and_, or_
 from sqlalchemy.orm import Session
+import logging
 
 from .connection import DatabaseManager
 from .models import (
-    Job, Queue, Node, JobHistory, QueueSnapshot, NodeSnapshot, 
-    SystemSnapshot, DataCollectionLog, JobState, QueueState, 
-    NodeState, DataCollectionStatus, Reservation, ReservationHistory, 
+    Job, Queue, Node, JobHistory, QueueSnapshot, NodeSnapshot,
+    SystemSnapshot, DataCollectionLog, JobState, QueueState,
+    NodeState, DataCollectionStatus, Reservation, ReservationHistory,
     ReservationUtilization, ReservationState
 )
 from ..config import Config
 from ..models.job import PBSJob
+
+if TYPE_CHECKING:
+    from ..history_reconciliation import ReconciliationResult
+
+logger = logging.getLogger(__name__)
 
 
 class BaseRepository:
@@ -178,7 +184,7 @@ class JobRepository(BaseRepository):
                 session.expunge(rec)
             return records
     
-    def add_job_history(self, job_history: JobHistory | str, state: Optional[JobState] = None) -> JobHistory:
+    def add_job_history(self, job_history: "Union[JobHistory, str]", state: Optional[JobState] = None) -> JobHistory:
         """Add job history entry. Accepts either a JobHistory or (job_id, state)."""
         with self.get_session() as session:
             if isinstance(job_history, JobHistory):
@@ -293,6 +299,297 @@ class JobRepository(BaseRepository):
             jobs = session.query(Job).order_by(desc(Job.last_updated)).limit(limit).all()
             session.expunge_all()
             return jobs
+
+    # ------------------------------------------------------------------
+    # History reconciliation bulk operations
+    # ------------------------------------------------------------------
+
+    def fetch_states_for_ids(self, job_ids: set, chunk_size: int = 500) -> Dict[str, str]:
+        """Return {job_id: state_value} for the given set of job IDs.
+
+        Uses chunked IN queries so large sets don't exceed SQL parameter
+        limits on SQLite or PostgreSQL. Missing IDs are simply absent from
+        the returned dict.
+
+        Parameters
+        ----------
+        job_ids:
+            Set of job IDs to look up.
+        chunk_size:
+            Maximum number of IDs per IN-clause. Defaults to 500 which is
+            safe for both SQLite and PostgreSQL. Callers can pass the
+            reconciler batch_size to align chunking.
+
+        This is a bulk read and performs zero per-job queries.
+        """
+        if not job_ids:
+            return {}
+
+        result: Dict[str, str] = {}
+        chunk_size = max(1, chunk_size)
+        job_ids_list = list(job_ids)
+
+        with self.get_session() as session:
+            for i in range(0, len(job_ids_list), chunk_size):
+                chunk = job_ids_list[i:i + chunk_size]
+                rows = (
+                    session.query(Job.job_id, Job.state)
+                    .filter(Job.job_id.in_(chunk))
+                    .all()
+                )
+                for row in rows:
+                    result[row.job_id] = row.state.value
+
+        return result
+
+    @staticmethod
+    def _normalize_reconciliation_item(item: Any) -> Dict[str, Any]:
+        """Normalize a reconciliation item to a plain dict.
+
+        Accepts either a ``Job`` ORM object (as returned by
+        ``JobConverter.to_database()``) or a plain ``dict`` (as used by
+        existing unit tests and the dict-based API).
+
+        For ORM objects, only mapped column values are copied — relationships,
+        internal SQLAlchemy state, and non-column attributes are excluded.
+        This is safe because ``apply_reconciliation_batch`` only needs the
+        column values to build its INSERT/UPDATE statements.
+
+        For dicts, the dict is returned as-is (no copy; callers must not
+        mutate it after passing it in).
+        """
+        if isinstance(item, dict):
+            return item
+        # ORM object: extract mapped column values via SQLAlchemy inspection.
+        # Using inspect() instead of __dict__ avoids copying internal SA state
+        # (_sa_instance_state, lazy-loaded relationship proxies, etc.).
+        try:
+            from sqlalchemy import inspect as sa_inspect
+            mapper = sa_inspect(type(item))
+            result: Dict[str, Any] = {}
+            for col in mapper.mapper.columns:
+                result[col.key] = getattr(item, col.key, None)
+            return result
+        except Exception:
+            # Fallback: if inspection fails, raise a clear error rather than
+            # silently returning an empty dict that would produce bad SQL.
+            raise TypeError(
+                f"apply_reconciliation_batch: cannot normalize item of type "
+                f"{type(item).__name__!r}. Expected a Job ORM object or a dict."
+            )
+
+    def apply_reconciliation_batch(
+        self,
+        to_insert: List[Any],
+        to_repair: List[Any],
+    ) -> Dict[str, int]:
+        """Apply classified reconciliation results atomically.
+
+        Writes are conditional to prevent races with normal collection:
+
+        * **INSERT** uses INSERT OR IGNORE (SQLite) / INSERT ... ON CONFLICT DO
+          NOTHING (PostgreSQL).  A job that appeared in the DB between
+          classification and write is left intact.  Uses dialect-native
+          conditional INSERT so the SELECT-then-INSERT race window is eliminated.
+
+        * **UPDATE (repair)** is guarded by ``WHERE state = 'UNKNOWN_END'``
+          via a bulk UPDATE that returns the number of rows actually changed.
+          If the row transitioned to any other state, the update is a no-op.
+
+        Accepts plain dicts with at minimum ``job_id`` and ``state`` keys;
+        all other keys are written to matching ``Job`` columns if they exist.
+
+        Returns
+        -------
+        dict with keys ``"inserted"`` and ``"repaired"`` reflecting actual
+        rows written/updated, which may be less than len(to_insert) /
+        len(to_repair) when races cause no-ops.
+        """
+        if not to_insert and not to_repair:
+            return {"inserted": 0, "repaired": 0}
+
+        actual_inserted = 0
+        actual_repaired = 0
+
+        with self.get_session() as session:
+            # Use session.get_bind() rather than session.bind: in SQLAlchemy 2.x
+            # the .bind attribute is deprecated and may return None on some
+            # configurations (scoped_session, etc.).  get_bind() is the correct
+            # API; it raises if the session is truly unbound, which is the right
+            # fail-closed behaviour rather than silently defaulting to SQLite.
+            dialect_name = session.get_bind().dialect.name
+
+            # Validate dialect — project only supports PostgreSQL and SQLite.
+            # Fail closed rather than silently applying SQLite dialect to an
+            # unsupported engine (e.g. MySQL, MSSQL) which may not honour the
+            # same ON CONFLICT semantics.
+            if dialect_name not in ("postgresql", "sqlite"):
+                raise ValueError(
+                    f"Unsupported database dialect '{dialect_name}'. "
+                    "apply_reconciliation_batch only supports 'postgresql' and 'sqlite'. "
+                    "Add explicit support for new dialects rather than using a silent fallback."
+                )
+
+            # --- Inserts (dialect-native conflict-do-nothing) ---
+            for raw_item in to_insert:
+                job_dict = self._normalize_reconciliation_item(raw_item)
+                job_id = job_dict.get("job_id")
+                if not job_id:
+                    continue
+
+                # Build a column-value mapping for all valid Job attributes.
+                # Use Job.__table__.c membership (actual database columns) rather
+                # than hasattr() which also matches relationships, methods,
+                # and class attributes that are NOT columns (e.g. 'history',
+                # 'is_active', 'calculate_derived_fields').  Passing those through
+                # to an INSERT values dict would produce invalid SQL.
+                _job_columns = {c.key for c in Job.__table__.c}
+                col_values: Dict[str, Any] = {"job_id": job_id, "final_state_recorded": True}
+                state_valid = False
+                for key, value in job_dict.items():
+                    if key == "job_id":
+                        continue
+                    if key == "state":
+                        try:
+                            col_values["state"] = JobState(value)
+                            state_valid = True
+                        except (ValueError, KeyError):
+                            logger.warning(
+                                "apply_reconciliation_batch: skipping job %s — "
+                                "invalid state value %r cannot be mapped to JobState. "
+                                "Row will not be inserted to avoid a NULL-state record.",
+                                job_id, value,
+                            )
+                    elif key in _job_columns:
+                        col_values[key] = value
+
+                # Fail closed: refuse to insert a row without a valid state.
+                # A NULL-state row is a data quality defect; skip the record instead.
+                if not state_valid:
+                    continue
+
+                if dialect_name == "postgresql":
+                    from sqlalchemy.dialects.postgresql import insert as pg_insert
+                    stmt = pg_insert(Job.__table__).values(**col_values)
+                    stmt = stmt.on_conflict_do_nothing(index_elements=["job_id"])
+                    result_proxy = session.execute(stmt)
+                    actual_inserted += result_proxy.rowcount if result_proxy.rowcount > 0 else 0
+                else:  # dialect_name == "sqlite" (validated above)
+                    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+                    stmt = sqlite_insert(Job.__table__).values(**col_values)
+                    stmt = stmt.on_conflict_do_nothing(index_elements=["job_id"])
+                    result_proxy = session.execute(stmt)
+                    actual_inserted += result_proxy.rowcount if result_proxy.rowcount > 0 else 0
+
+            # --- Repairs (guarded WHERE state = UNKNOWN_END, bulk UPDATE) ---
+            for raw_item in to_repair:
+                job_dict = self._normalize_reconciliation_item(raw_item)
+                job_id = job_dict.get("job_id")
+                if not job_id:
+                    continue
+
+                # Build update values (exclude job_id; normalise state).
+                # Fail closed: if the target state is missing or invalid, skip
+                # the row entirely — do NOT apply a partial UPDATE that sets
+                # final_state_recorded=True while state remains UNKNOWN_END.
+                # Use Job.__table__.c membership (actual DB columns) rather than
+                # hasattr() — see insert block comment above.
+                _job_columns = {c.key for c in Job.__table__.c}
+                update_vals: Dict[str, Any] = {}
+                state_valid = False
+                for key, value in job_dict.items():
+                    if key == "job_id":
+                        continue
+                    if key == "state":
+                        try:
+                            update_vals["state"] = JobState(value)
+                            state_valid = True
+                        except (ValueError, KeyError):
+                            logger.warning(
+                                "apply_reconciliation_batch: skipping repair of job %s — "
+                                "invalid state value %r cannot be mapped to JobState. "
+                                "Row will not be updated to avoid leaving UNKNOWN_END in a "
+                                "half-repaired state.",
+                                job_id, value,
+                            )
+                    elif key in _job_columns:
+                        update_vals[key] = value
+
+                # Fail closed: refuse to repair without a valid target state.
+                # A repair without a clear target state is ambiguous and unsafe;
+                # skip the record rather than partially updating other columns.
+                if not state_valid:
+                    continue
+
+                update_vals["final_state_recorded"] = True
+
+                # Conditional bulk UPDATE — only touches rows still in UNKNOWN_END
+                from sqlalchemy import update as sa_update
+                stmt = (
+                    sa_update(Job.__table__)
+                    .where(Job.__table__.c.job_id == job_id)
+                    .where(Job.__table__.c.state == JobState.UNKNOWN_END)
+                    .values(**update_vals)
+                )
+                result_proxy = session.execute(stmt)
+                actual_repaired += result_proxy.rowcount if result_proxy.rowcount > 0 else 0
+
+            # No explicit commit here: DatabaseManager.get_session()
+            # auto-commits on clean context-manager exit.  An explicit
+            # commit would be a silent no-op but is misleading — the contract is
+            # that get_session() owns the transaction boundary.
+
+        return {"inserted": actual_inserted, "repaired": actual_repaired}
+
+    def get_latest_successful_reconciliation_time(self) -> Optional[datetime]:
+        """Return the end_time of the most recent successful reconciliation run.
+
+        Returns None if no successful run exists in history_reconciliation_log.
+        Used to seed _last_reconciliation_completed from durable storage on
+        daemon startup, avoiding a redundant immediate run after restart.
+        """
+        from .models import HistoryReconciliationLog
+
+        with self.get_session() as session:
+            row = (
+                session.query(HistoryReconciliationLog.end_time)
+                .filter(HistoryReconciliationLog.status == "success")
+                .order_by(HistoryReconciliationLog.end_time.desc())
+                .first()
+            )
+            return row[0] if row else None
+
+    def write_reconciliation_log(self, result: "ReconciliationResult") -> None:
+        """Persist a ReconciliationResult as a history_reconciliation_log row.
+
+        This is best-effort: callers must catch any exception themselves and
+        log it without rolling back already-committed job batches.
+        """
+        from .models import HistoryReconciliationLog
+
+        # Truncate error message to column bound (500 chars)
+        err_msg = result.error_message
+        if err_msg and len(err_msg) > 500:
+            err_msg = err_msg[:497] + "..."
+
+        log_row = HistoryReconciliationLog(
+            start_time=getattr(result, "start_time", None),
+            end_time=getattr(result, "end_time", None),
+            status=result.status,
+            observed=result.observed,
+            terminal_candidates=result.terminal_candidates,
+            inserted=result.inserted,
+            repaired=result.repaired,
+            unchanged=result.unchanged,
+            parse_errors=result.parse_errors,
+            oldest_terminal_time=result.oldest_terminal_time,
+            newest_terminal_time=result.newest_terminal_time,
+            duration_seconds=result.duration_seconds,
+            error_message=err_msg,
+        )
+        with self.get_session() as session:
+            session.add(log_row)
+            session.commit()
 
 
 class JobStateInfo:
@@ -425,7 +722,7 @@ class QueueRepository(BaseRepository):
                      QueueSnapshot.timestamp >= cutoff_time)
             ).order_by(QueueSnapshot.timestamp).all()
     
-    def add_queue_snapshot(self, queue_name: str | QueueSnapshot, snapshot_data: Optional[Dict[str, Any]] = None) -> QueueSnapshot:
+    def add_queue_snapshot(self, queue_name: "Union[str, QueueSnapshot]", snapshot_data: Optional[Dict[str, Any]] = None) -> QueueSnapshot:
         """Add queue snapshot. Accepts either a QueueSnapshot or (queue_name, data)."""
         with self.get_session() as session:
             if isinstance(queue_name, QueueSnapshot):

@@ -29,6 +29,10 @@ from ..database.migrations import (
     backfill_occupied_seconds,
     backfill_run_count,
 )
+from ..history_reconciliation import HistoryReconciler
+from ..pbs_commands import PBSCommands
+from ..database.repositories import RepositoryFactory
+from ..database.model_converters import ModelConverters
 from ..utils.formatters import (
    format_duration, format_timestamp, format_memory,
    format_percentage, format_number, format_job_id, format_state
@@ -1206,6 +1210,7 @@ class DatabaseCommand(BaseCommand):
             print("  show            Show table data from database")
             print("  refresh-cache   Recalculate derived/analytical cache tables")
             print("  backfill        Backfill exit_status + outcome_class for existing jobs")
+            print("  reconcile-history  Reconcile completed-job history against PBS qstat -x")
             print("\nExamples:")
             print("  pbs-monitor database init                              # Initialize database")
             print("  pbs-monitor database status                            # Show database status")
@@ -1215,6 +1220,7 @@ class DatabaseCommand(BaseCommand):
             print("  pbs-monitor database refresh-cache                     # Refresh all cache tables")
             print("  pbs-monitor database refresh-cache -t utilization      # Refresh reservation utilization only")
             print("  pbs-monitor database refresh-cache -d 7 --dry-run     # Preview last 7 days without writing")
+            print("  pbs-monitor database reconcile-history                 # Reconcile completed-job history")
             print("\nUse 'pbs-monitor database <action> --help' for more information about each action")
             return 1
          elif subcommand == 'init':
@@ -1237,9 +1243,11 @@ class DatabaseCommand(BaseCommand):
             return self._refresh_cache(args)
          elif subcommand == 'backfill':
             return self._backfill_database(args)
+         elif subcommand == 'reconcile-history':
+            return self._reconcile_history(args)
          else:
             print(f"Unknown database subcommand: {subcommand}")
-            print("\nAvailable actions: init, migrate, status, validate, backup, restore, cleanup, show, refresh-cache, backfill")
+            print("\nAvailable actions: init, migrate, status, validate, backup, restore, cleanup, show, refresh-cache, backfill, reconcile-history")
             return 1
             
       except Exception as e:
@@ -1610,7 +1618,7 @@ class DatabaseCommand(BaseCommand):
 
       return 1 if total_errors > 0 else 0
 
-   def _refresh_utilization_cache(self, days: int, limit: int | None,
+   def _refresh_utilization_cache(self, days: int, limit: Optional[int],
                                    dry_run: bool, force: bool) -> int:
       """Refresh the reservation_utilization cache table.
 
@@ -1776,6 +1784,68 @@ class DatabaseCommand(BaseCommand):
       print(f"  Errors  : {rc_result.get('errors', 0):,}")
       print(f"  Dry-run : {rc_result.get('dry_run', dry_run)}")
       return 0
+
+   def _reconcile_history(self, args: argparse.Namespace) -> int:
+      """Run PBS full-history reconciliation (manual / on-demand).
+
+      Invokes HistoryReconciler synchronously with the same semantics as the
+      scheduled daemon run. Only F and C scheduler-terminal records are
+      imported; existing non-UNKNOWN_END rows are never mutated.
+
+      Returns 0 on success, 1 on failed reconciliation.
+
+      Uses module-level imports (HistoryReconciler, RepositoryFactory,
+      PBSCommands, ModelConverters) so that unit tests can patch them via
+      ``patch('pbs_monitor.cli.commands.<Name>')``.
+      """
+      dry_run: bool = getattr(args, "dry_run", False)
+      batch_size: int = getattr(args, "batch_size", 500)
+
+      dry_label = " (DRY RUN — no writes)" if dry_run else ""
+      print("=" * 60)
+      print(f"PBS Monitor — History Reconciliation{dry_label}")
+      print("=" * 60)
+      print(f"  batch-size : {batch_size}")
+
+      try:
+         repo_factory = RepositoryFactory(self.config)
+         job_repo = repo_factory.get_job_repository()
+
+         pbs_cmds = PBSCommands(
+            timeout=getattr(self.config.pbs, "command_timeout", 30)
+         )
+         converters = ModelConverters()
+
+         reconciler = HistoryReconciler(
+            pbs_commands=pbs_cmds,
+            repository=job_repo,
+            converter=converters.job,
+            audit_repository=job_repo,
+         )
+         result = reconciler.reconcile(dry_run=dry_run, batch_size=batch_size)
+      except Exception as exc:
+         print(f"\nError: {exc}")
+         return 1
+
+      # Print summary
+      print()
+      print("Reconciliation summary:")
+      print(f"  Status              : {result.status}")
+      print(f"  Observed (PBS)      : {result.observed:,}")
+      print(f"  Terminal candidates : {result.terminal_candidates:,}")
+      print(f"  Inserted            : {result.inserted:,}")
+      print(f"  Repaired            : {result.repaired:,}")
+      print(f"  Unchanged           : {result.unchanged:,}")
+      print(f"  Parse errors        : {result.parse_errors:,}")
+      if result.oldest_terminal_time:
+         print(f"  Oldest terminal     : {result.oldest_terminal_time.isoformat()}")
+      if result.newest_terminal_time:
+         print(f"  Newest terminal     : {result.newest_terminal_time.isoformat()}")
+      print(f"  Duration            : {result.duration_seconds:.1f}s")
+      if result.error_message:
+         print(f"  Error               : {result.error_message}")
+
+      return 0 if result.status == "success" else 1
 
 
 class HistoryCommand(BaseCommand):

@@ -1098,7 +1098,30 @@ Examples:
       help="Scan and classify without writing to the database"
    )
 
-   # Daemon command
+   # reconcile-history subcommand
+   db_reconcile_parser = database_subparsers.add_parser(
+      "reconcile-history",
+      help=(
+         "Reconcile full PBS history: insert missed terminal jobs and repair "
+         "UNKNOWN_END rows. Accepts only F/C scheduler-terminal records."
+      ),
+   )
+   db_reconcile_parser.add_argument(
+      "--dry-run",
+      action="store_true",
+      dest="dry_run",
+      default=False,
+      help="Classify and report without writing any rows to the database",
+   )
+   db_reconcile_parser.add_argument(
+      "--batch-size",
+      type=int,
+      dest="batch_size",
+      default=500,
+      help="Number of job IDs per bulk-state lookup chunk (default: 500)",
+   )
+
+
    daemon_parser = subparsers.add_parser(
       "daemon",
       help="Background data collection daemon management"

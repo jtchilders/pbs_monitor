@@ -17,7 +17,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 
-from .models import Base, Job, JobHistory, Queue, QueueSnapshot, Node, NodeSnapshot, SystemSnapshot, Reservation, ReservationHistory, ReservationUtilization, DataCollectionLog
+from .models import Base, Job, JobHistory, Queue, QueueSnapshot, Node, NodeSnapshot, SystemSnapshot, Reservation, ReservationHistory, ReservationUtilization, DataCollectionLog, HistoryReconciliationLog
 from .connection import get_database_manager, DatabaseManager
 from ..config import Config
 from ..utils.logging_setup import create_pbs_logger
@@ -64,7 +64,8 @@ class DatabaseMigration:
             'reservations',
             'reservation_history',
             'reservation_utilization',
-            'data_collection_log'
+            'data_collection_log',
+            'history_reconciliation_log',
         ]
     
     def check_schema_version(self) -> Optional[str]:
@@ -105,6 +106,9 @@ class DatabaseMigration:
         except Exception as e:
             logger.error(f"Failed to create database: {str(e)}")
             raise
+        # Ensure auxiliary table (idempotent – also handled by Base.metadata above,
+        # but explicit call guards against any future Base-exclusion).
+        self.ensure_history_reconciliation_log_table()
     
     def _create_initial_data(self) -> None:
         """No-op for initial data to avoid write issues in test environments."""
@@ -144,15 +148,15 @@ class DatabaseMigration:
         if current_version == "1.3.0":
             logger.info("Migrating from v1.3.0 to v1.4.0 (adding run_count column)")
             self.migrate_to_v1_4_run_count()
-            return
 
-        # Already at latest version
-        if current_version == "1.4.0":
-            logger.info("Database schema is up to date")
-            return
-        
-        # Unknown version
-        logger.warning(f"Unknown schema version: {current_version}")
+        # Already at latest numbered version (1.4.0), or just migrated to it.
+        # Always ensure the auxiliary audit table exists, regardless of version.
+        # This is NOT a numbered migration – the table is idempotently ensured
+        # on every migrate_to_latest() call. v1.5 is reserved for another branch.
+        self.ensure_history_reconciliation_log_table()
+
+        if current_version not in ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"):
+            logger.warning(f"Unknown schema version: {current_version}")
     
     def migrate_to_v1_1_reservations(self) -> None:
         """Add reservation tables for version 1.1"""
@@ -378,6 +382,35 @@ class DatabaseMigration:
 
         except Exception as e:
             logger.error(f"Failed to migrate to v1.4.0: {str(e)}")
+            raise
+
+    # ------------------------------------------------------------------
+    # Auxiliary audit table – idempotently ensured (not a numbered migration)
+    # v1.5 is reserved for the system-column branch; do NOT use it here.
+    # ------------------------------------------------------------------
+
+    def ensure_history_reconciliation_log_table(self) -> None:
+        """Ensure history_reconciliation_log table exists (idempotent).
+
+        This is an auxiliary table that is created alongside whatever numbered
+        schema version is current. It is NOT a numbered migration step; calling
+        this method never changes check_schema_version().
+
+        Safe to call multiple times; uses CREATE TABLE IF NOT EXISTS / DDL
+        via SQLAlchemy's checkfirst=True so it is dialect-portable.
+
+        The indexes declared in HistoryReconciliationLog.__table_args__
+        (ix_history_reconciliation_log_start_time and
+        ix_history_reconciliation_log_status) are emitted automatically by
+        ``__table__.create()`` — no separate manual index DDL is needed.
+        """
+        try:
+            HistoryReconciliationLog.__table__.create(
+                self.db_manager.engine, checkfirst=True
+            )
+            logger.debug("history_reconciliation_log table ensured")
+        except Exception as e:
+            logger.error(f"Failed to ensure history_reconciliation_log table: {e}")
             raise
 
     # ------------------------------------------------------------------
