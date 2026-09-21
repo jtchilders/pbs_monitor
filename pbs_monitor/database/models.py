@@ -557,6 +557,51 @@ class ReservationUtilization(Base):
         Index('ix_reservation_utilization_utilization', 'utilization_percentage'),
     )
 
+class HistoryReconciliationLog(Base):
+    """
+    Audit log for history reconciliation runs.
+
+    Each reconciliation attempt (scheduled or manual) writes one row.
+    A separate table is used instead of overloading data_collection_log
+    because reconciliation counters and semantics differ.
+
+    Audit-write failure is best-effort: it must not roll back successfully
+    reconciled job batches and must always be emitted to the application log.
+    """
+    __tablename__ = 'history_reconciliation_log'
+
+    id = Column(Integer, primary_key=True)
+    start_time = Column(DateTime(timezone=True), default=func.now())
+    end_time = Column(DateTime(timezone=True))
+
+    # Status: 'success' | 'failed'
+    status = Column(String(20), nullable=False, default='success')
+
+    # Candidate counts
+    observed = Column(Integer, default=0)
+    terminal_candidates = Column(Integer, default=0)
+    inserted = Column(Integer, default=0)
+    repaired = Column(Integer, default=0)
+    unchanged = Column(Integer, default=0)
+    parse_errors = Column(Integer, default=0)
+
+    # Terminal time range of candidates processed
+    oldest_terminal_time = Column(DateTime(timezone=True), nullable=True)
+    newest_terminal_time = Column(DateTime(timezone=True), nullable=True)
+
+    # Timing
+    duration_seconds = Column(Float, nullable=True)
+
+    # Error detail (bounded; never contains raw PBS payload)
+    error_message = Column(String(500), nullable=True)
+
+    # Indexes
+    __table_args__ = (
+        Index('ix_history_reconciliation_log_start_time', 'start_time'),
+        Index('ix_history_reconciliation_log_status', 'status'),
+    )
+
+
 class DataCollectionLog(Base):
     """
     Log of data collection events
@@ -613,6 +658,7 @@ __all__ = [
     'Reservation',
     'ReservationHistory',
     'ReservationUtilization',
+    'HistoryReconciliationLog',
     'DataCollectionLog',
     'JobState',
     'QueueState',

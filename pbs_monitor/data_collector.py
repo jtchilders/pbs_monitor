@@ -38,6 +38,12 @@ except ImportError as _db_import_exc:
 
 from .database.repositories import RepositoryFactory, JobStateInfo, ReservationStateInfo
 
+# Module-level import so tests can patch pbs_monitor.data_collector.HistoryReconciler
+try:
+   from .history_reconciliation import HistoryReconciler
+except ImportError:
+   HistoryReconciler = None  # type: ignore[assignment,misc]
+
 
 class DataCollector:
    """Collects and manages PBS system data"""
@@ -84,6 +90,11 @@ class DataCollector:
       self._update_lock = threading.Lock()
       self._background_update_thread: Optional[threading.Thread] = None
       self._stop_background_updates = False
+
+      # History reconciliation scheduling
+      self._reconciliation_thread: Optional[threading.Thread] = None
+      self._reconciliation_lock = threading.Lock()   # single-flight guard
+      self._last_reconciliation_completed: Optional[datetime] = None
       
       # Database integration
       if self._database_enabled:
@@ -1312,12 +1323,78 @@ class DataCollector:
       self._refresh_nodes()
       self._refresh_reservations()
    
+   def _seed_last_reconciliation_from_audit(self) -> None:
+      """Populate _last_reconciliation_completed from the durable audit table.
+
+      Called once at startup so that a daemon restart does not trigger an
+      immediate reconciliation run when a recent successful run already exists
+      in the audit log.  Safe to call even when the repository is unavailable
+      — failures are logged and swallowed.
+      """
+      if not self._database_enabled or self._repository_factory is None:
+         return
+      try:
+         job_repo = self._repository_factory.get_job_repository()
+         latest = job_repo.get_latest_successful_reconciliation_time()
+         if latest is not None:
+            # Normalise to UTC-aware datetime if necessary.
+            if latest.tzinfo is None:
+               latest = latest.replace(tzinfo=timezone.utc)
+            self._last_reconciliation_completed = latest
+            self.logger.debug(
+               "Seeded _last_reconciliation_completed from audit: %s", latest
+            )
+      except Exception as exc:
+         self.logger.warning(
+            "Could not seed last-reconciliation time from audit: %s", exc
+         )
+
+   def _is_reconciliation_worker_alive(self) -> bool:
+      """Return True when a reconciliation worker thread is currently running."""
+      return (
+         self._reconciliation_thread is not None
+         and self._reconciliation_thread.is_alive()
+      )
+
+   def _start_reconciliation_worker(self, name: str = "history-reconciler") -> None:
+      """Spawn a new reconciliation worker thread if none is currently alive.
+
+      Single-flight: if a worker is already alive, this is a no-op.
+      Stores the new thread in self._reconciliation_thread so that
+      stop_background_updates can join it.
+      """
+      if self._is_reconciliation_worker_alive():
+         self.logger.debug(
+            "Reconciliation worker already alive (%s); skipping new spawn.",
+            self._reconciliation_thread.name,
+         )
+         return
+      t = threading.Thread(
+         target=self._try_reconcile_once,
+         daemon=True,
+         name=name,
+      )
+      self._reconciliation_thread = t
+      t.start()
+
    def start_background_updates(self) -> None:
-      """Start background thread for automatic data updates"""
+      """Start background thread for automatic data updates.
+
+      Normal collection starts immediately. History reconciliation is
+      requested asynchronously afterward — it never blocks startup.
+
+      Startup behaviour:
+        1. Seed _last_reconciliation_completed from the durable audit so
+           that a recent prior success suppresses an immediate re-run.
+        2. If the interval has elapsed (or no prior success exists), start
+           an asynchronous reconciliation worker thread.
+        3. The background collection loop's periodic trigger also spawns an
+           async worker (never calling reconciliation synchronously).
+      """
       if self._background_update_thread is not None:
          self.logger.warning("Background updates already running")
          return
-      
+
       self._stop_background_updates = False
       self._background_update_thread = threading.Thread(
          target=self._background_update_loop,
@@ -1325,9 +1402,40 @@ class DataCollector:
       )
       self._background_update_thread.start()
       self.logger.info("Started background updates")
-   
+
+      # Determine whether history reconciliation is enabled.
+      db_cfg = getattr(self.config, "database", None)
+      reconciliation_enabled = (
+         self._database_enabled
+         and db_cfg is not None
+         and getattr(db_cfg, "history_reconciliation_enabled", True)
+      )
+      if not reconciliation_enabled:
+         return
+
+      # Seed last-success from the durable audit before deciding whether an
+      # immediate startup run is needed.
+      self._seed_last_reconciliation_from_audit()
+
+      # Launch startup worker only when the interval has elapsed (or no prior
+      # successful run exists in the audit).
+      interval = getattr(db_cfg, "history_reconciliation_interval_seconds", 43200)
+      last = self._last_reconciliation_completed
+      if last is None:
+         elapsed = interval + 1  # treat "never ran" as overdue
+      else:
+         elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+
+      if elapsed >= interval:
+         self._start_reconciliation_worker(name="history-reconciler-startup")
+
    def stop_background_updates(self) -> None:
-      """Stop background data updates"""
+      """Stop background data updates.
+
+      Joins the reconciliation worker for a bounded interval
+      (config.database.history_reconciliation_shutdown_timeout_seconds,
+      default 30 s). Does not wait indefinitely on qstat or DB I/O.
+      """
       if self._background_update_thread is None:
          return
       
@@ -1335,50 +1443,158 @@ class DataCollector:
       self._background_update_thread.join(timeout=5)
       self._background_update_thread = None
       self.logger.info("Stopped background updates")
+
+      # Join reconciliation thread with bounded timeout.
+      if self._reconciliation_thread is not None and self._reconciliation_thread.is_alive():
+         shutdown_timeout = 30
+         if self._database_enabled and hasattr(self.config, "database"):
+            shutdown_timeout = getattr(
+               self.config.database,
+               "history_reconciliation_shutdown_timeout_seconds",
+               30,
+            )
+         self._reconciliation_thread.join(timeout=shutdown_timeout)
+      self._reconciliation_thread = None
+
+   def _try_reconcile_once(self) -> None:
+      """Attempt a single reconciliation run with single-flight locking.
+
+      If the lock is already held (another reconciliation is running),
+      skips immediately. Failures are logged and swallowed — they must
+      never propagate to or pause normal collection.
+
+      Only advances _last_reconciliation_completed when the result
+      status is 'success', so failed runs do not reset the scheduler
+      clock.
+      """
+      if not self._reconciliation_lock.acquire(blocking=False):
+         self.logger.debug("Reconciliation already in progress; skipping")
+         return
+      try:
+         result = self._run_reconciliation()
+         if result is not None and getattr(result, "status", None) == "success":
+            self._last_reconciliation_completed = datetime.now(timezone.utc)
+      except Exception as exc:
+         self.logger.error("History reconciliation failed (isolated): %s", exc, exc_info=True)
+      finally:
+         self._reconciliation_lock.release()
+
+   def _run_reconciliation(self):
+      """Invoke HistoryReconciler with production dependencies.
+
+      Pulled into its own method so tests can replace it with a spy.
+      Returns the ReconciliationResult on success, or None when skipped.
+      Raises on unrecoverable errors.
+      """
+      if not self._database_enabled:
+         self.logger.debug("Database disabled; skipping history reconciliation")
+         return None
+
+      db_cfg = getattr(self.config, "database", None)
+      if db_cfg is not None and not getattr(db_cfg, "history_reconciliation_enabled", True):
+         self.logger.debug("History reconciliation disabled by config")
+         return None
+
+      batch_size = 500
+      if db_cfg is not None:
+         batch_size = getattr(db_cfg, "history_reconciliation_batch_size", 500)
+
+      try:
+         job_repo = self._repository_factory.get_job_repository()
+         converters = self._model_converters
+         reconciler = HistoryReconciler(
+            pbs_commands=self.pbs_commands,
+            repository=job_repo,
+            converter=converters.job,
+            audit_repository=job_repo,
+         )
+         result = reconciler.reconcile(batch_size=batch_size)
+         self.logger.info(
+            "History reconciliation: observed=%d candidates=%d inserted=%d "
+            "repaired=%d unchanged=%d errors=%d status=%s duration=%.1fs",
+            result.observed,
+            result.terminal_candidates,
+            result.inserted,
+            result.repaired,
+            result.unchanged,
+            result.parse_errors,
+            result.status,
+            result.duration_seconds,
+         )
+         return result
+      except Exception as exc:
+         self.logger.error("History reconciliation error: %s", exc, exc_info=True)
+         raise
+
+
    
+   def _run_one_background_iteration(self) -> None:
+      """Execute one pass of the background update loop body.
+
+      Extracted so tests can drive a single iteration without spawning
+      a real thread. Called by _background_update_loop on every pass.
+      """
+      # Update jobs most frequently
+      if (self._last_job_update is None or
+          (datetime.now() - self._last_job_update).total_seconds() >
+          self.config.pbs.job_refresh_interval):
+         self._refresh_jobs()
+
+      # Update nodes less frequently
+      if (self._last_node_update is None or
+          (datetime.now() - self._last_node_update).total_seconds() >
+          self.config.pbs.node_refresh_interval):
+         self._refresh_nodes()
+
+      # Update queues least frequently
+      if (self._last_queue_update is None or
+          (datetime.now() - self._last_queue_update).total_seconds() >
+          self.config.pbs.queue_refresh_interval):
+         self._refresh_queues()
+
+      # Optionally persist data if database is enabled and interval has elapsed
+      if (self._database_enabled and
+          hasattr(self.config, 'database') and
+          self.config.database.auto_persist):
+
+         # Check if auto_persist interval has elapsed
+         should_persist = (
+            self._last_auto_persist is None or
+            (datetime.now() - self._last_auto_persist).total_seconds() >
+            self.config.database.auto_persist_interval
+         )
+
+         if should_persist:
+            try:
+               self.logger.debug("Triggering periodic database collection from daemon")
+               result = self.collect_and_persist(collection_type="daemon")
+               self._last_auto_persist = datetime.now()
+               self.logger.debug(f"Periodic collection completed: {result['jobs_collected']} jobs, "
+                                f"{result['queues_collected']} queues, {result['nodes_collected']} nodes")
+            except Exception as e:
+               self.logger.error(f"Failed to persist data: {str(e)}")
+
+      # Periodic history reconciliation: trigger when the configured interval
+      # has elapsed since the last *successful* completion.
+      if self._database_enabled:
+         db_cfg = getattr(self.config, "database", None)
+         recon_enabled = db_cfg is not None and getattr(db_cfg, "history_reconciliation_enabled", True)
+         if recon_enabled:
+            interval = getattr(db_cfg, "history_reconciliation_interval_seconds", 43200)
+            last = self._last_reconciliation_completed
+            elapsed = (
+               (datetime.now(timezone.utc) - last).total_seconds()
+               if last is not None
+               else interval + 1  # treat None as "never ran" → always trigger
+            )
+            if elapsed >= interval:
+               self._start_reconciliation_worker()
+
    def _background_update_loop(self) -> None:
       """Background update loop"""
       while not self._stop_background_updates:
          try:
-            # Update jobs most frequently
-            if (self._last_job_update is None or 
-                (datetime.now() - self._last_job_update).total_seconds() > 
-                self.config.pbs.job_refresh_interval):
-               self._refresh_jobs()
-            
-            # Update nodes less frequently
-            if (self._last_node_update is None or 
-                (datetime.now() - self._last_node_update).total_seconds() > 
-                self.config.pbs.node_refresh_interval):
-               self._refresh_nodes()
-            
-            # Update queues least frequently
-            if (self._last_queue_update is None or 
-                (datetime.now() - self._last_queue_update).total_seconds() > 
-                self.config.pbs.queue_refresh_interval):
-               self._refresh_queues()
-            
-            # Optionally persist data if database is enabled and interval has elapsed
-            if (self._database_enabled and 
-                hasattr(self.config, 'database') and 
-                self.config.database.auto_persist):
-               
-               # Check if auto_persist interval has elapsed
-               should_persist = (
-                  self._last_auto_persist is None or
-                  (datetime.now() - self._last_auto_persist).total_seconds() > 
-                  self.config.database.auto_persist_interval
-               )
-               
-               if should_persist:
-                  try:
-                     self.logger.debug("Triggering periodic database collection from daemon")
-                     result = self.collect_and_persist(collection_type="daemon")
-                     self._last_auto_persist = datetime.now()
-                     self.logger.debug(f"Periodic collection completed: {result['jobs_collected']} jobs, "
-                                      f"{result['queues_collected']} queues, {result['nodes_collected']} nodes")
-                  except Exception as e:
-                     self.logger.error(f"Failed to persist data: {str(e)}")
+            self._run_one_background_iteration()
             
             # Sleep for a short interval
             time.sleep(10)

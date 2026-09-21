@@ -111,6 +111,12 @@ class DatabaseConfig:
    missing_reservation_detection: bool = True  # Enable detection of missing reservations
    missing_reservation_threshold_minutes: int = 30  # Minutes before marking reservation as missing
 
+   # History reconciliation settings
+   history_reconciliation_enabled: bool = True
+   history_reconciliation_interval_seconds: int = 43200   # 12 hours
+   history_reconciliation_batch_size: int = 500
+   history_reconciliation_shutdown_timeout_seconds: int = 30
+
 
 @dataclass
 class SlackConfig:
@@ -343,7 +349,11 @@ class Config:
             'orphaned_job_detection': True,
             'orphaned_job_threshold_minutes': 60,
             'missing_reservation_detection': True,
-            'missing_reservation_threshold_minutes': 30
+            'missing_reservation_threshold_minutes': 30,
+            'history_reconciliation_enabled': True,
+            'history_reconciliation_interval_seconds': 43200,
+            'history_reconciliation_batch_size': 500,
+            'history_reconciliation_shutdown_timeout_seconds': 30
          }
       }
       

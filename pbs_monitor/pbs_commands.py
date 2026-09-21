@@ -7,6 +7,7 @@ import subprocess
 import logging
 import os
 import re
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Union
 from pathlib import Path
 
@@ -20,6 +21,28 @@ from .utils.json_helpers import load_json_safe
 class PBSCommandError(Exception):
    """Exception raised when PBS command fails"""
    pass
+
+
+@dataclass
+class QstatDetailedResult:
+   """Result of qstat_completed_jobs_detailed().
+
+   Pairs the list of successfully-parsed PBSJob objects with a count of
+   per-record parse failures that were silently skipped by the parser.
+   Callers (e.g. HistoryReconciler) can fold ``parse_errors`` into their
+   own accounting without losing the successfully-parsed jobs.
+
+   Attributes
+   ----------
+   jobs:
+       List of PBSJob objects that parsed without error.
+   parse_errors:
+       Count of individual job records that raised an exception during
+       PBSJob.from_qstat_json() and were therefore skipped.
+   """
+
+   jobs: List[PBSJob] = field(default_factory=list)
+   parse_errors: int = 0
 
 
 class PBSCommands:
@@ -303,6 +326,68 @@ class PBSCommands:
       
       return jobs
    
+   def _fetch_completed_jobs_data(
+      self,
+      job_ids: Optional[List[str]] = None,
+   ) -> Dict[str, Any]:
+      """Fetch raw qstat -x JSON data for completed jobs.
+
+      Shared implementation used by both ``qstat_completed_jobs()`` and
+      ``qstat_completed_jobs_detailed()`` — previously each method contained
+      a near-identical copy of this fetch/parse block.
+
+      Whole-response failures raise ``PBSCommandError`` (the zero-writes
+      invariant: no parse → no writes).  Individual job-ID chunk failures
+      are logged and skipped so the rest of the batch still succeeds.
+
+      Args:
+         job_ids: If provided, query only these specific job IDs.
+                  When None, fetches the full PBS history.
+
+      Returns:
+         Dict with a ``"Jobs"`` key containing all raw job records.
+      """
+      if self.use_sample_data:
+         try:
+            return self._load_sample_data("qstat_x_f_F_json-output.json")
+         except PBSCommandError:
+            self.logger.warning("Failed to load sample completed job data, returning empty result")
+            return {"Jobs": {}}
+
+      # Note: We don't use -u option because it causes PBS to return tabular
+      # format instead of JSON.  User filtering is done in Python after parsing.
+      if job_ids:
+         # Query only specific job IDs — much smaller output than full history.
+         # Batch into chunks of 100 to avoid command-line length limits.
+         all_jobs_data: Dict[str, Any] = {}
+         chunk_size = 100
+         for i in range(0, len(job_ids), chunk_size):
+            chunk = job_ids[i:i + chunk_size]
+            command = ["/opt/pbs/bin/qstat", "-x", "-f", "-F", "json"] + chunk
+            try:
+               output = self._run_command(command)
+               chunk_data = self._parse_json_output(output, "qstat completed jobs")
+               all_jobs_data.update(chunk_data.get("Jobs", {}))
+            except PBSCommandError as e:
+               # Individual job IDs that no longer exist in PBS history will
+               # cause errors; log and continue so the other chunks succeed.
+               self.logger.debug(
+                  f"qstat chunk failed (jobs may no longer be in history): {e}"
+               )
+            except Exception as e:
+               raise PBSCommandError(f"Failed to get completed job information: {str(e)}")
+         return {"Jobs": all_jobs_data}
+      else:
+         command = ["/opt/pbs/bin/qstat", "-x", "-f", "-F", "json"]
+         try:
+            output = self._run_command(command)
+            # Whole-response parse failure raises PBSCommandError → zero writes.
+            return self._parse_json_output(output, "qstat completed jobs")
+         except PBSCommandError:
+            raise
+         except Exception as e:
+            raise PBSCommandError(f"Failed to get completed job information: {str(e)}")
+
    def qstat_completed_jobs(self, user: Optional[str] = None, project: Optional[str] = None, days: int = 7,
                             job_ids: Optional[List[str]] = None) -> List[PBSJob]:
       """
@@ -318,69 +403,85 @@ class PBSCommands:
       Returns:
          List of PBSJob objects representing completed jobs
       """
-      if self.use_sample_data:
-         try:
-            data = self._load_sample_data("qstat_x_f_F_json-output.json")
-         except PBSCommandError:
-            self.logger.warning("Failed to load sample completed job data, returning empty list")
-            return []
-      else:
-         # Note: We don't use -u option because it causes PBS to return tabular format instead of JSON
-         # User filtering is done in Python after parsing the JSON
-         if job_ids:
-            # Query only specific job IDs — much smaller output than full history.
-            # Batch into chunks of 100 to avoid command-line length limits.
-            all_jobs_data: dict = {}
-            chunk_size = 100
-            for i in range(0, len(job_ids), chunk_size):
-               chunk = job_ids[i:i + chunk_size]
-               command = ["/opt/pbs/bin/qstat", "-x", "-f", "-F", "json"] + chunk
-               try:
-                  output = self._run_command(command)
-                  chunk_data = self._parse_json_output(output, "qstat completed jobs")
-                  all_jobs_data.update(chunk_data.get("Jobs", {}))
-               except PBSCommandError as e:
-                  # Individual job IDs that no longer exist in PBS history will cause errors;
-                  # log and continue so the other chunks still succeed.
-                  self.logger.debug(f"qstat chunk failed (jobs may no longer be in history): {e}")
-               except Exception as e:
-                  raise PBSCommandError(f"Failed to get completed job information: {str(e)}")
-            data = {"Jobs": all_jobs_data}
-         else:
-            command = ["/opt/pbs/bin/qstat", "-x", "-f", "-F", "json"]
-            try:
-               output = self._run_command(command)
-               data = self._parse_json_output(output, "qstat completed jobs")
-            except PBSCommandError:
-               raise
-            except Exception as e:
-               raise PBSCommandError(f"Failed to get completed job information: {str(e)}")
-      
-      jobs = []
+      data = self._fetch_completed_jobs_data(job_ids=job_ids)
       jobs_data = data.get("Jobs", {})
-      
+
+      jobs = []
       for job_id, job_info in jobs_data.items():
          job_info["Job_Id"] = job_id  # Ensure job ID is in the data
          try:
             # For completed jobs, we don't calculate scores since they're no longer in queue
             job = PBSJob.from_qstat_json(job_info, score=None)
-            
+
             # Apply user filter if specified (works for both real PBS and sample data)
             if user and job.owner != user:
                continue
-            
+
             # Apply project filter if specified (works for both real PBS and sample data)
             if project and (not job.project or project.lower() not in job.project.lower()):
                continue
-               
+
             # Only include completed jobs (should be all of them from qstat -x, but double-check)
             if job.state.value in ['C', 'F', 'E']:  # Completed, Finished, or Exiting
                jobs.append(job)
          except Exception as e:
             self.logger.warning(f"Failed to parse completed job {job_id}: {str(e)}")
-      
+
       return jobs
-   
+
+   def qstat_completed_jobs_detailed(
+      self,
+      user: Optional[str] = None,
+      project: Optional[str] = None,
+      days: int = 7,
+      job_ids: Optional[List[str]] = None,
+   ) -> "QstatDetailedResult":
+      """Get completed job information using qstat -x, with per-record parse-error accounting.
+
+      Identical to ``qstat_completed_jobs()`` but instead of silently discarding
+      records that fail ``PBSJob.from_qstat_json()``, counts them in
+      ``QstatDetailedResult.parse_errors``.  Whole-response parse failures still
+      raise ``PBSCommandError`` (zero-writes invariant preserved).
+
+      Args:
+         user: Filter by username.
+         project: Filter by project name (partial string matching, case-sensitive).
+         days: Number of days back to look for completed jobs.
+         job_ids: If provided, query only these specific job IDs instead of
+                  full history.
+
+      Returns:
+         QstatDetailedResult with .jobs (successfully-parsed PBSJob list) and
+         .parse_errors (count of per-record failures).
+      """
+      data = self._fetch_completed_jobs_data(job_ids=job_ids)
+      jobs_data = data.get("Jobs", {})
+
+      jobs: List[PBSJob] = []
+      parse_errors: int = 0
+
+      for job_id, job_info in jobs_data.items():
+         job_info["Job_Id"] = job_id  # Ensure job ID is in the data
+         try:
+            job = PBSJob.from_qstat_json(job_info, score=None)
+
+            # Apply user filter if specified
+            if user and job.owner != user:
+               continue
+
+            # Apply project filter if specified
+            if project and (not job.project or project.lower() not in job.project.lower()):
+               continue
+
+            # Only include completed jobs (C, F, E)
+            if job.state.value in ["C", "F", "E"]:
+               jobs.append(job)
+         except Exception as e:
+            parse_errors += 1
+            self.logger.warning(f"Failed to parse completed job {job_id}: {str(e)}")
+
+      return QstatDetailedResult(jobs=jobs, parse_errors=parse_errors)
+
    def qstat_queues(self) -> List[PBSQueue]:
       """
       Get queue information using qstat
